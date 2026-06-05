@@ -33,13 +33,17 @@ Required discovery workflow:
   research question. For AI/current-events research, consider multiple passes
   across general, news, science, scientific publications, it, repos, and social
   media categories. Inspect unresponsive_engines and adapt when an engine is
-  rate-limited or blocked. Compare SearXNG candidates against Exa results
+  rate-limited or blocked. If SearXNG returns off-topic, generic, or empty
+  results, retry with source-qualified queries such as site:official-domain/path,
+  broader general+news categories, and a less restrictive time_range before
+  using that pass as evidence. Compare SearXNG candidates against Exa results
   instead of letting either source dominate.
 - Use Hermes web_extract as the Exa-backed retrieval pass. The project profile
   sets web.extract_backend to exa, so web_extract should retrieve fuller page
   content from the strongest candidates and primary-source URLs.
 - Use Browse.sh/browser automation when a promising source is JavaScript-heavy,
-  dynamically rendered, search-gated, or hard to extract through plain HTTP.
+  dynamically rendered, search-gated, hard to extract through plain HTTP, or
+  only thinly captured by web_extract.
   Prefer local Browse.sh CLI/browser sessions first; use Browserbase cloud only
   when it is configured and the task justifies it.
 

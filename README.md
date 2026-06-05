@@ -89,6 +89,16 @@ The setup script creates it with no bundled skills and no global alias. This is
 intentional: the app should not mutate your personal Hermes profile or install a
 large generic skill catalog.
 
+The project ships the profile context that makes the agent behave correctly:
+
+```text
+hermes/ainews/SOUL.md
+hermes/ainews/memories/USER.md
+```
+
+`./scripts/dev` copies those templates into the ignored runtime profile under
+`.hermes/profiles/ainews/`.
+
 To verify the profile:
 
 ```bash

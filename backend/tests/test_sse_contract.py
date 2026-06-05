@@ -192,6 +192,18 @@ def test_graph_store_rewrites_bridges_through_event_aliases(tmp_path: Path):
     assert store.list_bridges() == [saved]
 
 
+def test_graph_store_rejects_self_loop_bridges(tmp_path: Path):
+    store = GraphStore(tmp_path / "graph.sqlite")
+    store.upsert_event(_stored_event("event-a"))
+
+    saved = store.upsert_bridge(
+        {"from": "event-a", "to": "event-a", "label": "same event"}
+    )
+
+    assert saved is None
+    assert store.list_bridges() == []
+
+
 def test_graph_store_deletes_event_and_connected_bridges(tmp_path: Path):
     store = GraphStore(tmp_path / "graph.sqlite")
     store.upsert_event(_stored_event("event-a"))
@@ -411,6 +423,7 @@ def test_research_prompt_requires_search_triad_by_default(monkeypatch):
     assert "Browse.sh" in prompt
     assert "AI_NEWS_SEARXNG_SEARCH_URL" in prompt
     assert "Exa semantic discovery" in prompt
+    assert "source-qualified queries" in prompt
 
 
 def test_hermes_env_exposes_searxng_search_endpoint(monkeypatch):

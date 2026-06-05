@@ -9,8 +9,8 @@ Run:
 scripts/setup-hermes-ainews
 ```
 
-The setup script uses this repository's `.hermes` directory as the profile root
-and creates a profile named `ainews` with:
+The setup script uses this repository's `.hermes` directory as the runtime
+profile root and creates a profile named `ainews` with:
 
 ```bash
 hermes profile create ainews --no-skills --no-alias
@@ -40,6 +40,18 @@ HERMES_HOME="$PWD/.hermes/profiles/ainews" HERMES_PROFILE=ainews hermes skills l
 
 The expected result is `0 hub-installed, 0 builtin, 0 local`. Do not install the
 generic bundled skill catalog into this profile.
+
+The reusable profile context is tracked under:
+
+```text
+hermes/ainews/SOUL.md
+hermes/ainews/memories/USER.md
+```
+
+`scripts/setup-hermes-ainews` copies those files into
+`.hermes/profiles/ainews/` on each run. Commit changes to the tracked templates,
+not to `.hermes/`, because `.hermes/` also contains auth, logs, sessions,
+caches, and state databases.
 
 For a narrow AI-news research agent, use Hermes tools/providers such as Exa,
 SearXNG, Browse.sh/browser automation, STT, and Kokoro TTS through profile

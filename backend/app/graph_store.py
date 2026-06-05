@@ -48,6 +48,8 @@ class GraphStore:
             to_id = self._resolve_event_id(connection, payload["to"])
             if from_id is None or to_id is None:
                 return None
+            if from_id == to_id:
+                return None
             label = _normalize_bridge_label(str(payload["label"]))
             payload = {**payload, "from": from_id, "to": to_id, "label": label}
             key = f"{from_id}::{to_id}::{_bridge_key_label(label)}"
