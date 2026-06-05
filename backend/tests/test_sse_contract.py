@@ -140,7 +140,7 @@ def test_graph_store_hides_bridges_with_missing_endpoints(tmp_path: Path):
     assert store.list_bridges() == []
 
 
-def test_graph_store_dedupes_events_by_date_and_source_url(tmp_path: Path):
+def test_graph_store_dedupes_events_by_primary_url(tmp_path: Path):
     store = GraphStore(tmp_path / "graph.sqlite")
     canonical = _stored_event(
         "deepswe-benchmark-launch-2026-05-26",
@@ -162,19 +162,105 @@ def test_graph_store_dedupes_events_by_date_and_source_url(tmp_path: Path):
     ]
 
 
+def test_graph_store_dedupes_events_by_primary_url_even_with_different_titles(
+    tmp_path: Path,
+):
+    store = GraphStore(tmp_path / "graph.sqlite")
+    release = _stored_event(
+        "minimax-m3-release-2026-06-01",
+        title="MiniMax M3 Released: First Open-Weight Model with Frontier Coding",
+        url="https://www.minimax.io/blog/minimax-m3",
+    )
+    pricing = _stored_event(
+        "minimax-m3-pricing-2026",
+        title="MiniMax M3 Pricing: 5-10% of Frontier Closed-Source Model Costs",
+        url="https://www.minimax.io/blog/minimax-m3/",
+    )
+    store.upsert_event(release)
+
+    saved = store.upsert_event(pricing)
+
+    assert saved == release
+    assert [event["id"] for event in store.list_events()] == [
+        "minimax-m3-release-2026-06-01",
+    ]
+
+
+def test_graph_store_strips_duplicate_supporting_artifact_urls(
+    tmp_path: Path,
+):
+    store = GraphStore(tmp_path / "graph.sqlite")
+    release = _stored_event(
+        "minimax-m3-release-2026-06-01",
+        title="MiniMax M3 Released: First Open-Weight Model with Frontier Coding",
+        url="https://www.minimax.io/blog/minimax-m3",
+    )
+    pricing = _stored_event(
+        "minimax-m3-pricing-2026",
+        title="MiniMax M3 Pricing: 5-10% of Frontier Closed-Source Model Costs",
+        url="https://www.minimax.io/models/text/m3",
+    )
+    pricing["artifacts"] = [
+        {
+            "text": "Official MiniMax M3 release blog",
+            "source": "MiniMax",
+            "url": "https://www.minimax.io/blog/minimax-m3",
+        }
+    ]
+    store.upsert_event(release)
+
+    saved = store.upsert_event(pricing)
+
+    assert saved == {**pricing, "artifacts": []}
+    assert [event["id"] for event in store.list_events()] == [
+        "minimax-m3-release-2026-06-01",
+        "minimax-m3-pricing-2026",
+    ]
+
+
+def test_graph_store_aliases_primary_url_matching_existing_artifact(tmp_path: Path):
+    store = GraphStore(tmp_path / "graph.sqlite")
+    store.upsert_event(
+        {
+            **_stored_event(
+                "source-bearing-event",
+                title="Source Bearing Event",
+                url="https://example.com/source-bearing-event",
+            ),
+            "artifacts": [
+                {
+                    "text": "Detailed source",
+                    "source": "Example",
+                    "url": "https://example.com/shared-source",
+                }
+            ],
+        }
+    )
+    incoming = _stored_event(
+        "duplicate-url-event",
+        title="Duplicate URL Event",
+        url="https://example.com/shared-source/",
+    )
+
+    saved = store.upsert_event(incoming)
+
+    assert saved["id"] == "source-bearing-event"
+    assert [event["id"] for event in store.list_events()] == ["source-bearing-event"]
+
+
 def test_graph_store_rewrites_bridges_through_event_aliases(tmp_path: Path):
     store = GraphStore(tmp_path / "graph.sqlite")
     store.upsert_event(
         _stored_event(
             "canonical-event",
-            title="Canonical",
+            title="Canonical benchmark release",
             url="https://example.com/canonical",
         )
     )
     store.upsert_event(
         _stored_event(
             "duplicate-event",
-            title="Duplicate",
+            title="Canonical benchmark launches",
             url="https://example.com/canonical/",
         )
     )

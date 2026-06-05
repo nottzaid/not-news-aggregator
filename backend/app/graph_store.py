@@ -32,6 +32,7 @@ class GraphStore:
                 if row is not None:
                     return json.loads(row[0])
                 payload = {**payload, "id": canonical_id}
+            payload = _dedupe_artifacts_for_event(connection, payload)
             connection.execute(
                 """
                 INSERT INTO events (id, payload)
@@ -186,18 +187,54 @@ def _same_event_by_source(
     existing: dict[str, Any],
     incoming_urls: set[str],
 ) -> bool:
-    if str(incoming.get("date", "")) != str(existing.get("date", "")):
-        return False
-    return bool(incoming_urls & _event_urls(existing))
+    incoming_primary_url = _primary_url(incoming)
+    return bool(incoming_primary_url and incoming_primary_url in _event_urls(existing))
 
 
 def _event_urls(payload: dict[str, Any]) -> set[str]:
-    urls = {_normalize_url(payload.get("url"))}
+    urls = {_primary_url(payload)}
     for artifact in payload.get("artifacts") or []:
         if isinstance(artifact, dict):
             urls.add(_normalize_url(artifact.get("url")))
     urls.discard("")
     return urls
+
+
+def _dedupe_artifacts_for_event(
+    connection: sqlite3.Connection, payload: dict[str, Any]
+) -> dict[str, Any]:
+    event_id = str(payload["id"])
+    used_urls = _stored_urls_except(connection, event_id)
+    primary_url = _primary_url(payload)
+    if primary_url:
+        used_urls.add(primary_url)
+
+    artifacts: list[dict[str, Any]] = []
+    for artifact in payload.get("artifacts") or []:
+        if not isinstance(artifact, dict):
+            continue
+        url = _normalize_url(artifact.get("url"))
+        if not url or url in used_urls:
+            continue
+        used_urls.add(url)
+        artifacts.append(artifact)
+    return {**payload, "artifacts": artifacts}
+
+
+def _stored_urls_except(
+    connection: sqlite3.Connection, excluded_event_id: str
+) -> set[str]:
+    rows = connection.execute(
+        "SELECT id, payload FROM events WHERE id != ?", (excluded_event_id,)
+    ).fetchall()
+    urls: set[str] = set()
+    for _event_id, raw_payload in rows:
+        urls.update(_event_urls(json.loads(raw_payload)))
+    return urls
+
+
+def _primary_url(payload: dict[str, Any]) -> str:
+    return _normalize_url(payload.get("url"))
 
 
 def _normalize_url(value: Any) -> str:
