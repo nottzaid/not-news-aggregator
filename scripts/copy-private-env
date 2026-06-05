@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+touch .env
+chmod 600 .env
+
+copy_key() {
+  local key="$1"
+  if grep -q "^${key}=" .env; then
+    return
+  fi
+  local line
+  line="$(grep -m1 "^${key}=" "$HOME/.hermes/.env" || true)"
+  if [[ -n "$line" ]]; then
+    printf '%s\n' "$line" >> .env
+  fi
+}
+
+copy_key EXA_API_KEY
+copy_key GROQ_API_KEY
+copy_key SEARXNG_URL
+copy_key OPENCODE_GO_API_KEY
+
+grep -q '^HERMES_PROFILE=' .env || printf '%s\n' 'HERMES_PROFILE=ainews' >> .env
+grep -q '^HERMES_HOME=' .env || printf '%s\n' 'HERMES_HOME=.hermes' >> .env
+grep -q '^STT_GROQ_MODEL=' .env || printf '%s\n' 'STT_GROQ_MODEL=whisper-large-v3-turbo' >> .env
+grep -q '^GROQ_WHISPER_MODEL=' .env || printf '%s\n' 'GROQ_WHISPER_MODEL=whisper-large-v3-turbo' >> .env
+grep -q '^AI_NEWS_ENABLE_HERMES=' .env || printf '%s\n' 'AI_NEWS_ENABLE_HERMES=0' >> .env
+
+echo "Updated private .env without printing secret values."

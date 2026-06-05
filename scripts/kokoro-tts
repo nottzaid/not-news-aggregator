@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+from urllib.error import URLError
+
+
+DEFAULT_SERVER_URL = "http://127.0.0.1:8890"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Project-local Kokoro TTS bridge.")
+    parser.add_argument("--input", required=True, help="UTF-8 text input file.")
+    parser.add_argument("--output", required=True, help="Audio output path.")
+    parser.add_argument("--voice", default="", help="Kokoro voice id.")
+    parser.add_argument("--model", default="", help="TTS model id.")
+    parser.add_argument("--speed", default="", help="Speech speed.")
+    args = parser.parse_args()
+
+    input_path = Path(args.input)
+    output_path = Path(args.output)
+    text = input_path.read_text(encoding="utf-8").strip()
+    if not text:
+        raise SystemExit("No text provided to Kokoro TTS.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    base_url = _server_base_url()
+    if base_url:
+        _synthesize_via_server(
+            base_url,
+            text,
+            output_path,
+            voice=_voice(args.voice),
+            model=args.model or os.getenv("KOKORO_TTS_MODEL", "kokoro"),
+            speed=_speed(args.speed),
+        )
+    else:
+        _synthesize_via_cli(
+            input_path,
+            output_path,
+            voice=_voice(args.voice),
+            speed=_speed(args.speed),
+        )
+
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise SystemExit(f"Kokoro TTS produced no audio at {output_path}")
+    return 0
+
+
+def _server_base_url() -> str:
+    configured = os.getenv("KOKORO_TTS_BASE_URL", "").rstrip("/")
+    if configured:
+        return configured
+    if _server_healthy(DEFAULT_SERVER_URL):
+        return DEFAULT_SERVER_URL
+    if _autostart_enabled() and _start_default_server():
+        return DEFAULT_SERVER_URL
+    return ""
+
+
+def _server_healthy(base_url: str) -> bool:
+    request = urllib.request.Request(f"{base_url}/health", method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=_server_health_timeout()) as response:
+            return response.status == 200
+    except (OSError, TimeoutError, URLError):
+        return False
+
+
+def _autostart_enabled() -> bool:
+    return os.getenv("KOKORO_TTS_AUTOSTART_SERVER", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _start_default_server() -> bool:
+    python = Path.home() / "kokoro-tts" / "bin" / "python"
+    server = Path.home() / "kokoro-tts" / "server.py"
+    if not python.exists() or not server.exists():
+        return False
+    subprocess.Popen(
+        [str(python), str(server)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + _server_start_timeout()
+    while time.monotonic() < deadline:
+        if _server_healthy(DEFAULT_SERVER_URL):
+            return True
+        time.sleep(0.35)
+    return False
+
+
+def _server_health_timeout() -> float:
+    try:
+        return max(0.1, float(os.getenv("KOKORO_TTS_SERVER_HEALTH_TIMEOUT", "2.0")))
+    except ValueError:
+        return 2.0
+
+
+def _server_start_timeout() -> float:
+    try:
+        return max(0.0, float(os.getenv("KOKORO_TTS_SERVER_START_TIMEOUT", "45")))
+    except ValueError:
+        return 45.0
+
+
+def _synthesize_via_server(
+    base_url: str,
+    text: str,
+    output_path: Path,
+    *,
+    voice: str,
+    model: str,
+    speed: float,
+) -> None:
+    fmt = output_path.suffix.lower().lstrip(".") or "wav"
+    payload = {
+        "model": model,
+        "input": text,
+        "voice": voice,
+        "response_format": fmt,
+        "speed": speed,
+    }
+    request = urllib.request.Request(
+        f"{base_url}/v1/audio/speech",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=90) as response:
+        output_path.write_bytes(response.read())
+
+
+def _synthesize_via_cli(
+    input_path: Path,
+    output_path: Path,
+    *,
+    voice: str,
+    speed: float,
+) -> None:
+    executable = (
+        os.getenv("KOKORO_TTS_BIN")
+        or _default_kokoro_bin()
+    )
+    command = [
+        executable,
+        "--input-file",
+        str(input_path),
+        "--output-file",
+        str(output_path),
+        "--voice",
+        voice,
+        "--speed",
+        str(speed),
+    ]
+    subprocess.run(command, check=True)
+
+
+def _default_kokoro_bin() -> str:
+    local = Path.home() / "kokoro-tts" / "bin" / "kokoro"
+    if local.exists():
+        return str(local)
+    executable = shutil.which("kokoro")
+    if executable:
+        return executable
+    raise SystemExit(
+        "Could not find Kokoro TTS. Set KOKORO_TTS_BIN or KOKORO_TTS_BASE_URL."
+    )
+
+
+def _voice(configured: str) -> str:
+    return (
+        configured
+        or os.getenv("KOKORO_TTS_VOICE")
+        or "af_heart"
+    )
+
+
+def _speed(configured: str) -> float:
+    value = configured or os.getenv("KOKORO_TTS_SPEED") or "1.0"
+    try:
+        return float(value)
+    except ValueError:
+        return 1.0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

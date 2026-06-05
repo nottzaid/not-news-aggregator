@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+image="${SEARXNG_IMAGE:-docker.io/searxng/searxng:latest}"
+port="${SEARXNG_PORT:-}"
+if [[ -z "$port" && "${SEARXNG_URL:-}" =~ :([0-9]+)(/)?$ ]]; then
+  port="${BASH_REMATCH[1]}"
+fi
+port="${port:-8889}"
+name="${SEARXNG_CONTAINER_NAME:-ai-news-canvas-searxng-${port}}"
+settings_dir="$PWD/searxng"
+settings_file="$settings_dir/settings.yml"
+
+runtime=""
+if command -v podman >/dev/null 2>&1; then
+  runtime="podman"
+elif command -v docker >/dev/null 2>&1; then
+  runtime="docker"
+else
+  echo "podman or docker is required to run SearXNG." >&2
+  exit 1
+fi
+
+init_settings() {
+  mkdir -p "$settings_dir"
+  if [[ -f "$settings_file" ]]; then
+    return
+  fi
+  secret="$(od -An -N48 -tx1 /dev/urandom | tr -d ' \n')"
+  sed "s/__SEARXNG_SECRET_KEY__/$secret/g" \
+    "$settings_dir/settings.yml.example" > "$settings_file"
+}
+
+case "${1:-start}" in
+  init)
+    init_settings
+    echo "$settings_file"
+    ;;
+  start)
+    init_settings
+    if "$runtime" container exists "$name" >/dev/null 2>&1; then
+      "$runtime" start "$name" >/dev/null
+    else
+      "$runtime" run -d \
+        --name "$name" \
+        -p "127.0.0.1:${port}:8080" \
+        -v "$settings_dir:/etc/searxng:Z" \
+        "$image" >/dev/null
+    fi
+    echo "SearXNG: http://127.0.0.1:${port}"
+    ;;
+  stop)
+    "$runtime" stop "$name" >/dev/null 2>&1 || true
+    ;;
+  restart)
+    "$0" stop
+    "$0" start
+    ;;
+  status)
+    "$runtime" ps --filter "name=$name"
+    ;;
+  test)
+    curl -fsS --max-time 10 "http://127.0.0.1:${port}/search?q=searxng&format=json" >/dev/null
+    echo "SearXNG JSON API is reachable."
+    ;;
+  *)
+    echo "Usage: scripts/searxng [init|start|stop|restart|status|test]" >&2
+    exit 2
+    ;;
+esac

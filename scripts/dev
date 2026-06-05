@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$PWD/.uv-cache}"
+
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
+scripts/setup-hermes-ainews >/dev/null
+scripts/searxng start >/dev/null
+
+scripts/backend &
+backend_pid=$!
+trap 'kill "$backend_pid" 2>/dev/null || true' EXIT
+
+flutter run -d linux --dart-define=AI_NEWS_GRAPH_STREAM_URL="http://127.0.0.1:${AI_NEWS_BACKEND_PORT:-8765}/graph/stream"
