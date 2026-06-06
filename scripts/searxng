@@ -33,6 +33,36 @@ init_settings() {
     "$settings_dir/settings.yml.example" > "$settings_file"
 }
 
+container_exists() {
+  "$runtime" container inspect "$name" >/dev/null 2>&1
+}
+
+settings_mount_source() {
+  "$runtime" inspect "$name" \
+    --format '{{range .Mounts}}{{if eq .Destination "/etc/searxng"}}{{.Source}}{{end}}{{end}}' \
+    2>/dev/null || true
+}
+
+ensure_container_uses_current_settings() {
+  local mount
+
+  if ! container_exists; then
+    return
+  fi
+
+  mount="$(settings_mount_source)"
+  if [[ "$mount" == "$settings_dir" ]]; then
+    return
+  fi
+
+  if [[ -n "$mount" ]]; then
+    echo "Recreating SearXNG container $name; it points at $mount instead of $settings_dir." >&2
+  else
+    echo "Recreating SearXNG container $name; it is missing the expected /etc/searxng mount." >&2
+  fi
+  "$runtime" rm -f "$name" >/dev/null
+}
+
 case "${1:-start}" in
   init)
     init_settings
@@ -40,7 +70,8 @@ case "${1:-start}" in
     ;;
   start)
     init_settings
-    if "$runtime" container exists "$name" >/dev/null 2>&1; then
+    ensure_container_uses_current_settings
+    if container_exists; then
       "$runtime" start "$name" >/dev/null
     else
       "$runtime" run -d \
