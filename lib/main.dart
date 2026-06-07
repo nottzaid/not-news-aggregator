@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
@@ -56,14 +57,13 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
   late final CanvasGraphRepository _graphRepository;
   late final ResearchSessionClient _researchSessionClient;
   late final AudioRecorder _audioRecorder;
+  late final _CanvasViewportController _canvasViewport;
   late Map<String, Offset> _basePositions;
   List<ResearchEvent> _events = fixtureEvents;
   List<EventBridge> _bridges = fixtureBridges;
   List<String> _progressMessages = const [];
   bool _hermesPanelOpen = false;
   StreamSubscription<CanvasGraphState>? _graphSubscription;
-  Offset _camera = Offset.zero;
-  double _zoom = 1;
   Set<String> _sessionGeneratedEventIds = {};
   Set<String> _sessionFocusEventIds = {};
   Set<String>? _pendingFocusEventIds;
@@ -80,6 +80,12 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
   String? _motionToActiveId;
   Map<String, EventLayout>? _motionFromLayouts;
   Map<String, EventLayout>? _motionToLayouts;
+  Map<String, EventLayout>? _settledLayouts;
+  List<ResearchEvent>? _settledLayoutEvents;
+  Map<String, Offset>? _settledLayoutBasePositions;
+  String? _settledLayoutActiveId;
+  Map<String, double> _settledExpansionProgresses = const {};
+  String? _settledExpansionActiveId;
   Timer? _collapseTimer;
   Offset? _panStart;
   Offset? _cameraStart;
@@ -95,6 +101,7 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
     _graphRepository = CanvasGraphRepository();
     _researchSessionClient = const ResearchSessionClient();
     _audioRecorder = AudioRecorder();
+    _canvasViewport = _CanvasViewportController();
     _basePositions = generateBasePositions(_events, bridges: _bridges);
     _motion = AnimationController(
       vsync: this,
@@ -130,8 +137,9 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
           return;
         }
         final progress = Curves.easeInOutCubic.transform(_cameraMotion.value);
-        setState(
-            () => _camera = _clampedCamera(Offset.lerp(from, to, progress)!));
+        _canvasViewport.setCamera(
+          _clampedCamera(Offset.lerp(from, to, progress)!),
+        );
       })
       ..addStatusListener((status) {
         if (status == AnimationStatus.completed ||
@@ -164,17 +172,18 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
     _artifactHover.dispose();
     _bridgeFlow.dispose();
     _cameraMotion.dispose();
+    _canvasViewport.dispose();
     _motion.dispose();
     super.dispose();
   }
 
+  Offset get _camera => _canvasViewport.camera;
+
+  double get _zoom => _canvasViewport.zoom;
+
   @override
   Widget build(BuildContext context) {
-    final targetLayouts = displayLayout(
-      events: _events,
-      basePositions: _basePositions,
-      activeId: _activeId,
-    );
+    final targetLayouts = _settledDisplayLayouts();
     final activeLayout =
         _activeId == null ? null : _interactiveLayouts()[_activeId!];
 
@@ -248,9 +257,14 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
                         RepaintBoundary(
                           child: CustomPaint(
                             isComplex: true,
-                            painter: EventCanvasPainter(
+                            painter: _EventCanvasPainter(
                               repaint: Listenable.merge(
-                                  [_bridgeFlow, _artifactHover]),
+                                [
+                                  _bridgeFlow,
+                                  _artifactHover,
+                                  _canvasViewport,
+                                ],
+                              ),
                               events: _events,
                               bridges: _bridges,
                               layouts: animatedLayouts,
@@ -259,8 +273,7 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
                               hoveredArtifactUrl: _hoveredArtifactUrl,
                               artifactHover: _artifactHover,
                               expansionProgresses: expansionProgresses,
-                              camera: _camera,
-                              zoom: _zoom,
+                              viewport: _canvasViewport,
                               bridgeFlow: _bridgeFlow,
                             ),
                           ),
@@ -296,7 +309,7 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
                 onCancel: _cancelRecording,
               ),
               _ZoomControls(
-                zoom: _zoom,
+                zoom: _canvasViewport.zoomListenable,
                 onZoomIn: () => _zoomBy(1.18, size.center(Offset.zero)),
                 onZoomOut: () => _zoomBy(1 / 1.18, size.center(Offset.zero)),
                 onReset: () => _resetZoom(size),
@@ -475,7 +488,7 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
 
   void _setCamera(Offset camera) {
     _cameraMotion.stop();
-    setState(() => _camera = _clampedCamera(camera));
+    _canvasViewport.setCamera(_clampedCamera(camera));
   }
 
   void _handleScrollZoom(Offset screenPoint, Offset scrollDelta, Size size) {
@@ -549,10 +562,10 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
           (anchor.dy - nextTransform.origin.dy) / nextTransform.scale,
         );
 
-    setState(() {
-      _zoom = nextZoom;
-      _camera = _clampedCamera(nextCamera);
-    });
+    _canvasViewport.setView(
+      camera: _clampedCamera(nextCamera),
+      zoom: nextZoom,
+    );
   }
 
   Offset _clampedCamera(Offset camera) {
@@ -611,14 +624,16 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
 
   void _animateActiveChange(String? nextId) {
     final from = _currentLayouts(
-      fallback: displayLayout(
-        events: _events,
-        basePositions: _basePositions,
-        activeId: _activeId,
-      ),
+      fallback: _settledDisplayLayouts(),
     );
     final previousId = _activeId;
     final to = displayLayout(
+      events: _events,
+      basePositions: _basePositions,
+      activeId: nextId,
+    );
+    _cacheSettledDisplayLayouts(
+      to,
       events: _events,
       basePositions: _basePositions,
       activeId: nextId,
@@ -658,19 +673,57 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
 
   Map<String, EventLayout> _interactiveLayouts() {
     return _currentLayouts(
-      fallback: displayLayout(
-        events: _events,
-        basePositions: _basePositions,
-        activeId: _activeId,
-      ),
+      fallback: _settledDisplayLayouts(),
     );
+  }
+
+  Map<String, EventLayout> _settledDisplayLayouts() {
+    final cached = _settledLayouts;
+    if (cached != null &&
+        identical(_settledLayoutEvents, _events) &&
+        identical(_settledLayoutBasePositions, _basePositions) &&
+        _settledLayoutActiveId == _activeId) {
+      return cached;
+    }
+
+    final layouts = displayLayout(
+      events: _events,
+      basePositions: _basePositions,
+      activeId: _activeId,
+    );
+    _cacheSettledDisplayLayouts(
+      layouts,
+      events: _events,
+      basePositions: _basePositions,
+      activeId: _activeId,
+    );
+    return layouts;
+  }
+
+  void _cacheSettledDisplayLayouts(
+    Map<String, EventLayout> layouts, {
+    required List<ResearchEvent> events,
+    required Map<String, Offset> basePositions,
+    required String? activeId,
+  }) {
+    _settledLayouts = layouts;
+    _settledLayoutEvents = events;
+    _settledLayoutBasePositions = basePositions;
+    _settledLayoutActiveId = activeId;
   }
 
   Map<String, double> _expansionProgresses() {
     if (_motionFromActiveId == null && _motionToActiveId == null) {
-      return {
-        if (_activeId != null) _activeId!: 1,
-      };
+      if (_activeId == null) {
+        _settledExpansionActiveId = null;
+        _settledExpansionProgresses = const {};
+        return _settledExpansionProgresses;
+      }
+      if (_settledExpansionActiveId != _activeId) {
+        _settledExpansionActiveId = _activeId;
+        _settledExpansionProgresses = {_activeId!: 1};
+      }
+      return _settledExpansionProgresses;
     }
 
     final progress = Curves.easeOutCubic.transform(_motion.value);
@@ -846,10 +899,19 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
       _motion.stop();
       _cameraMotion.stop();
       _bridgeFlow.stop();
+      _canvasViewport.setView(camera: Offset.zero, zoom: 1);
+      const emptyEvents = <ResearchEvent>[];
+      const emptyPositions = <String, Offset>{};
+      _cacheSettledDisplayLayouts(
+        const <String, EventLayout>{},
+        events: emptyEvents,
+        basePositions: emptyPositions,
+        activeId: null,
+      );
       setState(() {
-        _events = const [];
+        _events = emptyEvents;
         _bridges = const [];
-        _basePositions = const {};
+        _basePositions = emptyPositions;
         _progressMessages = const [];
         _sessionGeneratedEventIds = {};
         _sessionFocusEventIds = {};
@@ -857,8 +919,6 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
         _autoFollowGeneratedCluster = true;
         _activeId = null;
         _hoveredArtifactUrl = null;
-        _camera = Offset.zero;
-        _zoom = 1;
         _sessionRunning = false;
         _sessionMessage = 'Canvas cleared.';
       });
@@ -908,13 +968,15 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
         _activeId == null || state.events.any((event) => event.id == _activeId);
     final nextActiveId = hasActiveEvent ? _activeId : null;
     final fromLayouts = _currentLayouts(
-      fallback: displayLayout(
-        events: _events,
-        basePositions: _basePositions,
-        activeId: _activeId,
-      ),
+      fallback: _settledDisplayLayouts(),
     );
     final toLayouts = displayLayout(
+      events: state.events,
+      basePositions: nextPositions,
+      activeId: nextActiveId,
+    );
+    _cacheSettledDisplayLayouts(
+      toLayouts,
       events: state.events,
       basePositions: nextPositions,
       activeId: nextActiveId,
@@ -1042,8 +1104,8 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
   }
 }
 
-class EventCanvasPainter extends CustomPainter {
-  EventCanvasPainter({
+class _EventCanvasPainter extends CustomPainter {
+  _EventCanvasPainter({
     required Listenable repaint,
     required this.events,
     required this.bridges,
@@ -1053,8 +1115,7 @@ class EventCanvasPainter extends CustomPainter {
     required this.hoveredArtifactUrl,
     required this.artifactHover,
     required this.expansionProgresses,
-    required this.camera,
-    required this.zoom,
+    required this.viewport,
     required this.bridgeFlow,
   }) : super(repaint: repaint);
 
@@ -1066,35 +1127,42 @@ class EventCanvasPainter extends CustomPainter {
   final String? hoveredArtifactUrl;
   final Animation<double> artifactHover;
   final Map<String, double> expansionProgresses;
-  final Offset camera;
-  final double zoom;
+  final _CanvasViewportController viewport;
   final Animation<double> bridgeFlow;
 
+  static const _textCacheLimit = 2048;
   static final Map<String, TextPainter> _textCache = {};
 
   @override
   void paint(Canvas canvas, Size size) {
+    final camera = viewport.camera;
+    final zoom = viewport.zoom;
     final transform = _CanvasTransform(size: size, camera: camera, zoom: zoom);
+    final visibleWorldBounds = Rect.fromPoints(
+      transform.screenToWorld(Offset.zero),
+      transform.screenToWorld(Offset(size.width, size.height)),
+    ).inflate(220 / transform.scale);
+
     canvas.save();
     canvas.translate(transform.origin.dx, transform.origin.dy);
     canvas.scale(transform.scale);
     canvas.translate(-camera.dx, -camera.dy);
 
-    _paintGrid(canvas);
-    _paintBridges(canvas);
-    _paintEvents(canvas);
+    _paintGrid(canvas, visibleWorldBounds);
+    _paintBridges(canvas, visibleWorldBounds);
+    _paintEvents(canvas, visibleWorldBounds);
 
     canvas.restore();
   }
 
-  void _paintGrid(Canvas canvas) {
+  void _paintGrid(Canvas canvas, Rect visibleWorldBounds) {
     final paint = Paint()
       ..color = const Color(0x09171514)
       ..strokeWidth = 1;
-    final startX = ((camera.dx - 720) / 48).floor() * 48.0;
-    final endX = camera.dx + canvasSize.width + 720;
-    final startY = ((camera.dy - 720) / 48).floor() * 48.0;
-    final endY = camera.dy + canvasSize.height + 720;
+    final startX = (visibleWorldBounds.left / 48).floor() * 48.0;
+    final endX = visibleWorldBounds.right;
+    final startY = (visibleWorldBounds.top / 48).floor() * 48.0;
+    final endY = visibleWorldBounds.bottom;
 
     for (var x = startX; x <= endX; x += 48) {
       canvas.drawLine(
@@ -1112,11 +1180,17 @@ class EventCanvasPainter extends CustomPainter {
     }
   }
 
-  void _paintBridges(Canvas canvas) {
+  void _paintBridges(Canvas canvas, Rect visibleWorldBounds) {
     for (final bridge in bridges) {
       final from = layouts[bridge.from];
       final to = layouts[bridge.to];
       if (from == null || to == null) {
+        continue;
+      }
+      final bridgeBounds = Rect.fromCircle(center: from.display, radius: 120)
+          .expandToInclude(Rect.fromCircle(center: to.display, radius: 120))
+          .inflate(96);
+      if (!bridgeBounds.overlaps(visibleWorldBounds)) {
         continue;
       }
       final activeProgress = _bridgeProgress(bridge);
@@ -1145,12 +1219,16 @@ class EventCanvasPainter extends CustomPainter {
     return activeId == bridgeActiveId ? 1 : 0;
   }
 
-  void _paintEvents(Canvas canvas) {
+  void _paintEvents(Canvas canvas, Rect visibleWorldBounds) {
     for (final event in events) {
       final layout = layouts[event.id]!;
       final openProgress = event.canExpand
           ? (expansionProgresses[event.id] ?? 0).clamp(0.0, 1.0)
           : 0.0;
+      if (!_eventPaintBounds(layout, openProgress)
+          .overlaps(visibleWorldBounds)) {
+        continue;
+      }
       final color = Color(event.color);
 
       canvas.save();
@@ -1222,6 +1300,15 @@ class EventCanvasPainter extends CustomPainter {
 
       canvas.restore();
     }
+  }
+
+  Rect _eventPaintBounds(EventLayout layout, double openProgress) {
+    final expandedRadius = layout.radius * openProgress;
+    final labelRadius = _lerpDouble(124, 28, openProgress);
+    return Rect.fromCircle(
+      center: layout.display,
+      radius: math.max(expandedRadius, labelRadius),
+    );
   }
 
   void _paintArtifact(
@@ -1329,7 +1416,7 @@ class EventCanvasPainter extends CustomPainter {
       textAlign: TextAlign.center,
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: maxWidth);
-    if (_textCache.length > 96) {
+    if (_textCache.length >= _textCacheLimit) {
       _textCache.clear();
     }
     _textCache[key] = painter;
@@ -1360,15 +1447,14 @@ class EventCanvasPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(EventCanvasPainter oldDelegate) {
+  bool shouldRepaint(_EventCanvasPainter oldDelegate) {
     return oldDelegate.layouts != layouts ||
         oldDelegate.activeId != activeId ||
         oldDelegate.bridgeActiveId != bridgeActiveId ||
         oldDelegate.hoveredArtifactUrl != hoveredArtifactUrl ||
         oldDelegate.artifactHover != artifactHover ||
         oldDelegate.expansionProgresses != expansionProgresses ||
-        oldDelegate.camera != camera ||
-        oldDelegate.zoom != zoom ||
+        oldDelegate.viewport != viewport ||
         oldDelegate.bridgeFlow != bridgeFlow;
   }
 }
@@ -1851,7 +1937,7 @@ class _ZoomControls extends StatelessWidget {
     required this.onClear,
   });
 
-  final double zoom;
+  final ValueListenable<double> zoom;
   final VoidCallback onZoomIn;
   final VoidCallback onZoomOut;
   final VoidCallback onReset;
@@ -1888,13 +1974,18 @@ class _ZoomControls extends StatelessWidget {
             SizedBox(
               width: 54,
               child: Center(
-                child: Text(
-                  '${(zoom * 100).round()}%',
-                  style: const TextStyle(
-                    color: Color(0xff332f2b),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                  ),
+                child: ValueListenableBuilder<double>(
+                  valueListenable: zoom,
+                  builder: (context, value, _) {
+                    return Text(
+                      '${(value * 100).round()}%',
+                      style: const TextStyle(
+                        color: Color(0xff332f2b),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    );
+                  },
                 ),
               ),
             ),
@@ -1951,6 +2042,50 @@ class _ZoomIconButton extends StatelessWidget {
         icon: Icon(icon),
       ),
     );
+  }
+}
+
+class _CanvasViewportController extends ChangeNotifier {
+  _CanvasViewportController() : zoomListenable = ValueNotifier<double>(1);
+
+  final ValueNotifier<double> zoomListenable;
+  Offset _camera = Offset.zero;
+  double _zoom = 1;
+
+  Offset get camera => _camera;
+
+  double get zoom => _zoom;
+
+  void setCamera(Offset camera) {
+    if (_camera == camera) {
+      return;
+    }
+    _camera = camera;
+    notifyListeners();
+  }
+
+  void setView({
+    required Offset camera,
+    required double zoom,
+  }) {
+    final cameraChanged = _camera != camera;
+    final zoomChanged = _zoom != zoom;
+    if (!cameraChanged && !zoomChanged) {
+      return;
+    }
+
+    _camera = camera;
+    if (zoomChanged) {
+      _zoom = zoom;
+      zoomListenable.value = zoom;
+    }
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    zoomListenable.dispose();
+    super.dispose();
   }
 }
 

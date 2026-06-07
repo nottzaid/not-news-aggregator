@@ -8,6 +8,10 @@ const canvasSize = Size(1400, 900);
 const canvasPadding = 86.0;
 const dotSafeRadius = 96.0;
 const eventCollisionRadius = 92.0;
+const _artifactLayoutCacheLimit = 512;
+
+final _artifactLayoutCache =
+    <String, ({List<ArtifactLayout> artifacts, double radius})>{};
 
 class ArtifactLayout {
   const ArtifactLayout({
@@ -355,7 +359,7 @@ Map<String, EventLayout> displayLayout({
 }) {
   final layouts = <String, EventLayout>{};
   for (final event in events) {
-    final artifactMetrics = layoutArtifacts(event);
+    final artifactMetrics = _cachedLayoutArtifacts(event);
     layouts[event.id] = EventLayout(
       event: event,
       base: basePositions[event.id]!,
@@ -453,6 +457,40 @@ Map<String, EventLayout> displayLayout({
   }
 
   return layouts;
+}
+
+({List<ArtifactLayout> artifacts, double radius}) _cachedLayoutArtifacts(
+  ResearchEvent event,
+) {
+  final key = _artifactLayoutCacheKey(event);
+  final cached = _artifactLayoutCache[key];
+  if (cached != null) {
+    return cached;
+  }
+
+  final metrics = layoutArtifacts(event);
+  if (_artifactLayoutCache.length >= _artifactLayoutCacheLimit) {
+    _artifactLayoutCache.clear();
+  }
+  _artifactLayoutCache[key] = metrics;
+  return metrics;
+}
+
+String _artifactLayoutCacheKey(ResearchEvent event) {
+  final buffer = StringBuffer()
+    ..write(event.id)
+    ..write('\u0000')
+    ..write(event.artifacts.length);
+  for (final artifact in event.artifacts) {
+    buffer
+      ..write('\u0000')
+      ..write(artifact.text)
+      ..write('\u0000')
+      ..write(artifact.source)
+      ..write('\u0000')
+      ..write(artifact.url);
+  }
+  return buffer.toString();
 }
 
 class _CollisionObstacle {
