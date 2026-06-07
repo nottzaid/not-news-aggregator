@@ -1,9 +1,10 @@
 # Not News Aggregator
 
-Not News Aggregator is a Linux Flutter canvas for agentic research. You speak
-or type a question, Hermes researches it with Exa, SearXNG, and Browse.sh, then
-streams the result into a living graph of events, source artifacts, and
-relationships.
+Not News Aggregator is a Linux Flutter canvas for agentic research. You speak a
+question from the GUI, Hermes researches it with Exa, SearXNG, and Browse.sh,
+then streams the result into a living graph of events, source artifacts, and
+relationships. The backend also exposes a prompt-based research stream for
+direct API use.
 
 This is not a feed reader. The canvas is meant to grow from research sessions:
 related events join existing clusters, unrelated topics form separate regions,
@@ -159,8 +160,8 @@ Static analysis:
 flutter analyze
 ```
 
-`flutter analyze` may report existing informational warnings for the web SSE
-shim. The Linux GUI is the primary target for this prototype.
+Static analysis should pass cleanly. The Linux GUI is the primary target for
+this prototype.
 
 ## Repository Hygiene
 
