@@ -1337,17 +1337,6 @@ class _EventCanvasPainter extends CustomPainter {
           ),
       );
 
-      // Marker ring — light hairline, or saturated when selected.
-      canvas.drawCircle(
-        Offset.zero,
-        nodeRadius + 4,
-        Paint()
-          ..color = (isActive ? color : _inkText)
-              .withValues(alpha: isActive ? 0.6 : 0.16)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = isActive ? 1.7 : 1.1,
-      );
-
       // Filled node.
       canvas.drawCircle(
         Offset.zero,
