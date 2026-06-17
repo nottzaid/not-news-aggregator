@@ -634,7 +634,7 @@ List<String> wrapLines(String content, int maxChars) {
 }
 
 ArtifactLayout _artifactLayout(SourceArtifact artifact) {
-  final lines = wrapLines(artifact.text, 12);
+  final lines = _optimalArtifactLines(artifact.text);
   final radius = _textRadius(lines, 11, 16);
   return ArtifactLayout(
     artifact: artifact,
@@ -644,12 +644,55 @@ ArtifactLayout _artifactLayout(SourceArtifact artifact) {
   );
 }
 
+List<String> _optimalArtifactLines(String text) {
+  if (text.isEmpty) {
+    return const [];
+  }
+  // The minimal circle containing a text block is its circumscribed circle
+  // (diagonal = diameter). That circle is smallest when the block is square,
+  // which (with mono metrics charWidth cw, line height lh) happens at wrap
+  // width W* = sqrt(N * lh / cw). Word wrapping is discrete, so search a
+  // window around W* and keep the wrap whose laid-out block has the smallest
+  // circumradius. No hard-coded wrap width or clamp.
+  const fontSize = 11.0;
+  final charWidth = fontSize * 0.54;
+  final lineHeight = fontSize * 1.12;
+  final ideal = math.sqrt(text.length * lineHeight / charWidth);
+  final lo = math.max(6, (ideal - 6).round());
+  final hi = (ideal + 8).round();
+  var best = wrapLines(text, ideal.round());
+  var bestRadius = _blockCircumradius(best, charWidth, lineHeight);
+  for (var w = lo; w <= hi; w++) {
+    final lines = wrapLines(text, w);
+    final r = _blockCircumradius(lines, charWidth, lineHeight);
+    if (r < bestRadius) {
+      bestRadius = r;
+      best = lines;
+    }
+  }
+  return best;
+}
+
+double _blockCircumradius(List<String> lines, double charWidth, double lineHeight) {
+  if (lines.isEmpty) {
+    return 0;
+  }
+  final w = lines.map((line) => line.length).reduce(math.max) * charWidth;
+  final h = lines.length * lineHeight;
+  return 0.5 * math.sqrt(w * w + h * h);
+}
+
 double _textRadius(List<String> lines, double fontSize, double padding) {
+  if (lines.isEmpty) {
+    return padding;
+  }
   final longest = lines.map((line) => line.length).reduce(math.max);
   final estimatedWidth = longest * fontSize * 0.54;
   final estimatedHeight = lines.length * fontSize * 1.12;
-  return (math.max(estimatedWidth / 2 + padding, estimatedHeight / 2 + padding))
-      .ceilToDouble();
+  // Circumscribed circle of the text bounding box: diagonal = diameter.
+  // Yields a uniform `padding`-wide rim band on every side for decoration,
+  // and is the minimal circle that truly contains the block.
+  return 0.5 * math.sqrt(estimatedWidth * estimatedWidth + estimatedHeight * estimatedHeight) + padding;
 }
 
 int _hashString(String value) {

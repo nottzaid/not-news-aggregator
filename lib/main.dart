@@ -386,8 +386,9 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
     final active = _activeId == null ? null : layouts[_activeId!];
 
     if (active != null && active.event.canExpand) {
-      if (_isProtectedActivePath(worldPoint, active)) {
-        final hoveredArtifact = _hitArtifact(worldPoint, active);
+      final ease = _activeExpansionEase();
+      if (_isProtectedActivePath(worldPoint, active, ease)) {
+        final hoveredArtifact = _hitArtifact(worldPoint, active, ease);
         _setHoveredArtifact(hoveredArtifact?.artifact.url);
         _cancelCollapse();
       } else {
@@ -420,7 +421,8 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
     final worldPoint = _screenToWorld(screenPoint, size);
     final active = _activeId == null ? null : layouts[_activeId!];
     if (active != null) {
-      final artifact = _hitArtifact(worldPoint, active);
+      final ease = _activeExpansionEase();
+      final artifact = _hitArtifact(worldPoint, active, ease);
       if (artifact != null) {
         await _openUrl(artifact.artifact.url);
         return;
@@ -506,27 +508,37 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
     return null;
   }
 
-  ArtifactLayout? _hitArtifact(Offset worldPoint, EventLayout active) {
+  ArtifactLayout? _hitArtifact(
+    Offset worldPoint,
+    EventLayout active,
+    double ease,
+  ) {
     if (!active.event.canExpand || _activeId != active.event.id) {
       return null;
     }
     for (final artifact in active.artifacts) {
-      final center = active.display + artifact.offset;
-      if ((worldPoint - center).distance <= artifact.radius) {
+      final center = active.display + artifact.offset * ease;
+      final radius = artifact.radius * _lerpDouble(0.2, 1, ease);
+      if ((worldPoint - center).distance <= radius) {
         return artifact;
       }
     }
     return null;
   }
 
-  bool _isProtectedActivePath(Offset worldPoint, EventLayout active) {
+  bool _isProtectedActivePath(
+    Offset worldPoint,
+    EventLayout active,
+    double ease,
+  ) {
     if ((worldPoint - active.display).distance <= 46) {
       return true;
     }
     for (final artifact in active.artifacts) {
       final start = active.display;
-      final end = active.display + artifact.offset;
-      if ((worldPoint - end).distance <= artifact.radius + 4) {
+      final end = active.display + artifact.offset * ease;
+      final radius = artifact.radius * _lerpDouble(0.2, 1, ease) + 4;
+      if ((worldPoint - end).distance <= radius) {
         return true;
       }
       if (_distanceToSegment(worldPoint, start, end) <= 14) {
@@ -534,6 +546,14 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
       }
     }
     return false;
+  }
+
+  double _activeExpansionEase() {
+    if (_activeId == null) {
+      return 1;
+    }
+    final progress = (_expansionProgresses()[_activeId!] ?? 0).clamp(0.0, 1.0);
+    return Curves.easeOutCubic.transform(progress);
   }
 
   void _setCamera(Offset camera) {
@@ -1471,6 +1491,55 @@ class _EventCanvasPainter extends CustomPainter {
         ..strokeWidth = 1,
     );
 
+    // Provenance dial — turns the rim margin into encoded decoration.
+    // A source-colored arc on the outer side (away from the hub) plus faint
+    // dial ticks around the rim. Source type maps to color so the crescent
+    // carries meaning instead of being empty space.
+    if (alpha > 0.4 && radius > 26) {
+      final sourceColor = _sourceColor(artifact.artifact.source);
+      final outerAngle = math.atan2(offset.dy, offset.dx);
+      final rimRadius = radius - 3;
+      final dialAlpha = ((alpha - 0.4) / 0.6).clamp(0.0, 1.0);
+
+      // Faint full-rim dial ticks for observatory texture.
+      final tickPaint = Paint()
+        ..color = _inkText.withValues(alpha: 0.13 * dialAlpha)
+        ..strokeWidth = 1
+        ..strokeCap = StrokeCap.round;
+      for (var i = 0; i < 8; i++) {
+        final a = i * math.pi / 4;
+        final inner =
+            offset + Offset(math.cos(a), math.sin(a)) * (rimRadius - 2);
+        final outerTick =
+            offset + Offset(math.cos(a), math.sin(a)) * (rimRadius + 1);
+        canvas.drawLine(inner, outerTick, tickPaint);
+      }
+
+      // Bright provenance arc on the outer side (~90°).
+      const arcSweep = 1.55;
+      final arcRect = Rect.fromCircle(center: offset, radius: rimRadius);
+      canvas.drawArc(
+        arcRect,
+        outerAngle - arcSweep / 2,
+        arcSweep,
+        false,
+        Paint()
+          ..color = sourceColor.withValues(alpha: 0.85 * dialAlpha)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.8 + hoverLift * 1.2
+          ..strokeCap = StrokeCap.round,
+      );
+
+      // Tiny source dot at the arc center on the outer rim.
+      final dotCenter = offset +
+          Offset(math.cos(outerAngle), math.sin(outerAngle)) * rimRadius;
+      canvas.drawCircle(
+        dotCenter,
+        2 + hoverLift,
+        Paint()..color = sourceColor.withValues(alpha: dialAlpha),
+      );
+    }
+
     if (progress > 0.96) {
       final label = _textPainter(
         artifact.lines.join('\n'),
@@ -1482,7 +1551,7 @@ class _EventCanvasPainter extends CustomPainter {
           height: 1.12,
           letterSpacing: 0.3,
         ),
-        artifact.radius * 1.65,
+        artifact.radius * 1.9,
       );
       canvas.drawTextPainter(
         label,
@@ -1661,6 +1730,19 @@ class CanvasBackgroundPainter extends CustomPainter {
 
 double _lerpDouble(double from, double to, double progress) {
   return from + (to - from) * progress;
+}
+
+Color _sourceColor(String source) {
+  switch (source.toLowerCase()) {
+    case 'official':
+      return _signal;
+    case 'report':
+      return _data;
+    case 'summary':
+      return _plum;
+    default:
+      return _inkTextDim;
+  }
 }
 
 class _MetadataSheet extends StatelessWidget {
