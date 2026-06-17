@@ -1300,7 +1300,8 @@ class _EventCanvasPainter extends CustomPainter {
         continue;
       }
       final color = Color(event.color);
-      final isActive = event.id == activeId;
+      final activeProgress =
+          (expansionProgresses[event.id] ?? 0).clamp(0.0, 1.0);
 
       canvas.save();
       canvas.translate(layout.display.dx, layout.display.dy);
@@ -1321,7 +1322,8 @@ class _EventCanvasPainter extends CustomPainter {
 
       final nodeRadius = _lerpDouble(22, 17, openProgress);
 
-      // Soft chromatic halo.
+      // Soft chromatic halo — fades in with the activation progress so it
+      // eases on hover instead of snapping brighter.
       final glowRadius = nodeRadius * 2.6;
       canvas.drawCircle(
         Offset.zero,
@@ -1329,7 +1331,7 @@ class _EventCanvasPainter extends CustomPainter {
         Paint()
           ..shader = RadialGradient(
             colors: [
-              color.withValues(alpha: isActive ? 0.34 : 0.22),
+              color.withValues(alpha: _lerpDouble(0.22, 0.34, activeProgress)),
               color.withValues(alpha: 0.0),
             ],
           ).createShader(
