@@ -68,12 +68,41 @@ class HermesRunner:
             stderr=asyncio.subprocess.STDOUT,
         )
         assert process.stdout is not None
-        async for raw_line in process.stdout:
+        pending_prose: list[str] = []
+        idle_timeout = _prose_idle_timeout()
+        read_timeout = idle_timeout if idle_timeout > 0 else None
+        while True:
+            try:
+                raw_line = await asyncio.wait_for(
+                    process.stdout.readline(), timeout=read_timeout
+                )
+            except TimeoutError:
+                for flushed in _drain_prose(pending_prose, self.status_model):
+                    _mark_seen_output(seen_outputs, flushed)
+                    logger.info("Hermes emitted %s", flushed.type)
+                    outputs.append(flushed)
+                    yield flushed
+                continue
+            if not raw_line:
+                break
             line = raw_line.decode("utf-8", errors="replace").strip()
             line = _clean_hermes_status_line(line)
             if not line:
+                for flushed in _drain_prose(pending_prose, self.status_model):
+                    _mark_seen_output(seen_outputs, flushed)
+                    logger.info("Hermes emitted %s", flushed.type)
+                    outputs.append(flushed)
+                    yield flushed
                 continue
             _log_hermes_line(line)
+            if not line.startswith(EVENT_PREFIX):
+                pending_prose.append(line)
+                continue
+            for flushed in _drain_prose(pending_prose, self.status_model):
+                _mark_seen_output(seen_outputs, flushed)
+                logger.info("Hermes emitted %s", flushed.type)
+                outputs.append(flushed)
+                yield flushed
             try:
                 output = parse_agent_output(line)
             except (KeyError, ValueError, json.JSONDecodeError) as error:
@@ -118,6 +147,11 @@ class HermesRunner:
             logger.info("Hermes emitted %s", output.type)
             outputs.append(output)
             yield output
+        for flushed in _drain_prose(pending_prose, self.status_model):
+            _mark_seen_output(seen_outputs, flushed)
+            logger.info("Hermes emitted %s", flushed.type)
+            outputs.append(flushed)
+            yield flushed
         code = await process.wait()
         for output in _harvest_state_graph_outputs(started_at, seen_outputs):
             if output.type == "voice.note":
@@ -331,6 +365,30 @@ def _clean_hermes_status_line(line: str) -> str:
     line = ANSI_ESCAPE_RE.sub("", line)
     line = line.replace("⏱", "").replace("—", "-")
     return " ".join(line.split())
+
+
+def _drain_prose(
+    lines: list[str], status_model: KokoroStatusModel
+) -> list[AgentOutput]:
+    if not lines:
+        return []
+    text = "\n".join(lines).strip()
+    lines.clear()
+    if not text:
+        return []
+    return [
+        AgentOutput(
+            type="session.message",
+            data={"message": status_model.summarize(text)},
+        )
+    ]
+
+
+def _prose_idle_timeout() -> float:
+    try:
+        return max(0.0, float(os.getenv("AI_NEWS_PROSE_IDLE_TIMEOUT", "0.4")))
+    except ValueError:
+        return 0.4
 
 
 def _harvest_state_graph_outputs(

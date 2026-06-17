@@ -472,6 +472,113 @@ def test_hermes_command_uses_noninteractive_approval_mode():
     assert "--ignore-user-config" not in command
 
 
+def _patch_hermes_subprocess(monkeypatch, lines):
+    class _FakeStream:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        async def readline(self):
+            if not self._lines:
+                return b""
+            return self._lines.pop(0)
+
+    class _FakeProcess:
+        def __init__(self, lines):
+            self.stdout = _FakeStream(lines)
+
+        async def wait(self):
+            return 0
+
+    async def fake_create(*args, **kwargs):
+        return _FakeProcess(lines)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+
+def test_hermes_prose_lines_coalesce_into_one_session_message(monkeypatch):
+    monkeypatch.setenv("AI_NEWS_ENABLE_HERMES", "1")
+    monkeypatch.setenv("AI_NEWS_ENABLE_VOICE", "0")
+    monkeypatch.setenv("AI_NEWS_HERMES_DIAGNOSTICS", "0")
+    monkeypatch.setenv("AI_NEWS_HERMES_LOG_LINES", "0")
+    monkeypatch.setenv("AI_NEWS_PROSE_IDLE_TIMEOUT", "0")
+    monkeypatch.delenv("KOKORO_BASE_URL", raising=False)
+
+    lines = [
+        b"Starting research on the topic.\n",
+        b"Looking at multiple sources now.\n",
+        b"\n",
+        b"Found a relevant event.\n",
+        b'AI_NEWS_EVENT: {"type":"event.upsert","data":{"id":"e1","title":"E1","date":"Jun 4, 2026","color":4280000000,"summary":"S","sourceLabel":"Test","artifacts":[],"url":"https://example.com/e1"}}\n',
+        b"Wrapping up the analysis.\n",
+    ]
+    _patch_hermes_subprocess(monkeypatch, lines)
+
+    async def collect():
+        return [
+            output
+            async for output in HermesRunner().stream_research_updates("prompt")
+        ]
+
+    outputs = asyncio.run(collect())
+
+    assert [o.type for o in outputs] == [
+        "session.message",
+        "session.message",
+        "event.upsert",
+        "session.message",
+    ]
+    assert outputs[0].data["message"] == (
+        "Starting research on the topic.\nLooking at multiple sources now."
+    )
+    assert outputs[1].data["message"] == "Found a relevant event."
+    assert outputs[2].data["id"] == "e1"
+    assert outputs[3].data["message"] == "Wrapping up the analysis."
+
+
+def test_hermes_prose_flushes_on_idle_timeout(monkeypatch):
+    monkeypatch.setenv("AI_NEWS_ENABLE_HERMES", "1")
+    monkeypatch.setenv("AI_NEWS_ENABLE_VOICE", "0")
+    monkeypatch.setenv("AI_NEWS_HERMES_DIAGNOSTICS", "0")
+    monkeypatch.setenv("AI_NEWS_HERMES_LOG_LINES", "0")
+    monkeypatch.setenv("AI_NEWS_PROSE_IDLE_TIMEOUT", "0.05")
+    monkeypatch.delenv("KOKORO_BASE_URL", raising=False)
+
+    class _DelayedStream:
+        def __init__(self):
+            self._calls = 0
+
+        async def readline(self):
+            self._calls += 1
+            if self._calls == 1:
+                return b"Working on the analysis.\n"
+            if self._calls == 2:
+                await asyncio.sleep(10)
+            return b""
+
+    class _FakeProcess:
+        def __init__(self):
+            self.stdout = _DelayedStream()
+
+        async def wait(self):
+            return 0
+
+    async def fake_create(*args, **kwargs):
+        return _FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    async def collect():
+        return [
+            output
+            async for output in HermesRunner().stream_research_updates("prompt")
+        ]
+
+    outputs = asyncio.run(collect())
+
+    assert [o.type for o in outputs] == ["session.message"]
+    assert outputs[0].data["message"] == "Working on the analysis."
+
+
 def test_hermes_env_uses_project_profile_home():
     env = HermesRunner()._hermes_env()
 
