@@ -205,7 +205,19 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
     _artifactHover = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 170),
+      reverseDuration: const Duration(milliseconds: 130),
     )..addStatusListener((status) {
+        // Clears the hovered URL only once the fade-out animation fully
+        // completes (dismissed). This pairs with the keepalive in
+        // _setHoveredArtifact, which keeps the URL alive during reverse()
+        // so the painter can read the fading value.
+        //
+        // DO NOT call forward(from: 0) elsewhere while the URL is set:
+        // resetting value to 0 fires a synchronous `dismissed` here, which
+        // would clear the URL before the forward even starts — permanently
+        // breaking hover (the early-return in _setHoveredArtifact then
+        // stops reverse() from ever running again). Use forward() from the
+        // current value instead.
         if (status == AnimationStatus.dismissed &&
             _hoveredArtifactUrl != null) {
           setState(() => _hoveredArtifactUrl = null);
@@ -489,14 +501,21 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
       return;
     }
     if (url == null) {
-      if (_hoveredArtifactUrl != null) {
-        setState(() => _hoveredArtifactUrl = null);
-      }
+      // Keep the URL alive during reverse so the painter can read the fading
+      // animation value. The status listener clears it when dismissed.
       _artifactHover.reverse();
       return;
     }
     setState(() => _hoveredArtifactUrl = url);
-    _artifactHover.forward(from: 0);
+    // Use forward() from the current value, NOT forward(from: 0).
+    // forward(from: 0) resets value to 0, which fires a synchronous
+    // `dismissed` status — the status listener above would then clear the
+    // URL we just set, before the forward even begins. That permanently
+    // breaks hover: the next _setHoveredArtifact(null) hits the
+    // _hoveredArtifactUrl == url early-return, reverse() never runs, the
+    // controller sticks at 1.0, and every later forward(from: 0) re-triggers
+    // the spurious dismissed. forward() from current value avoids the reset.
+    _artifactHover.forward();
   }
 
   EventLayout? _hitEvent(Offset worldPoint, Map<String, EventLayout> layouts) {
@@ -783,7 +802,12 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
   }
 
   Map<String, double> _expansionProgresses() {
-    if (_motionFromActiveId == null && _motionToActiveId == null) {
+    // When motion isn't animating, the expansion is settled. Use the
+    // settled state instead of reading a potentially stale frozen value
+    // — _motion.stop() doesn't fire "completed", so from/to can remain
+    // set with value stuck at 0 after an interrupted animation, which
+    // would collapse leaves to the hub and break hover hit-tests.
+    if (!_motion.isAnimating) {
       if (_activeId == null) {
         _settledExpansionActiveId = null;
         _settledExpansionProgresses = const {};
@@ -797,6 +821,16 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
     }
 
     final progress = Curves.easeOutCubic.transform(_motion.value);
+    // When from == to (same active event, e.g. an SSE graph update
+    // re-animating positions while the hovered event stays put), the
+    // expansion itself isn't changing — only positions are. Keep that
+    // event's expansion pinned at 1 so leaves don't collapse to the hub
+    // and cause hover hit-test misses during the position tween.
+    if (_motionFromActiveId == _motionToActiveId) {
+      return {
+        if (_motionFromActiveId != null) _motionFromActiveId!: 1,
+      };
+    }
     return {
       if (_motionFromActiveId != null) _motionFromActiveId!: 1 - progress,
       if (_motionToActiveId != null) _motionToActiveId!: progress,
