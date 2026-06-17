@@ -38,7 +38,7 @@ const _bridgeHi = Color(0xff8b97b5);
 const _gridLine = Color(0x0bffffff);
 const _gridMajor = Color(0x12ffffff);
 
-const _serif = 'Newsreader';
+const _display = 'Manrope';
 const _mono = 'JetBrainsMono';
 
 void main() {
@@ -55,7 +55,7 @@ class AiNewsCanvasApp extends StatelessWidget {
       title: 'AI News Canvas',
       theme: ThemeData(
         useMaterial3: true,
-        fontFamily: _serif,
+        fontFamily: _display,
         brightness: Brightness.dark,
         scaffoldBackgroundColor: _ink0,
         canvasColor: _ink1,
@@ -1368,12 +1368,12 @@ class _EventCanvasPainter extends CustomPainter {
         final labelOpacity = 1 - openProgress;
         final labelOffset = Offset(0, -10 * openProgress);
         const titleStyle = TextStyle(
-          fontFamily: _serif,
+          fontFamily: _display,
           color: _inkText,
           fontSize: 15,
-          fontWeight: FontWeight.w800,
-          height: 1.12,
-          letterSpacing: 0.1,
+          fontWeight: FontWeight.w700,
+          height: 1.14,
+          letterSpacing: 0.15,
         );
         final titlePainter = _textPainter(event.title, titleStyle, 156);
         final titleTop = 44.0 + labelOffset.dy;
@@ -1383,7 +1383,6 @@ class _EventCanvasPainter extends CustomPainter {
           Offset(0, titleTop + titlePainter.height / 2),
           maxWidth: 156,
           style: titleStyle,
-          stroke: _ink0,
           opacity: labelOpacity,
         );
         _drawCenteredText(
@@ -1398,7 +1397,6 @@ class _EventCanvasPainter extends CustomPainter {
             fontWeight: FontWeight.w700,
             letterSpacing: 1.2,
           ),
-          stroke: _ink0,
           opacity: labelOpacity,
         );
       }
@@ -1508,22 +1506,11 @@ class _EventCanvasPainter extends CustomPainter {
     Offset center, {
     required double maxWidth,
     required TextStyle style,
-    required Color stroke,
     double opacity = 1,
   }) {
     if (opacity <= 0.02) {
       return;
     }
-    final strokeParagraph = _textPainter(
-      text,
-      style.copyWith(
-        foreground: Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 4
-          ..color = stroke.withValues(alpha: stroke.a * opacity),
-      ),
-      maxWidth,
-    );
     final fillParagraph = _textPainter(
       text,
       style.copyWith(
@@ -1532,8 +1519,7 @@ class _EventCanvasPainter extends CustomPainter {
       maxWidth,
     );
     final origin =
-        center - Offset(strokeParagraph.width / 2, strokeParagraph.height / 2);
-    canvas.drawTextPainter(strokeParagraph, origin);
+        center - Offset(fillParagraph.width / 2, fillParagraph.height / 2);
     canvas.drawTextPainter(fillParagraph, origin);
   }
 
@@ -1787,7 +1773,7 @@ class _MetadataSheet extends StatelessWidget {
                         Text(
                           layout.event.summary,
                           style: const TextStyle(
-                            fontFamily: _serif,
+                            fontFamily: _display,
                             color: _inkText,
                             fontSize: 13.5,
                             height: 1.5,

@@ -22,11 +22,9 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   fonts:
-    - family: Newsreader
+    - family: Manrope
       fonts:
-        - asset: assets/fonts/newsreader/Newsreader-Regular.ttf
-        - asset: assets/fonts/newsreader/Newsreader-Italic.ttf
-          style: italic
+        - asset: assets/fonts/manrope/Manrope-Regular.ttf
     - family: JetBrainsMono
       fonts:
         - asset: assets/fonts/jetbrainsmono/JetBrainsMono-Regular.ttf
