@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -13,6 +14,32 @@ import 'data/fixture_events.dart';
 import 'data/graph_repository.dart';
 import 'data/research_session_client.dart';
 import 'models/research_event.dart';
+
+// ── Nocturne palette ───────────────────────────────────────────────────────
+// A dark "intelligence observatory" canvas: deep ink, warm signal amber,
+// cool data cyan, and a violet accent. Event colors ride on top as glows.
+const _ink0 = Color(0xff06090f);
+const _ink1 = Color(0xff0b0f18);
+const _ink2 = Color(0xff111726);
+const _panel = Color(0xff0f1420);
+const _panelRaised = Color(0xff151b2b);
+const _hairline = Color(0xff2a3346);
+const _hairlineDim = Color(0x332a3346);
+const _inkText = Color(0xffece6d6);
+const _inkTextDim = Color(0xff97a0b4);
+const _inkTextFaint = Color(0xff5a6478);
+const _signal = Color(0xffe8a44c);
+const _signalHot = Color(0xffff6b4a);
+const _signalHotDeep = Color(0xffc23a24);
+const _data = Color(0xff4cc9d6);
+const _plum = Color(0xff7c5cff);
+const _bridge = Color(0xff39445a);
+const _bridgeHi = Color(0xff8b97b5);
+const _gridLine = Color(0x0bffffff);
+const _gridMajor = Color(0x12ffffff);
+
+const _serif = 'Newsreader';
+const _mono = 'JetBrainsMono';
 
 void main() {
   runApp(const AiNewsCanvasApp());
@@ -28,8 +55,31 @@ class AiNewsCanvasApp extends StatelessWidget {
       title: 'AI News Canvas',
       theme: ThemeData(
         useMaterial3: true,
-        fontFamily: 'Inter',
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xffb85534)),
+        fontFamily: _serif,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: _ink0,
+        canvasColor: _ink1,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: _signal,
+          brightness: Brightness.dark,
+        ),
+        iconTheme: const IconThemeData(color: _inkTextDim, size: 18),
+        tooltipTheme: const TooltipThemeData(
+          textStyle: TextStyle(
+            fontFamily: _mono,
+            color: _inkText,
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.4,
+          ),
+          decoration: BoxDecoration(
+            color: _panelRaised,
+            border: Border.fromBorderSide(
+              BorderSide(color: _hairline, width: 1),
+            ),
+            borderRadius: BorderRadius.all(Radius.circular(4)),
+          ),
+        ),
       ),
       home: const CanvasPrototypeScreen(),
     );
@@ -1156,8 +1206,11 @@ class _EventCanvasPainter extends CustomPainter {
   }
 
   void _paintGrid(Canvas canvas, Rect visibleWorldBounds) {
-    final paint = Paint()
-      ..color = const Color(0x09171514)
+    final minor = Paint()
+      ..color = _gridLine
+      ..strokeWidth = 1;
+    final major = Paint()
+      ..color = _gridMajor
       ..strokeWidth = 1;
     final startX = (visibleWorldBounds.left / 48).floor() * 48.0;
     final endX = visibleWorldBounds.right;
@@ -1165,18 +1218,22 @@ class _EventCanvasPainter extends CustomPainter {
     final endY = visibleWorldBounds.bottom;
 
     for (var x = startX; x <= endX; x += 48) {
-      canvas.drawLine(
-        Offset(x, startY),
-        Offset(x, endY),
-        paint,
-      );
+      canvas.drawLine(Offset(x, startY), Offset(x, endY), minor);
     }
     for (var y = startY; y <= endY; y += 48) {
-      canvas.drawLine(
-        Offset(startX, y),
-        Offset(endX, y),
-        paint,
-      );
+      canvas.drawLine(Offset(startX, y), Offset(endX, y), minor);
+    }
+
+    const majorStep = 240.0;
+    final majorStartX =
+        (visibleWorldBounds.left / majorStep).floor() * majorStep;
+    final majorStartY =
+        (visibleWorldBounds.top / majorStep).floor() * majorStep;
+    for (var x = majorStartX; x <= endX; x += majorStep) {
+      canvas.drawLine(Offset(x, startY), Offset(x, endY), major);
+    }
+    for (var y = majorStartY; y <= endY; y += majorStep) {
+      canvas.drawLine(Offset(startX, y), Offset(endX, y), major);
     }
   }
 
@@ -1194,15 +1251,28 @@ class _EventCanvasPainter extends CustomPainter {
         continue;
       }
       final activeProgress = _bridgeProgress(bridge);
+      final path = bridgePath(from, to);
+
+      if (activeProgress > 0.01) {
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = _bridgeHi.withValues(alpha: 0.12 * activeProgress)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = _lerpDouble(7, 12, activeProgress)
+            ..strokeCap = StrokeCap.round
+            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6),
+        );
+      }
+
+      final lineColor = Color.lerp(_bridge, _bridgeHi, activeProgress)!;
       final paint = Paint()
-        ..color = const Color(0xff29313a).withValues(
-          alpha: _lerpDouble(0.18, 0.62, activeProgress),
-        )
+        ..color =
+            lineColor.withValues(alpha: _lerpDouble(0.22, 0.72, activeProgress))
         ..style = PaintingStyle.stroke
-        ..strokeWidth = _lerpDouble(2.4, 3.2, activeProgress)
+        ..strokeWidth = _lerpDouble(2.2, 3.4, activeProgress)
         ..strokeCap = StrokeCap.round;
 
-      final path = bridgePath(from, to);
       _drawDashedPath(canvas, path, paint, phase: bridgeFlow.value * 140);
     }
   }
@@ -1230,6 +1300,7 @@ class _EventCanvasPainter extends CustomPainter {
         continue;
       }
       final color = Color(event.color);
+      final isActive = event.id == activeId;
 
       canvas.save();
       canvas.translate(layout.display.dx, layout.display.dy);
@@ -1248,52 +1319,86 @@ class _EventCanvasPainter extends CustomPainter {
         }
       }
 
+      final nodeRadius = _lerpDouble(22, 17, openProgress);
+
+      // Soft chromatic halo.
+      final glowRadius = nodeRadius * 2.6;
       canvas.drawCircle(
         Offset.zero,
-        _lerpDouble(22, 17, openProgress),
+        glowRadius,
         Paint()
-          ..color = color
-          ..style = PaintingStyle.fill,
+          ..shader = RadialGradient(
+            colors: [
+              color.withValues(alpha: isActive ? 0.34 : 0.22),
+              color.withValues(alpha: 0.0),
+            ],
+          ).createShader(
+            Rect.fromCircle(center: Offset.zero, radius: glowRadius),
+          ),
       );
+
+      // Marker ring — light hairline, or saturated when selected.
+      canvas.drawCircle(
+        Offset.zero,
+        nodeRadius + 4,
+        Paint()
+          ..color = (isActive ? color : _inkText)
+              .withValues(alpha: isActive ? 0.6 : 0.16)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = isActive ? 1.7 : 1.1,
+      );
+
+      // Filled node.
+      canvas.drawCircle(
+        Offset.zero,
+        nodeRadius,
+        Paint()..color = color,
+      );
+
+      // Inner highlight — a small off-center glint for dimensionality.
+      canvas.drawCircle(
+        Offset(nodeRadius * -0.3, nodeRadius * -0.34),
+        nodeRadius * 0.32,
+        Paint()
+          ..color = Colors.white.withValues(alpha: 0.16)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2),
+      );
+
       if (openProgress < 1) {
         final labelOpacity = 1 - openProgress;
         final labelOffset = Offset(0, -10 * openProgress);
-        final titlePainter = _textPainter(
-          event.title,
-          const TextStyle(
-            color: Color(0xff171514),
-            fontSize: 14,
-            fontWeight: FontWeight.w800,
-          ).copyWith(
-            color: const Color(0xff171514).withValues(alpha: labelOpacity),
-          ),
-          150,
+        const titleStyle = TextStyle(
+          fontFamily: _serif,
+          color: _inkText,
+          fontSize: 15,
+          fontWeight: FontWeight.w800,
+          height: 1.12,
+          letterSpacing: 0.1,
         );
-        final titleTop = 42.0 + labelOffset.dy;
+        final titlePainter = _textPainter(event.title, titleStyle, 156);
+        final titleTop = 44.0 + labelOffset.dy;
         _drawCenteredText(
           canvas,
           event.title,
           Offset(0, titleTop + titlePainter.height / 2),
-          maxWidth: 150,
-          style: const TextStyle(
-            color: Color(0xff171514),
-            fontSize: 14,
-            fontWeight: FontWeight.w800,
-          ),
-          stroke: const Color(0xf2fffbf3),
+          maxWidth: 156,
+          style: titleStyle,
+          stroke: _ink0,
           opacity: labelOpacity,
         );
         _drawCenteredText(
           canvas,
           event.date,
-          Offset(0, titleTop + titlePainter.height + 12 + 5.5),
-          maxWidth: 140,
+          Offset(0, titleTop + titlePainter.height + 13),
+          maxWidth: 150,
           style: const TextStyle(
-            color: Color(0xff5f5851),
-            fontSize: 11,
+            fontFamily: _mono,
+            color: _inkTextDim,
+            fontSize: 10,
             fontWeight: FontWeight.w700,
+            letterSpacing: 1.2,
           ),
-          stroke: const Color(0xf2fffbf3),
+          stroke: _ink0,
           opacity: labelOpacity,
         );
       }
@@ -1322,36 +1427,71 @@ class _EventCanvasPainter extends CustomPainter {
     final offset = artifact.offset * eased;
     final alpha = eased.clamp(0.0, 1.0);
     final hoverLift = hoverProgress.clamp(0.0, 1.0).toDouble();
+    final radius = artifact.radius * _lerpDouble(0.2, 1, eased) + hoverLift * 2;
+
+    // Tether from node to artifact.
     canvas.drawLine(
       Offset.zero,
       offset,
       Paint()
-        ..color = const Color(0xff171514).withValues(alpha: 0.2 * alpha)
-        ..strokeWidth = 2,
+        ..color = _inkText.withValues(alpha: 0.18 * alpha)
+        ..strokeWidth = 1.4,
     );
+
+    // Chromatic halo (brightens on hover).
+    if (alpha > 0.02) {
+      canvas.drawCircle(
+        offset,
+        radius + 8 + hoverLift * 4,
+        Paint()
+          ..shader = RadialGradient(
+            colors: [
+              color.withValues(alpha: (0.22 + hoverLift * 0.3) * alpha),
+              color.withValues(alpha: 0.0),
+            ],
+          ).createShader(
+            Rect.fromCircle(center: offset, radius: radius + 12),
+          ),
+      );
+    }
+
+    // Dark glass fill.
     canvas.drawCircle(
       offset,
-      artifact.radius * _lerpDouble(0.2, 1, eased) + hoverLift * 2,
+      radius,
       Paint()
-        ..color = const Color(0xfffffaf1).withValues(alpha: 0.96 * alpha)
+        ..color = _panelRaised.withValues(alpha: 0.96 * alpha)
         ..style = PaintingStyle.fill,
     );
+    // Colored marker ring.
     canvas.drawCircle(
       offset,
-      artifact.radius * _lerpDouble(0.2, 1, eased) + hoverLift * 2,
+      radius,
       Paint()
-        ..color = color.withValues(alpha: (0.72 + hoverLift * 0.28) * alpha)
+        ..color = color.withValues(alpha: (0.8 + hoverLift * 0.2) * alpha)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2 + hoverLift * 1.2,
+        ..strokeWidth = 1.8 + hoverLift * 1.4,
     );
+    // Inner hairline for crispness.
+    canvas.drawCircle(
+      offset,
+      radius - 3,
+      Paint()
+        ..color = _inkText.withValues(alpha: 0.07 * alpha)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+
     if (progress > 0.96) {
       final label = _textPainter(
         artifact.lines.join('\n'),
         const TextStyle(
-          color: Color(0xff1d1916),
-          fontSize: 11,
-          fontWeight: FontWeight.w800,
-          height: 1.1,
+          fontFamily: _mono,
+          color: _inkText,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          height: 1.12,
+          letterSpacing: 0.3,
         ),
         artifact.radius * 1.65,
       );
@@ -1379,7 +1519,7 @@ class _EventCanvasPainter extends CustomPainter {
       style.copyWith(
         foreground: Paint()
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 5
+          ..strokeWidth = 4
           ..color = stroke.withValues(alpha: stroke.a * opacity),
       ),
       maxWidth,
@@ -1400,10 +1540,13 @@ class _EventCanvasPainter extends CustomPainter {
   TextPainter _textPainter(String text, TextStyle style, double maxWidth) {
     final key = Object.hash(
       text,
+      style.fontFamily,
       style.color?.toARGB32(),
       style.fontSize,
       style.fontWeight,
+      style.fontStyle,
       style.height,
+      style.letterSpacing,
       maxWidth,
       style.foreground?.color.toARGB32(),
     ).toString();
@@ -1469,30 +1612,68 @@ class CanvasBackgroundPainter extends CustomPainter {
       rect,
       Paint()
         ..shader = const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xfffffaf2), Color(0xfff8f3e9), Color(0xffedf4ef)],
-          stops: [0, 0.52, 1],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [_ink0, _ink1, _ink2],
+          stops: [0.0, 0.55, 1.0],
         ).createShader(rect),
     );
 
-    for (final glow in const [
-      (Offset(0.18, 0.18), Color(0x22b85534), 420.0),
-      (Offset(0.78, 0.14), Color(0x1f3169a8), 390.0),
-      (Offset(0.78, 0.78), Color(0x1d1f6f60), 390.0),
-    ]) {
-      final center = Offset(size.width * glow.$1.dx, size.height * glow.$1.dy);
+    // Signal glows — warm amber (top-left), violet (upper-right), cool cyan
+    // (lower-right). Atmospheric depth rather than a flat fill.
+    final glows = <(Offset, Color, double)>[
+      (const Offset(0.14, 0.12), _signal.withValues(alpha: 0.21), 0.62),
+      (const Offset(0.86, 0.18), _plum.withValues(alpha: 0.16), 0.58),
+      (const Offset(0.80, 0.88), _data.withValues(alpha: 0.15), 0.66),
+    ];
+    final glowPaint = Paint();
+    for (final glow in glows) {
+      final center =
+          Offset(size.width * glow.$1.dx, size.height * glow.$1.dy);
+      final radius = math.max(size.width, size.height) * glow.$3;
       canvas.drawCircle(
         center,
-        glow.$3,
-        Paint()
+        radius,
+        glowPaint
           ..shader = RadialGradient(
             colors: [glow.$2, Colors.transparent],
-          ).createShader(
-            Rect.fromCircle(center: center, radius: glow.$3),
-          ),
+          ).createShader(Rect.fromCircle(center: center, radius: radius)),
       );
     }
+
+    // Vignette — sink the edges into ink so the canvas reads as a lit pool.
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..shader = const RadialGradient(
+          center: Alignment(0.0, -0.06),
+          radius: 1.38,
+          colors: [Color(0x0006090f), Color(0x5406090f), _ink0],
+          stops: [0.0, 0.62, 1.0],
+        ).createShader(rect),
+    );
+
+    // Static grain — a faint pinpoint field for texture (screen-space, once).
+    final grain = <Offset>[];
+    var state = 2654435769;
+    double rnd() {
+      state = (state * 1664525 + 1013904223) & 0x7fffffff;
+      return state / 2147483647.0;
+    }
+    const spacing = 50.0;
+    for (var y = -spacing; y < size.height + spacing; y += spacing) {
+      for (var x = -spacing; x < size.width + spacing; x += spacing) {
+        grain.add(Offset(x + (rnd() - 0.5) * 30, y + (rnd() - 0.5) * 30));
+      }
+    }
+    canvas.drawPoints(
+      ui.PointMode.points,
+      grain,
+      Paint()
+        ..color = const Color(0x0cffffff)
+        ..strokeWidth = 1.25
+        ..strokeCap = StrokeCap.round,
+    );
   }
 
   @override
@@ -1528,14 +1709,19 @@ class _MetadataSheet extends StatelessWidget {
 
     final sheet = DecoratedBox(
       decoration: BoxDecoration(
-        color: const Color(0xf8fffcf6),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0x2a171514)),
-        boxShadow: const [
+        color: _panel,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: _hairline),
+        boxShadow: [
           BoxShadow(
-            color: Color(0x26171514),
-            blurRadius: 28,
-            offset: Offset(0, 14),
+            color: _ink0.withValues(alpha: 0.62),
+            blurRadius: 36,
+            offset: const Offset(0, 18),
+          ),
+          BoxShadow(
+            color: eventColor.withValues(alpha: 0.2),
+            blurRadius: 24,
+            offset: const Offset(0, 6),
           ),
         ],
       ),
@@ -1543,36 +1729,72 @@ class _MetadataSheet extends StatelessWidget {
         width: mobile ? viewportSize.width - 28 : desktopWidth,
         child: ConstrainedBox(
           constraints: BoxConstraints(
-            maxHeight: math.min(240, viewportSize.height - 150),
+            maxHeight: math.min(260, viewportSize.height - 150),
           ),
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(10),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 DecoratedBox(
                   decoration: BoxDecoration(
-                    color: eventColor.withValues(alpha: 0.54),
+                    color: eventColor,
                     boxShadow: [
                       BoxShadow(
-                        color: eventColor.withValues(alpha: 0.15),
-                        blurRadius: 16,
+                        color: eventColor.withValues(alpha: 0.5),
+                        blurRadius: 18,
                       ),
                     ],
                   ),
-                  child: const SizedBox(width: 5),
+                  child: const SizedBox(width: 4),
                 ),
                 Expanded(
                   child: SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(13, 11, 13, 12),
-                    child: Text(
-                      layout.event.summary,
-                      style: const TextStyle(
-                        color: Color(0xff2f2924),
-                        fontSize: 12,
-                        height: 1.45,
-                        fontWeight: FontWeight.w500,
-                      ),
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 13),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                layout.event.sourceLabel.toUpperCase(),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontFamily: _mono,
+                                  color: _inkTextDim,
+                                  fontSize: 9.5,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 1.4,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              layout.event.date,
+                              style: const TextStyle(
+                                fontFamily: _mono,
+                                color: _inkTextFaint,
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.8,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          layout.event.summary,
+                          style: const TextStyle(
+                            fontFamily: _serif,
+                            color: _inkText,
+                            fontSize: 13.5,
+                            height: 1.5,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -1611,12 +1833,13 @@ class _GlassPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: const Color(0xf8fffcf6),
-      elevation: 9,
-      shadowColor: const Color(0x17171514),
+      color: _panel,
+      elevation: 12,
+      shadowColor: _ink0,
+      surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(pill ? 999 : 8),
-        side: const BorderSide(color: Color(0x26171514)),
+        borderRadius: BorderRadius.circular(pill ? 999 : 10),
+        side: const BorderSide(color: _hairline, width: 1),
       ),
       child: child,
     );
@@ -1646,33 +1869,50 @@ class _SessionStatus extends StatelessWidget {
             child: _GlassPanel(
               child: Padding(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     SizedBox(
-                      width: 10,
-                      height: 10,
+                      width: 9,
+                      height: 9,
                       child: DecoratedBox(
                         decoration: BoxDecoration(
-                          color: running
-                              ? const Color(0xffd94332)
-                              : const Color(0xff1f6f60),
+                          color: running ? _signalHot : _data,
                           shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: (running ? _signalHot : _data)
+                                  .withValues(alpha: 0.6),
+                              blurRadius: 8,
+                            ),
+                          ],
                         ),
                       ),
                     ),
                     const SizedBox(width: 9),
+                    Text(
+                      running ? 'LIVE' : 'IDLE',
+                      style: TextStyle(
+                        fontFamily: _mono,
+                        color: running ? _signalHot : _data,
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.4,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
                     Flexible(
                       child: Text(
                         message,
                         maxLines: 3,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          color: Color(0xff27221f),
-                          fontSize: 12,
+                          fontFamily: _mono,
+                          color: _inkText,
+                          fontSize: 11,
                           height: 1.3,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
@@ -1724,8 +1964,8 @@ class _HermesActivityDrawer extends StatelessWidget {
                 child: IconButton(
                   icon: Icon(
                     open ? Icons.chevron_right : Icons.chevron_left,
-                    color: const Color(0xff27221f),
-                    size: 21,
+                    color: _inkTextDim,
+                    size: 20,
                   ),
                   onPressed: onToggle,
                 ),
@@ -1754,29 +1994,40 @@ class _HermesActivityDrawer extends StatelessWidget {
                                 height: 9,
                                 child: DecoratedBox(
                                   decoration: BoxDecoration(
-                                    color: running
-                                        ? const Color(0xffd94332)
-                                        : const Color(0xff1f6f60),
+                                    color: running ? _signalHot : _data,
                                     shape: BoxShape.circle,
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: (running
+                                                ? _signalHot
+                                                : _data)
+                                            .withValues(alpha: 0.6),
+                                        blurRadius: 8,
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ),
-                              const SizedBox(width: 8),
+                              const SizedBox(width: 9),
                               const Text(
-                                'Hermes',
+                                'HERMES',
                                 style: TextStyle(
-                                  color: Color(0xff27221f),
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w900,
+                                  fontFamily: _mono,
+                                  color: _inkText,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 1.6,
                                 ),
                               ),
                               const Spacer(),
                               Text(
-                                running ? 'active' : 'idle',
+                                running ? 'ACTIVE' : 'IDLE',
                                 style: const TextStyle(
-                                  color: Color(0xff6b625a),
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w800,
+                                  fontFamily: _mono,
+                                  color: _inkTextFaint,
+                                  fontSize: 9.5,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 1.4,
                                 ),
                               ),
                             ],
@@ -1787,12 +2038,13 @@ class _HermesActivityDrawer extends StatelessWidget {
                                 ? const Align(
                                     alignment: Alignment.topLeft,
                                     child: Text(
-                                      'Waiting for research activity.',
+                                      'Awaiting research activity\u2026',
                                       style: TextStyle(
-                                        color: Color(0xff6b625a),
+                                        fontFamily: _mono,
+                                        color: _inkTextFaint,
                                         fontSize: 11,
                                         height: 1.35,
-                                        fontWeight: FontWeight.w700,
+                                        fontWeight: FontWeight.w600,
                                       ),
                                     ),
                                   )
@@ -1808,28 +2060,32 @@ class _HermesActivityDrawer extends StatelessWidget {
                                       return DecoratedBox(
                                         decoration: BoxDecoration(
                                           color: latest
-                                              ? const Color(0x1fd94332)
-                                              : const Color(0x14ffffff),
+                                              ? _signal
+                                                  .withValues(alpha: 0.12)
+                                              : _panelRaised
+                                                  .withValues(alpha: 0.5),
                                           border: Border.all(
                                             color: latest
-                                                ? const Color(0x45d94332)
-                                                : const Color(0x1f171514),
+                                                ? _signal
+                                                    .withValues(alpha: 0.5)
+                                                : _hairlineDim,
                                           ),
                                           borderRadius:
                                               BorderRadius.circular(6),
                                         ),
                                         child: Padding(
                                           padding: const EdgeInsets.symmetric(
-                                            horizontal: 9,
+                                            horizontal: 10,
                                             vertical: 8,
                                           ),
                                           child: Text(
                                             message,
                                             style: const TextStyle(
-                                              color: Color(0xff27221f),
+                                              fontFamily: _mono,
+                                              color: _inkText,
                                               fontSize: 11,
                                               height: 1.35,
-                                              fontWeight: FontWeight.w700,
+                                              fontWeight: FontWeight.w600,
                                             ),
                                           ),
                                         ),
@@ -1876,6 +2132,9 @@ class _RecordButton extends StatelessWidget {
             : disabled
                 ? 'Research session running'
                 : 'Tap to record';
+    final orbColor = running
+        ? _signalHotDeep
+        : (recording || transcribing ? _signalHot : _signal);
     return Positioned(
       left: MediaQuery.sizeOf(context).width / 2 - 36,
       bottom: MediaQuery.sizeOf(context).width > 720 ? 28 : 18,
@@ -1888,13 +2147,21 @@ class _RecordButton extends StatelessWidget {
           child: DecoratedBox(
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color:
-                  running ? const Color(0xff8f3128) : const Color(0xffd94332),
-              boxShadow: const [
+              color: orbColor,
+              border: Border.all(
+                color: _ink0.withValues(alpha: 0.28),
+                width: 2,
+              ),
+              boxShadow: [
                 BoxShadow(
-                  color: Color(0x45d94332),
-                  blurRadius: 34,
-                  offset: Offset(0, 18),
+                  color: orbColor.withValues(alpha: 0.55),
+                  blurRadius: 36,
+                  offset: const Offset(0, 18),
+                ),
+                BoxShadow(
+                  color: orbColor.withValues(alpha: 0.3),
+                  blurRadius: 12,
+                  offset: const Offset(0, 4),
                 ),
               ],
             ),
@@ -1904,7 +2171,7 @@ class _RecordButton extends StatelessWidget {
               child: Center(
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: const Color(0xfffff8ee),
+                    color: _ink0,
                     shape: running || recording || transcribing
                         ? BoxShape.rectangle
                         : BoxShape.circle,
@@ -1950,19 +2217,19 @@ class _ZoomControls extends StatelessWidget {
     return Positioned(
       right: 18,
       bottom: MediaQuery.sizeOf(context).width > 720 ? 28 : 18,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: const Color(0xfffffbf3),
-          border: Border.all(color: const Color(0x1f171514)),
-          borderRadius: BorderRadius.circular(8),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x1f171514),
-              blurRadius: 18,
-              offset: Offset(0, 8),
-            ),
-          ],
-        ),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: _panel,
+            border: Border.all(color: _hairline),
+            borderRadius: BorderRadius.circular(10),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x82000000),
+                blurRadius: 24,
+                offset: Offset(0, 10),
+              ),
+            ],
+          ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1980,9 +2247,11 @@ class _ZoomControls extends StatelessWidget {
                     return Text(
                       '${(value * 100).round()}%',
                       style: const TextStyle(
-                        color: Color(0xff332f2b),
-                        fontSize: 12,
-                        fontWeight: FontWeight.w800,
+                        fontFamily: _mono,
+                        color: _inkText,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.4,
                       ),
                     );
                   },
@@ -2004,7 +2273,7 @@ class _ZoomControls extends StatelessWidget {
               child: VerticalDivider(
                 width: 1,
                 thickness: 1,
-                color: Color(0x1f171514),
+                color: _hairline,
               ),
             ),
             _ZoomIconButton(
@@ -2037,7 +2306,7 @@ class _ZoomIconButton extends StatelessWidget {
       child: IconButton(
         visualDensity: VisualDensity.compact,
         iconSize: 18,
-        color: const Color(0xff332f2b),
+        color: _inkTextDim,
         onPressed: onPressed,
         icon: Icon(icon),
       ),

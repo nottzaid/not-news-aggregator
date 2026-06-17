@@ -21,3 +21,14 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  fonts:
+    - family: Newsreader
+      fonts:
+        - asset: assets/fonts/newsreader/Newsreader-Regular.ttf
+        - asset: assets/fonts/newsreader/Newsreader-Italic.ttf
+          style: italic
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/jetbrainsmono/JetBrainsMono-Regular.ttf
+        - asset: assets/fonts/jetbrainsmono/JetBrainsMono-Italic.ttf
+          style: italic
