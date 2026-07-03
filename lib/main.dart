@@ -5,12 +5,14 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'canvas/canvas_layout.dart';
 import 'data/fixture_events.dart';
+import 'data/graph_mutation_client.dart';
 import 'data/graph_repository.dart';
 import 'data/research_session_client.dart';
 import 'models/research_event.dart';
@@ -104,7 +106,9 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
   late final AnimationController _cameraMotion;
   late final AnimationController _bridgeFlow;
   late final AnimationController _artifactHover;
+  late final AnimationController _reconciliationPulse;
   late final CanvasGraphRepository _graphRepository;
+  late final GraphMutationClient _graphMutationClient;
   late final ResearchSessionClient _researchSessionClient;
   late final AudioRecorder _audioRecorder;
   late final _CanvasViewportController _canvasViewport;
@@ -144,11 +148,23 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
   double? _panZoomStartZoom;
   Size? _viewportSize;
   bool _isPanning = false;
+  int _graphRevision = 0;
+  String? _armedDragEventId;
+  Offset? _dragScreenStart;
+  Offset? _dragOrigin;
+  Offset? _dragPosition;
+  String? _dragTargetId;
+  _PendingDrag? _pendingDrag;
+  String? _lastDragTransactionId;
+  bool _showConnectionReview = false;
+  bool _connectionReviewRunning = false;
+  String? _connectionReviewMessage;
 
   @override
   void initState() {
     super.initState();
     _graphRepository = CanvasGraphRepository();
+    _graphMutationClient = const GraphMutationClient();
     _researchSessionClient = const ResearchSessionClient();
     _audioRecorder = AudioRecorder();
     _canvasViewport = _CanvasViewportController();
@@ -223,6 +239,11 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
           setState(() => _hoveredArtifactUrl = null);
         }
       });
+    _reconciliationPulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    );
+    HardwareKeyboard.instance.addHandler(_handleKeyEvent);
     _connectGraphStream();
   }
 
@@ -232,6 +253,8 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
     _audioRecorder.dispose();
     _collapseTimer?.cancel();
     _artifactHover.dispose();
+    _reconciliationPulse.dispose();
+    HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     _bridgeFlow.dispose();
     _cameraMotion.dispose();
     _canvasViewport.dispose();
@@ -242,6 +265,42 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
   Offset get _camera => _canvasViewport.camera;
 
   double get _zoom => _canvasViewport.zoom;
+
+  bool _handleKeyEvent(KeyEvent event) {
+    if (event is! KeyDownEvent ||
+        event.logicalKey != LogicalKeyboardKey.keyZ ||
+        !(HardwareKeyboard.instance.isControlPressed ||
+            HardwareKeyboard.instance.isMetaPressed) ||
+        _lastDragTransactionId == null) {
+      return false;
+    }
+    _undoLastDrag();
+    return true;
+  }
+
+  Future<void> _undoLastDrag() async {
+    final transactionId = _lastDragTransactionId;
+    if (transactionId == null) {
+      return;
+    }
+    _lastDragTransactionId = null;
+    _reconciliationPulse.stop();
+    try {
+      final result = await _graphMutationClient.undo(transactionId);
+      if (!mounted) {
+        return;
+      }
+      _applyMutationSnapshot(result.snapshot);
+      setState(() {
+        _pendingDrag = null;
+        _sessionMessage = 'Drag undone.';
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() => _sessionMessage = _formatRecordingError(error));
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -276,11 +335,44 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
                     _handleHover(event.localPosition, size),
                 onPointerDown: (event) {
                   _cancelCollapse();
+                  final world = _screenToWorld(event.localPosition, size);
+                  final hit = _hitEvent(world, _interactiveLayouts());
+                  if (hit != null && _pendingDrag?.eventId != hit.event.id) {
+                    _armedDragEventId = hit.event.id;
+                    _dragScreenStart = event.localPosition;
+                    _dragOrigin = hit.display;
+                    _dragPosition = hit.display;
+                    _panStart = null;
+                    _cameraStart = null;
+                    _isPanning = false;
+                    return;
+                  }
                   _panStart = event.localPosition;
                   _cameraStart = _camera;
                   _isPanning = false;
                 },
                 onPointerMove: (event) {
+                  if (_armedDragEventId != null &&
+                      _dragScreenStart != null &&
+                      _dragOrigin != null) {
+                    final delta = event.localPosition - _dragScreenStart!;
+                    if (_dragPosition == _dragOrigin && delta.distance <= 6) {
+                      return;
+                    }
+                    final position =
+                        _dragOrigin! + _screenDeltaToWorld(delta, size);
+                    final layouts = _interactiveLayouts();
+                    final target = _hitDropTarget(
+                      position,
+                      layouts,
+                      excluding: _armedDragEventId!,
+                    );
+                    setState(() {
+                      _dragPosition = position;
+                      _dragTargetId = target?.event.id;
+                    });
+                    return;
+                  }
                   if (_panStart == null || _cameraStart == null) {
                     return;
                   }
@@ -294,6 +386,16 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
                   _setCamera(_cameraStart! - _screenDeltaToWorld(delta, size));
                 },
                 onPointerUp: (event) {
+                  if (_armedDragEventId != null) {
+                    final dragged = _dragPosition != _dragOrigin;
+                    if (dragged) {
+                      _commitEventDrag();
+                    } else {
+                      _resetDragState();
+                      _handleTap(event.localPosition, size);
+                    }
+                    return;
+                  }
                   final wasPanning = _isPanning;
                   _panStart = null;
                   _cameraStart = null;
@@ -303,6 +405,7 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
                   }
                 },
                 onPointerCancel: (_) {
+                  _resetDragState();
                   _panStart = null;
                   _cameraStart = null;
                   _isPanning = false;
@@ -324,6 +427,7 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
                                 [
                                   _bridgeFlow,
                                   _artifactHover,
+                                  _reconciliationPulse,
                                   _canvasViewport,
                                 ],
                               ),
@@ -337,6 +441,10 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
                               expansionProgresses: expansionProgresses,
                               viewport: _canvasViewport,
                               bridgeFlow: _bridgeFlow,
+                              dragEventId: _armedDragEventId,
+                              dragTargetId: _dragTargetId,
+                              pendingDrag: _pendingDrag,
+                              reconciliationPulse: _reconciliationPulse,
                             ),
                           ),
                         ),
@@ -349,6 +457,13 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
                 _MetadataSheet(
                   layout: activeLayout,
                   viewportSize: size,
+                ),
+              if (_showConnectionReview)
+                _ConnectionReviewBox(
+                  running: _connectionReviewRunning,
+                  message: _connectionReviewMessage,
+                  onCheck: _reviewLastConnection,
+                  onClose: () => setState(() => _showConnectionReview = false),
                 ),
               if (_sessionMessage != null)
                 _SessionStatus(
@@ -393,6 +508,10 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
     Offset screenPoint,
     Size size,
   ) {
+    if (_armedDragEventId != null) {
+      _cancelCollapse();
+      return;
+    }
     final layouts = _interactiveLayouts();
     final worldPoint = _screenToWorld(screenPoint, size);
     final active = _activeId == null ? null : layouts[_activeId!];
@@ -525,6 +644,169 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
       }
     }
     return null;
+  }
+
+  EventLayout? _hitDropTarget(
+    Offset worldPoint,
+    Map<String, EventLayout> layouts, {
+    required String excluding,
+  }) {
+    EventLayout? nearest;
+    var distance = 110.0 / _zoom.clamp(0.55, 1.5);
+    for (final layout in layouts.values) {
+      if (layout.event.id == excluding) {
+        continue;
+      }
+      final candidate = (worldPoint - layout.display).distance;
+      if (candidate < distance) {
+        distance = candidate;
+        nearest = layout;
+      }
+    }
+    return nearest;
+  }
+
+  void _resetDragState() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _armedDragEventId = null;
+      _dragScreenStart = null;
+      _dragOrigin = null;
+      _dragPosition = null;
+      _dragTargetId = null;
+    });
+  }
+
+  Future<void> _commitEventDrag() async {
+    final eventId = _armedDragEventId;
+    final origin = _dragOrigin;
+    final destination = _dragPosition;
+    final targetId = _dragTargetId;
+    if (eventId == null || origin == null || destination == null) {
+      _resetDragState();
+      return;
+    }
+    final oldBridges = _bridges
+        .where((bridge) => bridge.from == eventId || bridge.to == eventId)
+        .toList(growable: false);
+    final optimisticBridges = [..._bridges];
+    if (targetId != null) {
+      optimisticBridges.add(
+        EventBridge(
+          from: eventId,
+          to: targetId,
+          label: 'User-curated relationship',
+        ),
+      );
+    }
+    setState(() {
+      _basePositions = {..._basePositions, eventId: destination};
+      _bridges = optimisticBridges;
+      _pendingDrag = _PendingDrag(
+        eventId: eventId,
+        origin: origin,
+        oldBridges: oldBridges,
+      );
+      _armedDragEventId = null;
+      _dragScreenStart = null;
+      _dragOrigin = null;
+      _dragPosition = null;
+      _dragTargetId = null;
+      _sessionMessage = 'Hermes is reconciling the origin...';
+    });
+    _reconciliationPulse.repeat();
+    try {
+      final transaction = await _graphMutationClient.drag(
+        eventId: eventId,
+        originX: origin.dx,
+        originY: origin.dy,
+        destinationX: destination.dx,
+        destinationY: destination.dy,
+        targetEventId: targetId,
+        expectedRevision: _graphRevision,
+      );
+      _lastDragTransactionId = transaction.id;
+      if (targetId != null) {
+        setState(() {
+          _showConnectionReview = true;
+          _connectionReviewMessage = null;
+        });
+      }
+      _applyMutationSnapshot(transaction.snapshot);
+      final settled =
+          await _graphMutationClient.waitUntilSettled(transaction.id);
+      if (!mounted || _lastDragTransactionId != settled.id) {
+        return;
+      }
+      _applyMutationSnapshot(settled.snapshot);
+      _reconciliationPulse.stop();
+      setState(() {
+        _pendingDrag = null;
+        _sessionMessage = settled.status == 'fallback'
+            ? 'Hermes could not reconcile; deterministic detach applied.'
+            : 'Hermes reconciled the origin.';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _reconciliationPulse.stop();
+      setState(() {
+        _pendingDrag = null;
+        _sessionMessage = _formatRecordingError(error);
+      });
+      _connectGraphStream();
+    }
+  }
+
+  Future<void> _reviewLastConnection() async {
+    final transactionId = _lastDragTransactionId;
+    if (transactionId == null || _connectionReviewRunning) {
+      return;
+    }
+    setState(() {
+      _connectionReviewRunning = true;
+      _connectionReviewMessage = null;
+    });
+    try {
+      final message = await _graphMutationClient.review(transactionId);
+      if (mounted) {
+        setState(() => _connectionReviewMessage = message);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(
+          () => _connectionReviewMessage = _formatRecordingError(error),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _connectionReviewRunning = false);
+      }
+    }
+  }
+
+  void _applyMutationSnapshot(GraphMutationSnapshot snapshot) {
+    final generated =
+        generateBasePositions(snapshot.events, bridges: snapshot.bridges);
+    final positions = {
+      for (final event in snapshot.events)
+        event.id: snapshot.placements[event.id] == null
+            ? (_basePositions[event.id] ?? generated[event.id]!)
+            : Offset(
+                snapshot.placements[event.id]!.x,
+                snapshot.placements[event.id]!.y,
+              ),
+    };
+    setState(() {
+      _events = snapshot.events;
+      _bridges = snapshot.bridges;
+      _basePositions = positions;
+      _graphRevision = snapshot.revision;
+      _settledLayouts = null;
+    });
   }
 
   ArtifactLayout? _hitArtifact(
@@ -744,19 +1026,32 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
   }) {
     final from = _motionFromLayouts;
     final to = _motionToLayouts;
+    Map<String, EventLayout> result;
     if (from == null || to == null || !_motion.isAnimating) {
-      return fallback;
+      result = fallback;
+    } else {
+      final progress = Curves.easeOutCubic.transform(_motion.value);
+      result = {
+        for (final event in _events)
+          event.id: from[event.id] == null || to[event.id] == null
+              ? to[event.id]!
+              : to[event.id]!.copyWith(
+                  display: Offset.lerp(from[event.id]!.display,
+                      to[event.id]!.display, progress)!,
+                ),
+      };
     }
-
-    final progress = Curves.easeOutCubic.transform(_motion.value);
+    final dragId = _armedDragEventId;
+    final dragPosition = _dragPosition;
+    if (dragId == null ||
+        dragPosition == null ||
+        result[dragId] == null ||
+        result[dragId]!.display == dragPosition) {
+      return result;
+    }
     return {
-      for (final event in _events)
-        event.id: from[event.id] == null || to[event.id] == null
-            ? to[event.id]!
-            : to[event.id]!.copyWith(
-                display: Offset.lerp(
-                    from[event.id]!.display, to[event.id]!.display, progress)!,
-              ),
+      ...result,
+      dragId: result[dragId]!.copyWith(display: dragPosition),
     };
   }
 
@@ -1066,7 +1361,13 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
       bridges: state.bridges,
     );
     final nextPositions = {
-      for (final event in state.events) event.id: generated[event.id]!,
+      for (final event in state.events)
+        event.id: state.placements[event.id] == null
+            ? generated[event.id]!
+            : Offset(
+                state.placements[event.id]!.x,
+                state.placements[event.id]!.y,
+              ),
     };
     final hasActiveEvent =
         _activeId == null || state.events.any((event) => event.id == _activeId);
@@ -1109,6 +1410,7 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
       _progressMessages = state.progressMessages;
       _sessionMessage = state.error ?? state.message;
       _sessionRunning = state.isRunning;
+      _graphRevision = state.revision;
       _sessionGeneratedEventIds =
           state.isRunning ? sessionGeneratedIds : <String>{};
       _sessionFocusEventIds = state.isRunning ? focusEventIds : <String>{};
@@ -1208,6 +1510,18 @@ class _CanvasPrototypeScreenState extends State<CanvasPrototypeScreen>
   }
 }
 
+class _PendingDrag {
+  const _PendingDrag({
+    required this.eventId,
+    required this.origin,
+    required this.oldBridges,
+  });
+
+  final String eventId;
+  final Offset origin;
+  final List<EventBridge> oldBridges;
+}
+
 class _EventCanvasPainter extends CustomPainter {
   _EventCanvasPainter({
     required Listenable repaint,
@@ -1221,6 +1535,10 @@ class _EventCanvasPainter extends CustomPainter {
     required this.expansionProgresses,
     required this.viewport,
     required this.bridgeFlow,
+    required this.dragEventId,
+    required this.dragTargetId,
+    required this.pendingDrag,
+    required this.reconciliationPulse,
   }) : super(repaint: repaint);
 
   final List<ResearchEvent> events;
@@ -1233,6 +1551,10 @@ class _EventCanvasPainter extends CustomPainter {
   final Map<String, double> expansionProgresses;
   final _CanvasViewportController viewport;
   final Animation<double> bridgeFlow;
+  final String? dragEventId;
+  final String? dragTargetId;
+  final _PendingDrag? pendingDrag;
+  final Animation<double> reconciliationPulse;
 
   static const _textCacheLimit = 2048;
   static final Map<String, TextPainter> _textCache = {};
@@ -1254,6 +1576,7 @@ class _EventCanvasPainter extends CustomPainter {
 
     _paintGrid(canvas, visibleWorldBounds);
     _paintBridges(canvas, visibleWorldBounds);
+    _paintDragState(canvas);
     _paintEvents(canvas, visibleWorldBounds);
 
     canvas.restore();
@@ -1293,6 +1616,18 @@ class _EventCanvasPainter extends CustomPainter {
 
   void _paintBridges(Canvas canvas, Rect visibleWorldBounds) {
     for (final bridge in bridges) {
+      final pending = pendingDrag;
+      if (pending != null &&
+          pending.oldBridges.any((old) =>
+              old.from == bridge.from &&
+                  old.to == bridge.to &&
+                  old.label == bridge.label ||
+              old.from == bridge.to &&
+                  old.to == bridge.from &&
+                  old.label == bridge.label)) {
+        _paintPendingBridge(canvas, bridge, pending);
+        continue;
+      }
       final from = layouts[bridge.from];
       final to = layouts[bridge.to];
       if (from == null || to == null) {
@@ -1328,6 +1663,76 @@ class _EventCanvasPainter extends CustomPainter {
         ..strokeCap = StrokeCap.round;
 
       _drawDashedPath(canvas, path, paint, phase: bridgeFlow.value * 140);
+    }
+  }
+
+  void _paintPendingBridge(
+    Canvas canvas,
+    EventBridge bridge,
+    _PendingDrag pending,
+  ) {
+    final otherId = bridge.from == pending.eventId ? bridge.to : bridge.from;
+    final other = layouts[otherId];
+    final dragged = layouts[pending.eventId];
+    if (other == null || dragged == null) {
+      return;
+    }
+    final ghost = dragged.copyWith(display: pending.origin);
+    final path = bridge.from == pending.eventId
+        ? bridgePath(ghost, other)
+        : bridgePath(other, ghost);
+    _drawDashedPath(
+      canvas,
+      path,
+      Paint()
+        ..color = _signal.withValues(
+          alpha: 0.18 + reconciliationPulse.value * 0.18,
+        )
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+      phase: reconciliationPulse.value * 40,
+    );
+  }
+
+  void _paintDragState(Canvas canvas) {
+    final pending = pendingDrag;
+    if (pending != null) {
+      final pulse = reconciliationPulse.value;
+      canvas.drawCircle(
+        pending.origin,
+        18 + pulse * 5,
+        Paint()
+          ..color = _signal.withValues(alpha: 0.08 + pulse * 0.08)
+          ..style = PaintingStyle.fill,
+      );
+      canvas.drawCircle(
+        pending.origin,
+        24 + pulse * 7,
+        Paint()
+          ..color = _signal.withValues(alpha: 0.35 - pulse * 0.18)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5,
+      );
+    }
+    final from = dragEventId == null ? null : layouts[dragEventId!];
+    final to = dragTargetId == null ? null : layouts[dragTargetId!];
+    if (from != null && to != null) {
+      canvas.drawPath(
+        bridgePath(from, to),
+        Paint()
+          ..color = _data.withValues(alpha: 0.76)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 3
+          ..strokeCap = StrokeCap.round,
+      );
+      canvas.drawCircle(
+        to.display,
+        34,
+        Paint()
+          ..color = _data.withValues(alpha: 0.65)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
     }
   }
 
@@ -1678,7 +2083,11 @@ class _EventCanvasPainter extends CustomPainter {
         oldDelegate.artifactHover != artifactHover ||
         oldDelegate.expansionProgresses != expansionProgresses ||
         oldDelegate.viewport != viewport ||
-        oldDelegate.bridgeFlow != bridgeFlow;
+        oldDelegate.bridgeFlow != bridgeFlow ||
+        oldDelegate.dragEventId != dragEventId ||
+        oldDelegate.dragTargetId != dragTargetId ||
+        oldDelegate.pendingDrag != pendingDrag ||
+        oldDelegate.reconciliationPulse != reconciliationPulse;
   }
 }
 
@@ -1708,8 +2117,7 @@ class CanvasBackgroundPainter extends CustomPainter {
     ];
     final glowPaint = Paint();
     for (final glow in glows) {
-      final center =
-          Offset(size.width * glow.$1.dx, size.height * glow.$1.dy);
+      final center = Offset(size.width * glow.$1.dx, size.height * glow.$1.dy);
       final radius = math.max(size.width, size.height) * glow.$3;
       canvas.drawCircle(
         center,
@@ -1740,6 +2148,7 @@ class CanvasBackgroundPainter extends CustomPainter {
       state = (state * 1664525 + 1013904223) & 0x7fffffff;
       return state / 2147483647.0;
     }
+
     const spacing = 50.0;
     for (var y = -spacing; y < size.height + spacing; y += spacing) {
       for (var x = -spacing; x < size.width + spacing; x += spacing) {
@@ -1776,6 +2185,97 @@ Color _sourceColor(String source) {
       return _plum;
     default:
       return _inkTextDim;
+  }
+}
+
+class _ConnectionReviewBox extends StatelessWidget {
+  const _ConnectionReviewBox({
+    required this.running,
+    required this.message,
+    required this.onCheck,
+    required this.onClose,
+  });
+
+  final bool running;
+  final String? message;
+  final VoidCallback onCheck;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      top: 22,
+      right: 22,
+      child: Material(
+        color: _panel,
+        elevation: 16,
+        shadowColor: _ink0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: const BorderSide(color: _hairline),
+        ),
+        child: SizedBox(
+          width: 286,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 10, 10, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'CONNECTION REVIEW',
+                        style: TextStyle(
+                          fontFamily: _mono,
+                          color: _inkTextDim,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.3,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.close, size: 16),
+                      onPressed: onClose,
+                    ),
+                  ],
+                ),
+                if (message != null)
+                  Text(
+                    message!,
+                    style: const TextStyle(
+                      color: _inkText,
+                      fontSize: 12.5,
+                      height: 1.4,
+                    ),
+                  )
+                else
+                  TextButton.icon(
+                    onPressed: running ? null : onCheck,
+                    icon: running
+                        ? const SizedBox.square(
+                            dimension: 13,
+                            child: CircularProgressIndicator(strokeWidth: 1.5),
+                          )
+                        : const Icon(Icons.auto_awesome, size: 15),
+                    label: Text(
+                      running ? 'HERMES IS CHECKING' : 'LET HERMES CHECK THIS',
+                      style: const TextStyle(
+                        fontFamily: _mono,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -2091,9 +2591,7 @@ class _HermesActivityDrawer extends StatelessWidget {
                                     shape: BoxShape.circle,
                                     boxShadow: [
                                       BoxShadow(
-                                        color: (running
-                                                ? _signalHot
-                                                : _data)
+                                        color: (running ? _signalHot : _data)
                                             .withValues(alpha: 0.6),
                                         blurRadius: 8,
                                       ),
@@ -2153,14 +2651,12 @@ class _HermesActivityDrawer extends StatelessWidget {
                                       return DecoratedBox(
                                         decoration: BoxDecoration(
                                           color: latest
-                                              ? _signal
-                                                  .withValues(alpha: 0.12)
-                                              : _panelRaised
-                                                  .withValues(alpha: 0.5),
+                                              ? _signal.withValues(alpha: 0.12)
+                                              : _panelRaised.withValues(
+                                                  alpha: 0.5),
                                           border: Border.all(
                                             color: latest
-                                                ? _signal
-                                                    .withValues(alpha: 0.5)
+                                                ? _signal.withValues(alpha: 0.5)
                                                 : _hairlineDim,
                                           ),
                                           borderRadius:
@@ -2310,19 +2806,19 @@ class _ZoomControls extends StatelessWidget {
     return Positioned(
       right: 18,
       bottom: MediaQuery.sizeOf(context).width > 720 ? 28 : 18,
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: _panel,
-            border: Border.all(color: _hairline),
-            borderRadius: BorderRadius.circular(10),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x82000000),
-                blurRadius: 24,
-                offset: Offset(0, 10),
-              ),
-            ],
-          ),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: _panel,
+          border: Border.all(color: _hairline),
+          borderRadius: BorderRadius.circular(10),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x82000000),
+              blurRadius: 24,
+              offset: Offset(0, 10),
+            ),
+          ],
+        ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [

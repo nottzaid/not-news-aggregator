@@ -166,4 +166,29 @@ void main() {
         contains(streamedEvent.id));
     expect(states.last.usingFallback, isFalse);
   });
+
+  test('applies persisted placements and graph revision', () async {
+    final repository = CanvasGraphRepository(
+      streamFactory: (_) => Stream.fromIterable([
+        const BackendStreamMessage(
+          type: 'placement.upsert',
+          data: '{"eventId":"spacex","x":123.5,"y":456.25,"pinned":true}',
+        ),
+        const BackendStreamMessage(
+          type: 'graph.revision',
+          data: '{"revision":7}',
+        ),
+        const BackendStreamMessage(type: 'session.done', data: '{}'),
+      ]),
+      fallbackEvents: fixtureEvents,
+      fallbackBridges: fixtureBridges,
+    );
+
+    final states = await repository.watch().toList();
+
+    expect(states.last.placements['spacex']?.x, 123.5);
+    expect(states.last.placements['spacex']?.y, 456.25);
+    expect(states.last.placements['spacex']?.pinned, isTrue);
+    expect(states.last.revision, 7);
+  });
 }

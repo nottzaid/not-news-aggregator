@@ -5,9 +5,12 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 from app.agent_events import normalize_agent_output, parse_agent_output
 from app.fixtures import FIXTURE_BRIDGES, FIXTURE_EVENTS
-from app.graph_store import GraphStore
+from app.graph_store import GraphRevisionConflict, GraphStore
+from app.hermes_reconciliation import _extract_json
 from app.hermes_runner import (
     HermesRunner,
     _clean_hermes_status_line,
@@ -325,6 +328,118 @@ def test_graph_store_clear_removes_events_bridges_and_aliases(tmp_path: Path):
     assert store.upsert_bridge(
         {"from": "duplicate-event", "to": "target-event", "label": "related"}
     ) is None
+
+
+def test_drag_transaction_commits_destination_before_reconciliation(tmp_path: Path):
+    store = GraphStore(tmp_path / "graph.sqlite")
+    store.upsert_event(_stored_event("event-a"))
+    store.upsert_event(_stored_event("event-b"))
+    store.upsert_event(_stored_event("event-c"))
+    store.upsert_bridge({"from": "event-a", "to": "event-b", "label": "old"})
+
+    transaction = store.create_drag_transaction(
+        event_id="event-a",
+        origin_x=10,
+        origin_y=20,
+        destination_x=300,
+        destination_y=400,
+        target_event_id="event-c",
+        expected_revision=0,
+    )
+
+    assert transaction["status"] == "pending"
+    assert transaction["graph"]["placements"]["event-a"] == {
+        "x": 300.0,
+        "y": 400.0,
+        "pinned": True,
+    }
+    assert transaction["graph"]["revision"] == 1
+    assert {bridge["label"] for bridge in transaction["graph"]["bridges"]} == {
+        "old",
+        "User-curated relationship",
+    }
+
+
+def test_drag_reconciliation_cannot_touch_destination_bridge(tmp_path: Path):
+    store = GraphStore(tmp_path / "graph.sqlite")
+    store.upsert_event(_stored_event("event-a"))
+    store.upsert_event(_stored_event("event-b"))
+    store.upsert_event(_stored_event("event-c"))
+    store.upsert_bridge({"from": "event-a", "to": "event-b", "label": "old"})
+    transaction = store.create_drag_transaction(
+        event_id="event-a",
+        origin_x=0,
+        origin_y=0,
+        destination_x=100,
+        destination_y=100,
+        target_event_id="event-c",
+        expected_revision=0,
+    )
+
+    with pytest.raises(ValueError, match="invalid bridge"):
+        store.resolve_drag_transaction(
+            transaction["id"],
+            [
+                {
+                    "bridgeId": transaction["createdBridgeId"],
+                    "action": "remove",
+                    "reason": "not allowed",
+                }
+            ],
+        )
+
+
+def test_drag_fallback_removes_old_edges_and_undo_restores_graph(tmp_path: Path):
+    store = GraphStore(tmp_path / "graph.sqlite")
+    store.upsert_event(_stored_event("event-a"))
+    store.upsert_event(_stored_event("event-b"))
+    store.upsert_event(_stored_event("event-c"))
+    old = {"from": "event-a", "to": "event-b", "label": "old"}
+    store.upsert_bridge(old)
+    transaction = store.create_drag_transaction(
+        event_id="event-a",
+        origin_x=0,
+        origin_y=0,
+        destination_x=100,
+        destination_y=100,
+        target_event_id="event-c",
+        expected_revision=0,
+    )
+
+    resolved = store.fallback_drag_transaction(transaction["id"])
+
+    assert resolved["status"] == "fallback"
+    assert [bridge["label"] for bridge in resolved["graph"]["bridges"]] == [
+        "User-curated relationship"
+    ]
+    undone = store.undo_drag_transaction(transaction["id"])
+    assert undone["status"] == "undone"
+    assert undone["graph"]["bridges"] == [old]
+    assert "event-a" not in undone["graph"]["placements"]
+
+
+def test_drag_rejects_stale_graph_revision(tmp_path: Path):
+    store = GraphStore(tmp_path / "graph.sqlite")
+    store.upsert_event(_stored_event("event-a"))
+
+    with pytest.raises(GraphRevisionConflict):
+        store.create_drag_transaction(
+            event_id="event-a",
+            origin_x=0,
+            origin_y=0,
+            destination_x=1,
+            destination_y=1,
+            target_event_id=None,
+            expected_revision=4,
+        )
+
+
+def test_reconciliation_extracts_json_from_quiet_hermes_output():
+    result = _extract_json(
+        'analysis complete\\n{"actions":[{"bridgeId":"a::b::old","action":"keep","reason":"still valid"}]}'
+    )
+
+    assert result["actions"][0]["action"] == "keep"
 
 
 def test_clear_graph_endpoint_clears_store(monkeypatch, tmp_path: Path):

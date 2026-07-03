@@ -10,6 +10,26 @@ import 'sse_message.dart';
 typedef BackendStreamFactory = Stream<BackendStreamMessage> Function(Uri uri);
 typedef BackendClearFactory = Future<void> Function(Uri uri);
 
+class CanvasPlacement {
+  const CanvasPlacement({
+    required this.x,
+    required this.y,
+    required this.pinned,
+  });
+
+  final double x;
+  final double y;
+  final bool pinned;
+
+  factory CanvasPlacement.fromJson(Map<String, Object?> json) {
+    return CanvasPlacement(
+      x: (json['x'] as num).toDouble(),
+      y: (json['y'] as num).toDouble(),
+      pinned: json['pinned'] as bool? ?? true,
+    );
+  }
+}
+
 const defaultGraphStreamUri = String.fromEnvironment(
   'AI_NEWS_GRAPH_STREAM_URL',
   defaultValue: 'http://127.0.0.1:8765/graph/stream',
@@ -22,6 +42,8 @@ class CanvasGraphState {
     required this.usingFallback,
     required this.isRunning,
     required this.progressMessages,
+    this.placements = const {},
+    this.revision = 0,
     this.error,
     this.message,
   });
@@ -31,6 +53,8 @@ class CanvasGraphState {
   final bool usingFallback;
   final bool isRunning;
   final List<String> progressMessages;
+  final Map<String, CanvasPlacement> placements;
+  final int revision;
   final String? error;
   final String? message;
 }
@@ -68,6 +92,7 @@ class CanvasGraphRepository {
       usingFallback: initialEvents == null,
       isRunning: startsSession,
       progressMessages: progressMessages,
+      placements: const {},
       message: startsSession ? 'Starting research session...' : null,
     );
     yield state;
@@ -90,6 +115,8 @@ class CanvasGraphRepository {
         usingFallback: state.usingFallback,
         isRunning: false,
         progressMessages: state.progressMessages,
+        placements: state.placements,
+        revision: state.revision,
         error: error.toString(),
         message: state.message,
       );
@@ -103,6 +130,9 @@ class CanvasGraphRepository {
           state, ResearchEvent.fromJson(_decodeObject(message.data))),
       'bridge.upsert' =>
         _upsertBridge(state, EventBridge.fromJson(_decodeObject(message.data))),
+      'placement.upsert' =>
+        _upsertPlacement(state, _decodeObject(message.data)),
+      'graph.revision' => _withRevision(state, _decodeObject(message.data)),
       'session.started' =>
         _withProgressMessage(state, message, isRunning: true),
       'session.done' => _finishSession(state, message),
@@ -132,6 +162,8 @@ class CanvasGraphRepository {
       usingFallback: false,
       isRunning: state.isRunning,
       progressMessages: state.progressMessages,
+      placements: state.placements,
+      revision: state.revision,
       message: state.message,
     );
   }
@@ -157,6 +189,8 @@ class CanvasGraphRepository {
       usingFallback: false,
       isRunning: state.isRunning,
       progressMessages: state.progressMessages,
+      placements: state.placements,
+      revision: state.revision,
       message: state.message,
     );
   }
@@ -173,6 +207,8 @@ class CanvasGraphRepository {
       usingFallback: state.usingFallback,
       isRunning: isRunning,
       progressMessages: _appendMessage(state.progressMessages, decodedMessage),
+      placements: state.placements,
+      revision: state.revision,
       message: decodedMessage,
     );
   }
@@ -189,8 +225,48 @@ class CanvasGraphRepository {
       usingFallback: isError ? state.usingFallback : false,
       isRunning: false,
       progressMessages: _appendMessage(state.progressMessages, decodedMessage),
+      placements: state.placements,
+      revision: state.revision,
       error: isError ? decodedMessage : null,
       message: decodedMessage,
+    );
+  }
+
+  CanvasGraphState _upsertPlacement(
+    CanvasGraphState state,
+    Map<String, Object?> json,
+  ) {
+    final eventId = json['eventId'] as String;
+    return CanvasGraphState(
+      events: state.events,
+      bridges: state.bridges,
+      usingFallback: state.usingFallback,
+      isRunning: state.isRunning,
+      progressMessages: state.progressMessages,
+      placements: {
+        ...state.placements,
+        eventId: CanvasPlacement.fromJson(json),
+      },
+      revision: state.revision,
+      error: state.error,
+      message: state.message,
+    );
+  }
+
+  CanvasGraphState _withRevision(
+    CanvasGraphState state,
+    Map<String, Object?> json,
+  ) {
+    return CanvasGraphState(
+      events: state.events,
+      bridges: state.bridges,
+      usingFallback: state.usingFallback,
+      isRunning: state.isRunning,
+      progressMessages: state.progressMessages,
+      placements: state.placements,
+      revision: (json['revision'] as num).toInt(),
+      error: state.error,
+      message: state.message,
     );
   }
 }

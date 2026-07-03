@@ -32,3 +32,15 @@ class EventBridgeDto(BaseModel):
 
 class SessionMessageDto(BaseModel):
     message: str
+
+
+class DragTransactionDto(BaseModel):
+    event_id: str = Field(alias="eventId")
+    origin_x: float = Field(alias="originX")
+    origin_y: float = Field(alias="originY")
+    destination_x: float = Field(alias="destinationX")
+    destination_y: float = Field(alias="destinationY")
+    target_event_id: str | None = Field(default=None, alias="targetEventId")
+    expected_revision: int = Field(alias="expectedRevision")
+
+    model_config = {"populate_by_name": True}

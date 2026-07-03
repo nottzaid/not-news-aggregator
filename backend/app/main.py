@@ -9,14 +9,16 @@ import urllib.parse
 import urllib.request
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI, File, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import load_private_env
 from .fixtures import FIXTURE_BRIDGES, FIXTURE_EVENTS
-from .graph_store import GraphStore
+from .graph_store import GraphRevisionConflict, GraphStore
+from .hermes_reconciliation import HermesReconciliationRunner
 from .hermes_runner import HermesRunner
+from .schemas import DragTransactionDto
 from .sse import encode_sse
 
 
@@ -25,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI News Canvas Backend")
 graph_store = GraphStore()
+reconciliation_runner = HermesReconciliationRunner()
+_reconciliation_tasks: set[asyncio.Task[None]] = set()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
@@ -50,6 +54,65 @@ async def graph_stream() -> StreamingResponse:
 async def clear_graph() -> dict[str, str]:
     graph_store.clear()
     return {"status": "cleared"}
+
+
+@app.get("/graph")
+async def graph_snapshot() -> dict[str, object]:
+    return graph_store.snapshot()
+
+
+@app.post("/graph/drag-transactions")
+async def create_drag_transaction(payload: DragTransactionDto) -> dict[str, object]:
+    try:
+        transaction = graph_store.create_drag_transaction(
+            event_id=payload.event_id,
+            origin_x=payload.origin_x,
+            origin_y=payload.origin_y,
+            destination_x=payload.destination_x,
+            destination_y=payload.destination_y,
+            target_event_id=payload.target_event_id,
+            expected_revision=payload.expected_revision,
+        )
+    except GraphRevisionConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (KeyError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    task = asyncio.create_task(_reconcile_drag(transaction["id"]))
+    _reconciliation_tasks.add(task)
+    task.add_done_callback(_reconciliation_tasks.discard)
+    return transaction
+
+
+@app.get("/graph/drag-transactions/{transaction_id}")
+async def get_drag_transaction(transaction_id: str) -> dict[str, object]:
+    try:
+        return graph_store.drag_transaction(transaction_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Unknown drag transaction.") from error
+
+
+@app.post("/graph/drag-transactions/{transaction_id}/undo")
+async def undo_drag_transaction(transaction_id: str) -> dict[str, object]:
+    try:
+        return graph_store.undo_drag_transaction(transaction_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Unknown drag transaction.") from error
+
+
+@app.post("/graph/drag-transactions/{transaction_id}/review")
+async def review_drag_destination(transaction_id: str) -> dict[str, object]:
+    try:
+        context = graph_store.reconciliation_context(transaction_id)
+        if context["destinationEvent"] is None:
+            raise HTTPException(status_code=400, detail="Drag has no destination connection.")
+        return await reconciliation_runner.review_destination(context)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Unknown drag transaction.") from error
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.exception("Hermes destination review failed")
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @app.get("/research/stream")
@@ -103,14 +166,34 @@ async def _stored_graph_stream() -> AsyncIterator[str]:
 
 
 async def _stored_graph_mutation_stream() -> AsyncIterator[str]:
-    events = graph_store.list_events()
-    bridges = graph_store.list_bridges()
+    snapshot = graph_store.snapshot()
+    events = snapshot["events"]
+    bridges = snapshot["bridges"]
     for event in events:
         yield encode_sse("event.upsert", event)
         await asyncio.sleep(0)
     for bridge in bridges:
         yield encode_sse("bridge.upsert", bridge)
         await asyncio.sleep(0)
+    for event_id, placement in snapshot["placements"].items():
+        yield encode_sse(
+            "placement.upsert", {"eventId": event_id, **placement}
+        )
+        await asyncio.sleep(0)
+    yield encode_sse("graph.revision", {"revision": snapshot["revision"]})
+
+
+async def _reconcile_drag(transaction_id: str) -> None:
+    try:
+        context = graph_store.reconciliation_context(transaction_id)
+        actions = await reconciliation_runner.reconcile(context)
+        graph_store.resolve_drag_transaction(transaction_id, actions)
+    except Exception:
+        logger.exception("Hermes drag reconciliation failed; applying fallback")
+        try:
+            graph_store.fallback_drag_transaction(transaction_id)
+        except Exception:
+            logger.exception("Deterministic drag fallback failed")
 
 
 async def _research_graph_stream(prompt: str) -> AsyncIterator[str]:
