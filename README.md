@@ -1,179 +1,149 @@
 # Not News Aggregator
 
-Not News Aggregator is a Linux Flutter canvas for agentic research. You speak a
-question from the GUI, Hermes researches it with Exa, SearXNG, and Browse.sh,
-then streams the result into a living graph of events, source artifacts, and
-relationships. The backend also exposes a prompt-based research stream for
-direct API use.
+Not News Aggregator is a Linux research canvas, not a feed reader. Ask a
+question by voice or text; a project-isolated Hermes agent searches through
+SearXNG, Exa, and Browse.sh, then streams sourced events and relationships into
+a persistent graph.
 
-This is not a feed reader. The canvas is meant to grow from research sessions:
-related events join existing clusters, unrelated topics form separate regions,
-and source cards stay attached to the event they support.
+The graph remains a workspace after research ends. Related events join existing
+regions; unrelated work opens elsewhere; source artifacts stay attached to the
+claims they support. Dragging an event moves and pins it immediately while
+Hermes reconciles only the relationships left at its origin.
 
-## What It Does
+## What runs
 
-- Records speech from the Linux GUI and transcribes it with Groq Whisper.
-- Runs a project-local Hermes profile so your normal Hermes setup is not
-  modified.
-- Uses Exa for semantic discovery and extraction.
-- Uses local SearXNG as a broad meta-search discovery layer.
-- Uses Browse.sh/browser automation for dynamic or extraction-hostile pages.
-- Uses Kokoro for local spoken updates when Hermes decides a voice note is
-  useful.
-- Persists the graph in a local SQLite database.
-- Provides a clear button in the bottom-right canvas controls.
+```text
+Flutter Linux canvas
+  ├─ GET  /graph/stream           saved events, bridges, placements, revision
+  ├─ GET  /research/stream        Hermes research as SSE mutations
+  ├─ POST /audio/transcribe       Groq Whisper
+  └─ POST /graph/drag-transactions
+            │
+            ├─ immediate SQLite placement + optional user bridge
+            └─ bounded Hermes origin reconciliation → deterministic fallback
+```
+
+The local FastAPI backend stores the graph in `backend/data/graph.sqlite`.
+Kokoro can speak sparse, agent-chosen orientation notes; those notes never
+become graph nodes.
 
 ## Requirements
 
-- Flutter with Linux desktop support enabled.
-- Python/uv for the FastAPI backend.
-- Podman or Docker for local SearXNG.
-- Hermes installed and available on `PATH`.
-- Browse.sh CLI available as `browse` if you want dynamic-page inspection.
-- Kokoro TTS installed locally if voice playback is enabled.
+- Flutter with Linux desktop support (Dart 3.4+)
+- Python 3.12+ through [`uv`](https://docs.astral.sh/uv/)
+- Podman or Docker for local SearXNG
+- Hermes on `PATH`
+- Browse.sh as `browse` for dynamic-page inspection
+- optional local Kokoro for spoken notes
 
-## Setup
+## From clone to canvas
 
-Create your local environment file:
-
-```bash
+```sh
+git clone https://github.com/muradkant/not-news-aggregator.git
+cd not-news-aggregator
 cp .env.example .env
 ```
 
-Fill in the keys you use:
+For live research with the default provider, set:
 
-```bash
-EXA_API_KEY=...
-GROQ_API_KEY=...
-OPENCODE_GO_API_KEY=...
+```sh
 AI_NEWS_ENABLE_HERMES=1
+OPENCODE_GO_API_KEY=...
+EXA_API_KEY=...
+GROQ_API_KEY=...       # required only for microphone transcription
 ```
 
-The default SearXNG settings are already suitable for local development:
+SearXNG already defaults to `http://127.0.0.1:8889`. Check the complete local
+contract, then start every component:
 
-```bash
-SEARXNG_URL=http://127.0.0.1:8889
-AI_NEWS_SEARXNG_SEARCH_URL=http://127.0.0.1:8889/search
-```
-
-## Run
-
-Start everything with:
-
-```bash
+```sh
+./scripts/doctor
 ./scripts/dev
 ```
 
-That script:
+`scripts/dev` prepares the isolated Hermes profile, starts SearXNG, starts the
+backend, waits for `/health`, then launches Flutter. It stops the backend when
+Flutter exits. The API listens on `http://127.0.0.1:8765` unless
+`AI_NEWS_BACKEND_PORT` says otherwise.
 
-1. loads `.env`
-2. prepares the project-local Hermes profile
-3. starts local SearXNG
-4. starts the FastAPI backend
-5. launches the Flutter Linux GUI
+With `AI_NEWS_ENABLE_HERMES=0`, saved graph browsing still works and a failed
+drag reconciliation takes the deterministic fallback; no live research model
+is called.
 
-The backend defaults to:
+## Research surfaces
 
-```text
-http://127.0.0.1:8765
-```
+The three search paths have distinct jobs:
 
-## Hermes Profile
+- **SearXNG** widens the URL frontier across engines, categories, languages,
+  dates, and pages.
+- **Exa** supplies semantic discovery and fuller extraction.
+- **Browse.sh** handles JavaScript-heavy, interactive, or extraction-hostile
+  pages.
 
-This project uses:
+Hermes compares those paths, prefers primary material, and uses secondary
+sources as leads when direct evidence exists. Its reusable profile instructions
+live in `hermes/ainews/`; runtime sessions, auth, logs, memory, and cache stay in
+ignored `.hermes/` state. [Hermes profile](HERMES.md) explains that boundary.
 
-```text
-.hermes/profiles/ainews
-```
+Manage SearXNG independently with:
 
-The setup script creates it with no bundled skills and no global alias. This is
-intentional: the app should not mutate your personal Hermes profile or install a
-large generic skill catalog.
-
-The project ships the profile context that makes the agent behave correctly:
-
-```text
-hermes/ainews/SOUL.md
-hermes/ainews/memories/USER.md
-```
-
-`./scripts/dev` copies those templates into the ignored runtime profile under
-`.hermes/profiles/ainews/`.
-
-To verify the profile:
-
-```bash
-HERMES_HOME="$PWD/.hermes/profiles/ainews" HERMES_PROFILE=ainews hermes skills list
-```
-
-Expected result: no bundled or hub-installed skills.
-
-## SearXNG
-
-Local SearXNG is managed by:
-
-```bash
+```sh
 scripts/searxng start
 scripts/searxng test
 scripts/searxng stop
 ```
 
-The app asks Hermes to use SearXNG as a configurable discovery surface. Hermes
-can choose categories, engines, time ranges, languages, and pages per task,
-then compare that URL frontier with Exa semantic results.
+## Direct manipulation
 
-## Clear The Canvas
+Press an event and move more than six screen pixels to drag; empty-canvas input
+still pans. During the gesture, the event follows local pointer state—no HTTP,
+database, layout regeneration, or model work occurs.
 
-In the GUI, use the trash icon in the bottom-right control strip.
+Drop near another event to create a protected user relationship, or drop in
+empty space to move alone. The backend atomically checks the graph revision,
+persists the pinned world position, creates any destination bridge, and returns.
+The UI shows the new state before origin reconciliation finishes.
 
-From the terminal:
+Hermes receives only the dragged event's former relationships and may keep,
+remove, or relabel each. Its process is isolated from project rules, restricted
+to a non-mutating clarification toolset, bounded by time and turn count, and
+killed on timeout. Malformed output, disabled Hermes, or process failure removes
+the old relationships deterministically; the destination remains authoritative.
 
-```bash
+After a targeted drop, **LET HERMES CHECK THIS** requests a separate advisory
+review. It cannot mutate the user-authored destination. The backend also exposes
+transaction undo, though the current Canvas has no undo control yet. See
+[Detach and reconciliation](docs/detach-reconciliation-design.md) for shipped
+invariants and remaining work.
+
+## Operate the graph
+
+Clear all saved graph state with the trash control or:
+
+```sh
 curl -X DELETE http://127.0.0.1:8765/graph
 ```
 
-The graph database lives at:
+Inspect the current snapshot:
 
-```text
-backend/data/graph.sqlite
+```sh
+curl http://127.0.0.1:8765/graph
 ```
 
-It is ignored by git because it is local runtime state.
+Secrets, sessions, databases, generated SearXNG configuration, Flutter output,
+and dependency caches are ignored. Tracked templates and lockfiles reconstruct
+the application without publishing private research.
 
-## Tests
+## Verify
 
-Backend:
-
-```bash
-UV_CACHE_DIR="$PWD/.uv-cache" uv run --project backend pytest backend/tests
-```
-
-Flutter:
-
-```bash
-flutter test
-```
-
-Static analysis:
-
-```bash
+```sh
 flutter analyze
+flutter test
+UV_CACHE_DIR="$PWD/.uv-cache" uv run --project backend pytest backend/tests
+flutter build linux --debug
 ```
 
-Static analysis should pass cleanly. The Linux GUI is the primary target for
-this prototype.
-
-## Repository Hygiene
-
-Ignored local state includes:
-
-- `.env`
-- `.hermes/`
-- `.uv-cache/`
-- `backend/data/`
-- `build/`
-- generated Flutter tool state
-- generated SearXNG `settings.yml`
-
-This keeps the open-source repository reproducible without publishing local
-secrets, graph data, Hermes sessions, or generated build artifacts.
+The tests cover layout stability, SSE reduction, transcription failures,
+durable placement and revision streaming, immediate drag commits, protected
+destination bridges, fallback, undo, stale-drop rejection, Hermes JSON parsing,
+and the reconciliation command's tool boundary.

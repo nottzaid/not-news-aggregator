@@ -10,7 +10,7 @@ import pytest
 from app.agent_events import normalize_agent_output, parse_agent_output
 from app.fixtures import FIXTURE_BRIDGES, FIXTURE_EVENTS
 from app.graph_store import GraphRevisionConflict, GraphStore
-from app.hermes_reconciliation import _extract_json
+from app.hermes_reconciliation import HermesReconciliationRunner, _extract_json
 from app.hermes_runner import (
     HermesRunner,
     _clean_hermes_status_line,
@@ -32,6 +32,7 @@ from app.hermes_voice import (
     _was_recently_spoken,
 )
 from app import hermes_runner as hermes_runner_module
+from app import hermes_reconciliation as hermes_reconciliation_module
 from app import main as main_module
 from app.main import (
     _build_groq_transcription_request,
@@ -440,6 +441,49 @@ def test_reconciliation_extracts_json_from_quiet_hermes_output():
     )
 
     assert result["actions"][0]["action"] == "keep"
+
+
+def test_reconciliation_command_has_no_mutating_or_research_tools():
+    command = HermesReconciliationRunner()._command("reconcile")
+
+    assert command[command.index("--toolsets") + 1] == "clarify"
+    assert "--ignore-rules" in command
+    assert "--yolo" not in command
+
+
+def test_reconciliation_timeout_kills_child(monkeypatch):
+    class HangingProcess:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.killed = False
+
+        async def communicate(self):
+            await asyncio.Future()
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            return self.returncode or 0
+
+    process = HangingProcess()
+
+    async def create_process(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setenv("AI_NEWS_ENABLE_HERMES", "1")
+    monkeypatch.setenv("HERMES_RECONCILIATION_TIMEOUT", "0.001")
+    monkeypatch.setattr(
+        hermes_reconciliation_module.asyncio,
+        "create_subprocess_exec",
+        create_process,
+    )
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        asyncio.run(HermesReconciliationRunner()._invoke("reconcile"))
+
+    assert process.killed is True
 
 
 def test_clear_graph_endpoint_clears_store(monkeypatch, tmp_path: Path):

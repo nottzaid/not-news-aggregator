@@ -1,522 +1,242 @@
-# Detach and Reconciliation Design
+# Detach and reconciliation
 
-Status: proposed interaction and architecture contract. No feature code has
-been implemented from this document.
+Status: the first event-drag slice is implemented on the current branch. This
+document separates its enforced contract from the larger interaction still to
+be built.
 
-## Baseline and rollback
+The gesture has one grammar:
 
-The tracked application baseline is commit `519caa1`, protected by the local
-branch `codex/pre-detach-design-20260703`.
+```text
+lift → carry → drop
+```
 
-The saved Canvas is ignored by Git, so it has a separate SQLite snapshot:
+The destination is immediate, user-authored, and authoritative. The origin is
+settled asynchronously. The latency belongs to semantic settlement, never to
+manipulation.
 
-`backend/data/backups/pre-detach-design-20260703.sqlite`
+## Why placement must persist
 
-The snapshot passes `PRAGMA integrity_check`, contains 71 events, 85 bridges,
-and 9 aliases, and has the same SQL dump as the live database at the start of
-this design pass.
+The original layout equated clusters with connected components and regenerated
+every base position on each graph update. The saved baseline disproved that
+equivalence: 71 events formed nine components, yet visually distinct research
+communities remained meaningfully bridged; 24 events were articulation points,
+and 39 of 85 relationships were graph-theoretic bridge edges.
 
-Pre-existing untracked files under `FEATURE_NOTES.md`, `SKILL.md`, and `docs/`
-were not modified during baseline capture.
+Dragging one event through that global generator would move unrelated work,
+allow one destination edge to reshape the Canvas, and pull the event away from
+the researcher's cursor. The product therefore persists world position and pin
+state. Clusters remain emergent; no `Cluster` entity is introduced.
 
-## Product contract
+## Implemented slice
 
-The visible interaction is one direct-manipulation grammar:
+### Pointer state
 
-`lift -> carry -> drop`
+- Pointer-down on an event arms a drag; empty Canvas still arms camera pan.
+- Six screen pixels separate click from drag.
+- Once dragging, the event follows local Flutter state. Pointer movement does
+  no HTTP, SQLite, JSON, layout regeneration, or model work.
+- A target inside the zoom-adjusted magnetic radius is exact: the UI highlights
+  that event and previews the bridge.
 
-Clusters remain an emergent result of events, relationships, and layout. This
-design does not add a persistent `Cluster` entity.
+Artifact dragging, keyboard cancellation, multi-selection, and central-dwell
+merge are not implemented.
 
-The interaction is deliberately asymmetric:
+### Synchronous drop
 
-- The destination is immediate, user-authored, and authoritative.
-- The origin is reconciled asynchronously by Hermes.
-- A researcher may explicitly ask Hermes to review the destination. That review
-  is advisory and cannot alter the new connection without approval.
-- The dragged object never waits for an LLM and never loses contact with the
-  cursor.
+`POST /graph/drag-transactions` receives:
 
-The latency belongs to semantic settlement, not manipulation.
+```json
+{
+  "eventId": "event-a",
+  "originX": 10,
+  "originY": 20,
+  "destinationX": 300,
+  "destinationY": 400,
+  "targetEventId": "event-b",
+  "expectedRevision": 7
+}
+```
 
-Asynchronous here means that the synchronous drop transaction returns before a
-separate reconciliation job runs. The implementation may use an event-loop
-task, subprocess, or worker queue; it does not require an operating-system
-thread. The architectural requirement is concurrency: reconciliation cannot
-block pointer movement, the drop response, or unrelated Canvas work.
+Under one `BEGIN IMMEDIATE` transaction, the backend:
 
-## What the current application implies
-
-The current layout derives formal clusters as connected components of every
-bridge. It then generates seeded positions for each component. It does not
-persist manual positions, and every graph-state update regenerates all base
-positions.
-
-The saved graph demonstrates why a formal component is not the same thing as a
-perceived community:
-
-- 71 events form 9 connected components.
-- The largest component contains 20 events.
-- Cybersecurity and quantum-security communities appear visually distinct but
-  are joined by several meaningful bridges.
-- 24 events are articulation points.
-- 39 of the 85 stored relationships are graph-theoretic bridge edges whose
-  removal increases the number of components.
-
-Consequently, a node drag cannot call the existing
-`generateBasePositions(...)` after every intermediate mutation. That would
-move unrelated events, allow a new destination bridge to reshape the whole
-Canvas, and pull the dragged node away from the user's drop point.
-
-The implementation needs persistent placement and incremental settling, not a
-stored cluster model.
-
-## Interaction state machine
-
-### 1. Idle
-
-Canvas movement behaves as it does now. Hovering an event keeps the existing
-metadata and artifact behavior.
-
-### 2. Armed
-
-Pointer-down is classified before movement:
-
-- Event hit: arm event drag.
-- Expanded artifact hit: arm artifact drag.
-- Empty Canvas: arm camera pan.
-
-A small movement threshold preserves ordinary clicks. Crossing the threshold
-commits to exactly one interaction; a node drag cannot turn into a camera pan.
-
-### 3. Carrying
-
-The node follows the pointer using local Flutter state only. No backend or
-Hermes call occurs during pointer movement.
-
-Its old incident bridges remain visible but become slightly desaturated and
-tense. This indicates that they have not yet been reconciled.
-
-Potential event targets acquire a magnetic field during the drag. The field
-may illuminate a surrounding community, but one exact anchor event is always
-highlighted and a preview bridge identifies the precise connection that a drop
-will create. The user never drops onto an ambiguous aggregate.
-
-### 4. Dropped
-
-The application synchronously commits:
-
-- The dragged event's world position.
-- A pin preserving that position across graph updates.
-- The new user-authored destination bridge when an anchor was targeted.
-- A graph revision and undo record.
-- An origin-reconciliation job containing the pre-drop relationship snapshot.
-
-The new bridge is marked as user-authored and protected from the origin job.
-The node and new bridge appear immediately.
-
-Dropping on empty space creates no destination bridge. The event remains at the
-drop position while its former relationships are reconciled.
-
-The drop position remains authoritative after reconciliation as well. The
-background job may settle the topology left at the origin, but it cannot move
-the researcher's dropped event. The event remains manually pinned until the
-researcher drags it again.
-
-### 5. Origin reconciling
-
-A restrained semantic afterimage remains at the original position:
-
-- A translucent remnant of the dragged node marks the unresolved origin.
-- Former bridge endpoints terminate at that remnant rather than pretending
-  that Hermes has already decided.
-- A slow orbital sweep indicates active reconciliation.
-- The origin neighbourhood remains spatially stable while the job runs.
-
-Hermes evaluates only the relationships that existed before the drag. For each
-one, it may propose:
-
-- Keep the relationship.
-- Remove the relationship.
-- Amend its label or relationship semantics.
-
-When the validated plan commits:
-
-- Removed relationships retract into the afterimage and dissolve.
-- Kept relationships extend from the origin towards the event's new position.
-- Amended relationships transition without disappearing.
-- Only components affected at the origin settle into their new positions.
-- The afterimage disappears.
-
-The destination position remains pinned throughout this process.
-
-### 6. Optional destination review
-
-A compact, closable review box appears near the new connection:
-
-`LET HERMES CHECK THIS CONNECTION`
-
-The box does not start Hermes automatically. The researcher may close it or
-activate it when uncertain. The same review action remains available later
-from the connection's contextual UI.
-
-Once activated, it changes to `HERMES · CHECKING CONNECTION` and resolves to
-one of:
-
-- `SUPPORTED`
-- `NO CONCERNS`
-- `REVIEW SUGGESTION`
-
-A concern contains an evidence-backed proposed diff. It never mutates the
-user-authored destination bridge automatically. The researcher may inspect and
-accept or dismiss the suggestion later.
-
-Destination review is independent from origin reconciliation. A slow review
-cannot delay or invalidate the drag.
-
-## Detach outcomes
-
-Outcomes vary because graph structure varies, not because the gesture changes
-meaning.
-
-For a chain `A--B--C`, removing both old relationships around `B` produces
-three singletons.
-
-For a triangle `A--B--C--A`, removing `B`'s two old relationships leaves
-`A--C` connected.
-
-Hermes chooses which of the dragged event's old relationships remain
-semantically valid. Deterministic graph functions calculate the consequence of
-each candidate plan before Hermes submits it.
-
-## Hermes reconciliation harness
-
-The existing `HermesRunner` is a streaming research agent with broad tool
-access. Reconciliation should use a separate, constrained runner. It should not
-receive terminal, file, browser, web-search, delegation, or source-mutation
-tools for an ordinary drag.
-
-The deterministic substrate does the mechanical reasoning:
-
-- Capture an immutable graph snapshot and revision.
-- Identify old incident relationships.
-- Identify protected destination relationships.
-- Compute degrees, alternate paths, articulation effects, connected components,
-  and affected event sets.
-- Enumerate or validate candidate actions.
-- Simulate the component delta and local layout impact.
-- Reject changes outside the job's scope.
-- Commit one validated plan atomically.
-- Record its inverse for undo.
-
-Hermes supplies the residual semantic judgment using a small tool/API surface.
-
-### Proposed tool surface
-
-`get_reconciliation_context(transaction_id)`
-
-Returns the dragged event, its old neighbours, relationship labels, relevant
-summaries and sources, the drop destination, and graph revision. It excludes
-unrelated Canvas content.
-
-`simulate_origin_plan(transaction_id, actions)`
-
-Accepts proposed keep/remove/amend actions and returns deterministic effects:
-new components, isolated events, affected articulation points, protected-edge
-violations, and local layout impact. It never writes.
-
-`submit_origin_plan(transaction_id, actions, rationale)`
-
-Submits a final structured proposal. The backend validates the proposal against
-the original snapshot and current revision before committing.
-
-`submit_destination_review(transaction_id, verdict, evidence, proposed_diff)`
-
-Stores an advisory review. A proposed destination mutation remains pending
-until explicitly approved by the researcher.
-
-Hermes receives no general graph-write function. It can propose only through
-these bounded calls.
-
-### Plan constraints
-
-The validator rejects a plan that:
-
-- Touches the newly created destination bridge.
-- Touches an event or relationship absent from the job snapshot.
-- Deletes an event.
-- Reuses a stale graph revision.
-- Produces a self-loop or missing endpoint.
-- Violates URL uniqueness.
-- Omits a rationale for a semantic change.
-- Repeats or contradicts an action for the same relationship.
-
-The backend, not Hermes, owns these invariants.
-
-## Persistence and API boundary
-
-The existing backend supports event/bridge upsert during research and clearing
-the graph. It lacks stable client mutations, bridge deletion, graph revisions,
-manual placement, transactions spanning several mutations, undo history, and a
-long-lived channel for reconciliation results.
-
-The minimum new persistence concepts are:
-
-- Stable relationship IDs.
-- Relationship provenance (`agent` or `user`).
-- Persistent event world positions and manual-pin state.
-- Monotonic graph revision.
-- Drag transaction with pre-drop snapshot.
-- Reconciliation job state.
-- Mutation log containing an inverse operation.
-- Advisory destination review.
-
-### Synchronous drop endpoint
-
-`POST /graph/drag-transactions`
-
-The request contains the dragged event, source and destination world
-coordinates, optional exact target event, and expected graph revision.
-
-The response contains the committed destination placement, any new protected
-bridge, next graph revision, transaction ID, reconciliation job ID, and undo
-token.
-
-This endpoint performs no LLM work.
-
-### Asynchronous result channel
-
-The current graph SSE stream closes after loading or research completion.
-Reconciliation therefore needs a dedicated transaction stream or a persistent
-graph mutation stream.
-
-Proposed event types:
-
-- `drag.committed`
-- `reconciliation.started`
-- `reconciliation.resolved`
-- `reconciliation.fallback`
-- `connection_review.completed`
-- `graph.undo`
-
-Each event carries a transaction ID and graph revision. The client ignores a
-stale result rather than applying it to newer state.
-
-## Failure and concurrency behavior
-
-Hermes failure must not roll back the researcher's destination.
-
-On timeout, malformed output, unavailable model, or stale revision:
-
-- The dropped node and user-authored destination bridge remain committed.
-- A deterministic fallback removes every pre-drop incident relationship in the
-  reconciliation job's scope.
-- The backend computes and commits the resulting component delta atomically.
-- The same origin animation used for an all-remove Hermes plan makes the
-  fallback visible.
-- The mutation log records that fallback, so undo restores every removed
-  relationship.
-
-The rest of the Canvas remains usable. A second drag may run concurrently when
-its event and old relationships do not overlap the unresolved transaction.
-Overlapping operations wait or require the first transaction to be resolved;
-they are never merged implicitly.
-
-Undo while a job is pending cancels the job and applies the recorded inverse.
-Undo after resolution reverses both the immediate destination mutation and the
-committed Hermes plan.
-
-## Split, promotion, and merge
+1. rejects a stale revision, missing event, self-target, or missing target;
+2. snapshots the old placement and every incident relationship;
+3. writes and pins the new world position;
+4. creates an optional `User-curated relationship` with `provenance=user`;
+5. records a drag transaction and increments the graph revision.
+
+No LLM work precedes the response. The Flutter client optimistically renders
+the destination, then replaces it with the authoritative snapshot.
+
+### Origin reconciliation
+
+The backend starts a separate asyncio task after commit. Its context contains
+only the dragged event, old relationships, old neighbors, destination event,
+and allowed actions. Hermes must decide every old relationship exactly once:
+
+- `keep`
+- `remove`
+- `amend` with a nonempty label
+
+Unknown, duplicate, omitted, or invalid bridge actions fail validation. The
+new destination bridge is absent from the allowlist and cannot be touched.
+
+The subprocess uses `--toolsets clarify --ignore-rules`, no approval bypass,
+four turns by default, and a 45-second timeout. Timeout or task cancellation
+kills and reaps the child. No terminal, file, browser, web, delegation, or
+mutation tool reaches this model call.
+
+If Hermes is disabled, fails, times out, or emits invalid JSON, deterministic
+fallback removes every old relationship in scope. The destination placement
+and protected bridge remain.
+
+### Visible settlement
+
+While the client polls the transaction every 240 ms:
+
+- a pulsing afterimage marks the origin;
+- old bridges terminate at that afterimage rather than pretending settlement;
+- the dropped event remains pinned at the destination.
+
+Resolved or fallback snapshots replace the pending topology and dismiss the
+afterimage. Incremental origin-only layout settlement is not yet implemented;
+unpinned positions still pass through the existing generator when a snapshot is
+applied.
+
+### Destination review and undo
+
+A targeted drop exposes a closable **LET HERMES CHECK THIS** panel. Review is a
+separate model request returning an advisory summary. It cannot change the
+user-authored bridge, and the current UI does not yet present an evidence list,
+proposed diff, accept action, or later contextual re-entry.
+
+`POST /graph/drag-transactions/{id}/undo` restores old incident relationships
+and the prior placement, removes the newly created relationship, increments the
+revision, and marks the transaction undone. The API is implemented and tested;
+the Canvas has no undo control yet.
+
+## Persistence
+
+SQLite now contains:
+
+```text
+placements(event_id, x, y, pinned)
+graph_meta(key='revision', value)
+drag_transactions(id, status, base_revision, committed_revision, payload, plan)
+bridges(id, payload)
+```
+
+Bridge IDs derive from endpoints and normalized label. Stored graph SSE emits
+events, bridges, placements, then `graph.revision`; the client reducer preserves
+all four across updates.
+
+Current transaction status is `pending`, `resolved`, `fallback`, or `undone`.
+The recorded payload contains enough pre-drop state for one transaction undo,
+but this is not yet a general mutation log.
+
+## Enforced invariants
+
+- A stale client revision cannot commit a drop.
+- A destination is an exact event or empty space, never an ambiguous community.
+- The model can decide only relationships captured before the drop.
+- The model cannot delete events or address the destination bridge.
+- A valid plan decides every allowed bridge once.
+- The new position remains pinned through success and fallback.
+- Failure has a deterministic visible result.
+- Local pointer motion never awaits semantic work.
+
+## Remaining correctness work
+
+The first slice does not yet satisfy the full design. In priority order:
+
+1. **Settlement conflict control.** Reconciliation validates transaction scope
+   but does not compare the current graph revision with its committed revision
+   before applying a late plan. A later mutation can therefore make an old plan
+   stale.
+2. **Concurrent transaction ownership.** Undo restores the dragged event's
+   incident edges from its snapshot; it needs conflict rules before multiple
+   overlapping drags can be considered safe.
+3. **General mutation history.** Add inverse operations, redo, restart recovery,
+   idempotency keys, and a visible undo affordance.
+4. **Persistent result channel.** Polling works for one client but a graph-wide
+   mutation stream should deliver reconciliation and undo across clients.
+5. **Incremental layout.** Settle only the affected origin neighborhood while
+   preserving unrelated unpinned events.
+6. **Bounded semantic API.** The current tool allowlist prevents mutation; a
+   future first-class `simulate_origin_plan` / `submit_origin_plan` interface
+   should replace free-form JSON output.
+7. **Destination evidence.** Store verdict, evidence, and proposed diff; require
+   explicit approval for any edit.
+
+## Future interaction
 
 ### Artifact promotion
 
-Dragging an expanded artifact into empty space immediately creates a pinned
-draft event at the destination. The parent displays the same origin
-reconciliation treatment.
+Dragging an expanded source artifact should create a new event only after the
+backend validates URL uniqueness and performs one atomic transaction:
 
-Dragging the event hub itself carries the event and all currently displayed
-artifact leaves as one visual unit. The leaves preserve their offsets from the
-hub during the drag. Grabbing an individual leaf instead detaches that artifact
-and begins promotion.
+- remove the artifact from its parent;
+- create the event with source provenance;
+- place and pin it;
+- optionally create a destination relationship;
+- enqueue origin reconciliation;
+- record the inverse.
 
-Promotion must be one backend transaction. The current store aliases a new
-event to an existing event when the new primary URL matches one of the
-existing event's artifacts. Creating the child before removing the artifact
-would therefore collapse it back into its parent.
+Creating a node before removing the artifact would expose the same URL twice
+and violate the current graph contract.
 
-The draft can inherit the parent color and use the artifact label/source as
-initial editable fields. Hermes may propose richer metadata afterwards.
+### Event merge
 
-### Event splitting
+A long central dwell may eventually signal merge, but it needs a visibly
+different preview from edge attachment and an explicit confirmation. Merge must
+choose canonical title, date, summary, sources, aliases, placement, and incident
+relationships; deduplicate URLs and self-loops; and preserve a complete inverse.
+It is deliberately later than artifact promotion.
 
-The first implementation should define splitting as one or more artifact
-promotions. A claim-only split has no draggable subobject yet. Full-text
-selection and excerpting can later make a claim or excerpt directly
-detachable.
+Multi-event dragging is outside the present scope.
 
-### Event merging
+## Failure semantics
 
-Creating a relationship and merging event identities are not the same drop
-result.
+The contract rejects ambiguity rather than hiding it:
 
-A destructive identity merge should require a distinct central dwell target:
-the destination node visibly begins to coalesce only after the cursor remains
-over its core. A near-node magnetic drop creates a relationship; a sustained
-core drop merges records.
+- API rejection restores the authoritative graph stream.
+- Model failure produces deterministic detach and an explicit status.
+- Restart recovery must eventually resolve or fall back any persisted `pending`
+  job; that recovery is not implemented yet.
+- Undo during pending reconciliation requires cancellation or supersession; the
+  current backend marks undone, while the late task sees a non-pending status and
+  returns without applying its plan.
 
-For a merge, the target event remains canonical immediately. The source event
-is retained as a recoverable revision/alias rather than deleted. Conflicting
-title, date, summary, notes, artifacts, and relationships are reconciled after
-the visual merge, with no source data discarded before an undo record exists.
+## Verification
 
-This central merge target should not be implemented until ordinary event
-detachment and artifact promotion have validated the gesture grammar.
+Current automated evidence covers:
 
-## Testing methodology
+- immediate placement, pin, protected destination, and revision increment;
+- rejection when reconciliation names the protected bridge;
+- deterministic fallback and undo restoration;
+- stale revision rejection at drop time;
+- parsing quiet Hermes JSON;
+- reconciliation command isolation from mutating and research tools;
+- placement and revision reduction in Flutter;
+- existing layout, hover, artifact, and stream behavior.
 
-Testing proceeds from deterministic graph behavior outward to LLM variance and
-then human interaction.
+Run it with:
 
-### 1. Pure graph tests
+```sh
+flutter analyze
+flutter test
+UV_CACHE_DIR="$PWD/.uv-cache" uv run --project backend pytest backend/tests
+```
 
-Use small named graphs with exact expected deltas:
+Still required before calling the full interaction complete:
 
-- Singleton.
-- Leaf.
-- Chain with an articulation point.
-- Cycle with an alternate path.
-- High-degree hub.
-- Two dense communities connected by one sparse relationship.
-- Several relationships with the same endpoints but different semantics.
+- widget tests for click/drag arbitration, pan exclusivity, zoom conversion,
+  cancellation, target preview, pending/fallback rendering, and undo;
+- conflict tests for late reconciliation, overlapping drags, and restart;
+- golden tests for afterimage and review UI at 35%, 45%, 100%, and 280% zoom;
+- frame-time measurement under a 16.7 ms budget;
+- hands-on tests for leaf, articulation event, cross-community drop, fallback,
+  undo, and unrelated Canvas use during reconciliation.
 
-Verify incident-edge scoping, component changes, alternate paths,
-articulation effects, protected destination edges, plan simulation, and inverse
-generation.
-
-Promote selected cases from the saved 71-event graph into anonymized regression
-fixtures. In particular, include `iran-us-framework-mou` as a degree-nine
-articulation case and `cyber-pqc-production-2026` as a cross-community,
-degree-six articulation case.
-
-### 2. Backend transaction tests
-
-Verify:
-
-- A drop commits without waiting for Hermes.
-- Expected-revision conflicts fail without partial writes.
-- Destination relationships are protected from origin plans.
-- Plans are atomic and idempotent.
-- Malformed or out-of-scope plans change nothing.
-- Process interruption leaves a recoverable pending job.
-- Retry does not duplicate mutations.
-- Undo restores events, relationships, positions, and revision state.
-- Artifact promotion moves a URL atomically without triggering deduplication.
-- Database migration preserves the existing 71 events and 85 bridges.
-
-Run tests against temporary databases only.
-
-### 3. Hermes contract evaluations
-
-The agent evaluation corpus should contain fixed reconciliation contexts and
-allowed-action envelopes. Evaluate properties rather than requiring one
-identical semantic answer:
-
-- Valid structured output.
-- No action outside the supplied relationship set.
-- No mutation of protected destination edges.
-- A rationale tied to provided event/source content.
-- A simulation call before destructive submission.
-- Conservative behavior under insufficient evidence.
-
-Run each ambiguous case repeatedly and across model upgrades. Record outcome
-variance, latency, malformed-plan rate, and validator rejection rate. This
-preserves useful nondeterminism while measuring whether the harness contains
-it.
-
-### 4. Flutter unit and widget tests
-
-Verify:
-
-- Pointer-down on an event cannot pan the camera after drag activation.
-- Pointer-down on empty Canvas still pans.
-- Click-versus-drag threshold is stable at every supported zoom.
-- Screen/world coordinate conversion preserves the drop location.
-- The node follows pointer events without awaiting a future.
-- Escape and pointer cancellation restore the pre-drag state.
-- The destination bridge appears on synchronous commit.
-- Pending, resolved, fallback, and stale reconciliation events render
-  correctly.
-- A stale transaction result cannot move or mutate newer graph state.
-- The dropped node remains pinned while origin nodes settle.
-- Hover expansion and artifact clicks still work after cancelled drags.
-
-Add golden tests for the origin afterimage and destination review box at 35%,
-45%, 100%, and 280% zoom.
-
-### 5. Performance tests
-
-The pointer-move path performs no JSON encoding, database access, HTTP request,
-layout regeneration, or LLM work.
-
-Measure:
-
-- Drag frame time against a 16.7 ms budget at 60 Hz.
-- Local drop-commit latency separately from Hermes latency.
-- Repaint bounds while the afterimage animates.
-- Incremental settle cost on the 20-event largest component.
-- Memory and painter-cache behavior during repeated drags.
-
-The acceptance criterion is perceptual: delaying Hermes must not change drag
-smoothness.
-
-### 6. Hands-on acceptance protocol
-
-Each manual test starts from a disposable copy of the saved SQLite snapshot.
-The researcher performs one scenario at a time:
-
-1. Drag a leaf into empty space.
-2. Drag an articulation event into empty space.
-3. Drag an event into another perceived community.
-4. Cancel before drop.
-5. Undo during reconciliation.
-6. Let Hermes fail or time out.
-7. Drag an artifact into a new event.
-8. Drag an expanded event hub and verify that its artifact leaves travel with
-   it.
-9. Continue using unrelated Canvas regions while reconciliation runs.
-
-For every scenario, observe the cursor coupling, destination immediacy, origin
-legibility, eventual graph result, and undo fidelity. Implementation advances
-only after the researcher approves the current scenario.
-
-## Recommended implementation sequence
-
-1. Extract pure graph-analysis and transaction types with tests.
-2. Add stable bridge identity, graph revision, placement, mutation log, and
-   SQLite migration.
-3. Add synchronous drag transaction and undo endpoints.
-4. Refactor Flutter pointer arbitration and implement local-only dragging.
-5. Persist immediate destination placement/relationship without Hermes.
-6. Add origin afterimage and mocked delayed reconciliation.
-7. Add the constrained Hermes harness and validator.
-8. Add advisory destination review.
-9. Add atomic artifact promotion.
-10. Consider central-dwell event merge only after the preceding gesture is
-    proven.
-
-This sequence validates the latency-sensitive UX with a deterministic fake
-reconciler before introducing model behavior.
-
-## Confirmed product decisions
-
-- Reconciliation runs concurrently after the synchronous drop and cannot block
-  the Canvas.
-- The destination position remains pinned after reconciliation.
-- Destination review is opt-in through a closable box and remains available
-  later from contextual UI.
-- Reconciliation failure deterministically removes all old relationships in
-  scope; undo can restore them.
-- The first implementation does not include multi-event selection or dragging
-  a graph-theoretic subgraph.
-- Dragging an event hub carries its displayed artifact leaves. Dragging one
-  artifact leaf promotes that artifact.
+The perceptual acceptance criterion remains the architectural one: delaying
+Hermes must never change how the event follows the hand.

@@ -32,7 +32,37 @@ class HermesReconciliationRunner:
             raise RuntimeError("Hermes reconciliation is disabled.")
 
         runner = HermesRunner()
-        command = [
+        command = self._command(prompt)
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=PROJECT_ROOT,
+            env=runner._hermes_env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(),
+                timeout=float(os.getenv("HERMES_RECONCILIATION_TIMEOUT", "45")),
+            )
+        except TimeoutError as error:
+            process.kill()
+            await process.wait()
+            raise RuntimeError("Hermes reconciliation timed out.") from error
+        except asyncio.CancelledError:
+            process.kill()
+            await process.wait()
+            raise
+        if process.returncode != 0:
+            detail = stdout.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"Hermes reconciliation exited with status {process.returncode}: "
+                f"{detail[-800:]}"
+            )
+        return _extract_json(stdout.decode("utf-8", errors="replace"))
+
+    def _command(self, prompt: str) -> list[str]:
+        return [
             "hermes",
             "--profile",
             HERMES_PROFILE,
@@ -50,30 +80,14 @@ class HermesReconciliationRunner:
                 os.getenv("HERMES_MODEL", "mimo-v2.5-pro"),
             ),
             "--quiet",
-            "--yolo",
+            "--toolsets",
+            "clarify",
+            "--ignore-rules",
             "--source",
             "ai-news-canvas-reconciliation",
             "--max-turns",
             os.getenv("HERMES_RECONCILIATION_MAX_TURNS", "4"),
         ]
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=PROJECT_ROOT,
-            env=runner._hermes_env(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(),
-            timeout=float(os.getenv("HERMES_RECONCILIATION_TIMEOUT", "45")),
-        )
-        if process.returncode != 0:
-            detail = stdout.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(
-                f"Hermes reconciliation exited with status {process.returncode}: "
-                f"{detail[-800:]}"
-            )
-        return _extract_json(stdout.decode("utf-8", errors="replace"))
 
     def _prompt(self, context: dict[str, Any]) -> str:
         return (
