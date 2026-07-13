@@ -220,6 +220,12 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   contract it executes rather than implying every test concerns movement. A
   Windows runner now compiles every workspace target at the declared minimum
   toolchain.
+- The first GitHub run compiled and linted but failed while linking renderer
+  tests because Ubuntu lacked `freetype`/`fontconfig` development libraries
+  requested by rust-skia's cached Linux build. CI now installs those explicit
+  build dependencies. They are not silently equated with end-user runtime
+  dependencies; the packaging matrix must inspect a text-rendering release
+  binary after dead-code elimination can no longer remove them.
 - A Linux-hosted `x86_64-pc-windows-msvc` check compiles `renderer` and
   `platform`, including Skia, winit, and glutin. Checking the whole workspace
   from Linux correctly stopped at bundled SQLite because MSVC's `lib.exe` is

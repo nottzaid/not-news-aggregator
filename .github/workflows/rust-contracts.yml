@@ -43,6 +43,9 @@ jobs:
       - name: Install declared minimum Rust
         run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt --no-self-update
 
+      - name: Install declared native link dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libfontconfig1-dev libfreetype-dev
+
       - name: Reject formatting drift
         run: cargo +1.95.0 fmt --all -- --check
 
