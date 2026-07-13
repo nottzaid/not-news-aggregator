@@ -5,7 +5,9 @@ use skia_safe::{
     surfaces,
 };
 
-use crate::palette::{DATA, INK_0, INK_1, INK_2, PLUM, SIGNAL, color};
+use crate::palette::{
+    DATA, INK_0, INK_1, INK_2, PLUM, SIGNAL, color, color4f, flutter_gradient_color4f,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundError {
@@ -25,7 +27,7 @@ pub fn paint_background(canvas: &Canvas, width: f32, height: f32) {
     assert!(height.is_finite() && height > 0.0);
     let rect = Rect::from_xywh(0.0, 0.0, width, height);
 
-    let base_colors = [to_color4f(INK_0), to_color4f(INK_1), to_color4f(INK_2)];
+    let base_colors = [color4f(INK_0), color4f(INK_1), color4f(INK_2)];
     let base_stops = [0.0, 0.55, 1.0];
     let base = gradient(&base_colors, Some(&base_stops));
     let mut paint = Paint::default();
@@ -38,9 +40,9 @@ pub fn paint_background(canvas: &Canvas, width: f32, height: f32) {
 
     let extent = width.max(height);
     let glows = [
-        ((0.14, 0.12), color4f_with_alpha(SIGNAL, 0.21), 0.62),
-        ((0.86, 0.18), color4f_with_alpha(PLUM, 0.16), 0.58),
-        ((0.80, 0.88), color4f_with_alpha(DATA, 0.15), 0.66),
+        ((0.14, 0.12), flutter_gradient_color4f(SIGNAL, 0.21), 0.62),
+        ((0.86, 0.18), flutter_gradient_color4f(PLUM, 0.16), 0.58),
+        ((0.80, 0.88), flutter_gradient_color4f(DATA, 0.15), 0.66),
     ];
     for ((x, y), glow_color, radius_factor) in glows {
         let center = Point::new(width * x, height * y);
@@ -51,11 +53,7 @@ pub fn paint_background(canvas: &Canvas, width: f32, height: f32) {
         canvas.draw_circle(center, radius, &paint);
     }
 
-    let vignette_colors = [
-        to_color4f(0x0006_090f),
-        to_color4f(0x5406_090f),
-        to_color4f(INK_0),
-    ];
+    let vignette_colors = [color4f(0x0006_090f), color4f(0x5406_090f), color4f(INK_0)];
     let vignette_stops = [0.0, 0.62, 1.0];
     let vignette = gradient(&vignette_colors, Some(&vignette_stops));
     let center = Point::new(width * 0.5, height * 0.47);
@@ -117,23 +115,6 @@ fn gradient<'a>(colors: &'a [Color4f], stops: Option<&'a [f32]>) -> Gradient<'a>
         Colors::new(colors, stops, TileMode::Clamp, None),
         Interpolation::default(),
     )
-}
-
-fn to_color4f(argb: u32) -> Color4f {
-    Color4f::from(color(argb))
-}
-
-fn color4f_with_alpha(argb: u32, alpha: f32) -> Color4f {
-    Color4f {
-        a: flutter_gradient_channel(alpha),
-        ..to_color4f(argb)
-    }
-}
-
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn flutter_gradient_channel(channel: f32) -> f32 {
-    assert!((0.0..=1.0).contains(&channel));
-    f32::from((channel * 255.0).round() as u8) / 255.0
 }
 
 #[allow(clippy::cast_precision_loss)]

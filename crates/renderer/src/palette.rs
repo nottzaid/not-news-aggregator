@@ -1,4 +1,4 @@
-use skia_safe::Color;
+use skia_safe::{Color, Color4f};
 
 pub const INK_0: u32 = 0xff06_090f;
 pub const INK_1: u32 = 0xff0b_0f18;
@@ -30,6 +30,31 @@ pub fn color(argb: u32) -> Color {
         ((argb >> 8) & 0xff) as u8,
         (argb & 0xff) as u8,
     )
+}
+
+pub(crate) fn color4f(argb: u32) -> Color4f {
+    Color4f::from(color(argb))
+}
+
+pub(crate) fn color4f_with_alpha(argb: u32, alpha: f32) -> Color4f {
+    assert!((0.0..=1.0).contains(&alpha));
+    Color4f {
+        a: alpha,
+        ..color4f(argb)
+    }
+}
+
+pub(crate) fn flutter_gradient_color4f(argb: u32, alpha: f32) -> Color4f {
+    Color4f {
+        a: flutter_gradient_channel(alpha),
+        ..color4f(argb)
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn flutter_gradient_channel(channel: f32) -> f32 {
+    assert!((0.0..=1.0).contains(&channel));
+    f32::from((channel * 255.0).round() as u8) / 255.0
 }
 
 #[cfg(test)]

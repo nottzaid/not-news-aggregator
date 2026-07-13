@@ -34,11 +34,13 @@ pub fn paint_grid(canvas: &Canvas, width: f32, height: f32, viewport: Viewport) 
     canvas.translate((scalar(-viewport.camera.x), scalar(-viewport.camera.y)));
 
     let mut minor = Paint::default();
+    minor.set_anti_alias(true);
     minor.set_color(palette::color(palette::GRID));
     minor.set_stroke_width(1.0);
     paint_lines(canvas, &minor, left, top, right, bottom, MINOR_STEP);
 
     let mut major = Paint::default();
+    major.set_anti_alias(true);
     major.set_color(palette::color(palette::GRID_MAJOR));
     major.set_stroke_width(1.0);
     paint_lines(canvas, &major, left, top, right, bottom, MAJOR_STEP);

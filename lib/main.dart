@@ -1522,6 +1522,36 @@ class _PendingDrag {
   final List<EventBridge> oldBridges;
 }
 
+@visibleForTesting
+CustomPainter buildClosedGraphOraclePainter({
+  required List<ResearchEvent> events,
+  required List<EventBridge> bridges,
+  required Map<String, EventLayout> layouts,
+  Offset camera = Offset.zero,
+  double zoom = 1,
+  double bridgeFlow = 0,
+}) {
+  final viewport = _CanvasViewportController()
+    ..setView(camera: camera, zoom: zoom);
+  return _EventCanvasPainter(
+    repaint: viewport,
+    events: events,
+    bridges: bridges,
+    layouts: layouts,
+    activeId: null,
+    bridgeActiveId: null,
+    hoveredArtifactUrl: null,
+    artifactHover: const AlwaysStoppedAnimation(0),
+    expansionProgresses: const {},
+    viewport: viewport,
+    bridgeFlow: AlwaysStoppedAnimation(bridgeFlow),
+    dragEventId: null,
+    dragTargetId: null,
+    pendingDrag: null,
+    reconciliationPulse: const AlwaysStoppedAnimation(0),
+  );
+}
+
 class _EventCanvasPainter extends CustomPainter {
   _EventCanvasPainter({
     required Listenable repaint,

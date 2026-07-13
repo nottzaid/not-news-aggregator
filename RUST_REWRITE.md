@@ -207,7 +207,7 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   Flutter cubic evaluator, unbounded viewport transform, deterministic
   background, grid, and deterministic legacy layout. Eframe/egui no longer
   occurs in the application dependency graph.
-- Renderer evidence: ten tests pass, including exact Flutter curve samples,
+- Renderer evidence includes exact Flutter curve samples,
   deterministic grain/PNG output, large-coordinate viewport inversion and grid
   rasterization, placement precedence, collision separation, and deterministic
   layouts. Renderer, platform, and app pass warning-denied Clippy. The native
@@ -215,7 +215,7 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   incomplete app; this is not on-window, parity, driver, damage, or timing
   evidence.
 - The 2026-07-14 workspace checkpoint passes formatting, warning-denied Clippy,
-  and all 16 active tests; the one real-database experiment remains explicit
+  and all 20 active tests; the one real-database experiment remains explicit
   and ignored by default. CI now names the broader domain/decoding/renderer
   contract it executes rather than implying every test concerns movement. A
   Windows runner now compiles every workspace target at the declared minimum
@@ -252,6 +252,16 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   requires reviewed evidence. Engine source inspection also overturned a false
   “precision” improvement: Flutter gradients currently round fractional color
   channels to 8-bit ARGB before Skia, so Rust preserves that quantization.
+- Flutter's real canvas painter is now reachable through a test-only factory;
+  the oracle loads bundled fonts explicitly because `flutter_test` otherwise
+  substitutes Ahem and produces false metrics. DPR-1 closed-graph goldens at
+  1400×900 and 480×270 cover grid, quadratic measured dashes, event halo/core/
+  glint, Manrope title, and JetBrains Mono date. Rust differs by mean/max
+  channel delta 0.062317/5 at reference size and 0.205089/4 under 0.3× scaling;
+  gates also cap changed-pixel fractions. The first comparison exposed and
+  corrected Rust Skia's non-antialiased default for grid paints. A bounded
+  thread-local paragraph cache preserves Flutter's reuse discipline; an
+  executable check proves unchanged labels are shaped once across frames.
 
 ## Open decisions
 
@@ -295,9 +305,12 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   checks until its claimed state is comparable.
 - Platform scope: Windows and Linux only; Linux is the first executable oracle,
   while Windows build/package/backend evidence is required before parity.
-- Current code: the app reads the legacy graph, resolves deterministic world
-  positions, and invokes the direct surface adapter; only Flutter's background
-  and grid layers are painted. The binary was compiled and linted, not launched.
-- Next safe action: extend the now-executable Flutter/Rust raster corpus through
-  bridges, events, text, panels, and interaction states in Flutter paint order;
-  add timestamped motion frames before any writable migration.
+- Current code: the app reads the legacy graph, resolves deterministic unbounded
+  world positions, and paints Flutter-matched background, grid, closed bridges,
+  event halos/cores/glints, titles, and dates through direct Skia. Bundled
+  variable fonts are compiled into the renderer. Expanded artifacts, chrome,
+  input, and motion remain absent; the binary has not been presented as a
+  product candidate.
+- Next safe action: port expanded artifact states and surrounding panels in
+  Flutter paint order, then bind pan/zoom/hover and timestamped motion frames;
+  keep writable migration behind visual and command-interaction evidence.

@@ -4,13 +4,15 @@ use not_news_domain::{EventId, GraphSnapshot, Point};
 use not_news_platform::{
     FrameInfo, FrameSchedule, PlatformApplication, WindowOptions, run, skia_safe::Canvas,
 };
-use not_news_renderer::{Viewport, paint_background, paint_grid, resolved_positions};
+use not_news_renderer::{
+    SceneAnimation, Viewport, paint_background, paint_closed_graph, paint_grid, resolved_positions,
+};
 use not_news_store::LegacyGraphReader;
 
 struct CanvasApplication {
     _database: PathBuf,
-    _graph: GraphSnapshot,
-    _positions: HashMap<EventId, Point>,
+    graph: GraphSnapshot,
+    positions: HashMap<EventId, Point>,
     viewport: Viewport,
 }
 
@@ -20,8 +22,8 @@ impl CanvasApplication {
         let positions = resolved_positions(&graph);
         Ok(Self {
             _database: database,
-            _graph: graph,
-            _positions: positions,
+            graph,
+            positions,
             viewport: Viewport::default(),
         })
     }
@@ -33,6 +35,15 @@ impl PlatformApplication for CanvasApplication {
         let height = physical_scalar(frame.physical_height);
         paint_background(canvas, width, height);
         paint_grid(canvas, width, height, self.viewport);
+        paint_closed_graph(
+            canvas,
+            width,
+            height,
+            self.viewport,
+            &self.graph,
+            &self.positions,
+            SceneAnimation::default(),
+        );
         FrameSchedule::Wait
     }
 }
