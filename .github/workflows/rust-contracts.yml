@@ -9,14 +9,20 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/**"
+      - "lib/main.dart"
       - "rust-toolchain.toml"
+      - "test/background_oracle_test.dart"
+      - "test/goldens/**"
   pull_request:
     paths:
       - ".github/workflows/rust-contracts.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/**"
+      - "lib/main.dart"
       - "rust-toolchain.toml"
+      - "test/background_oracle_test.dart"
+      - "test/goldens/**"
 
 permissions:
   contents: read

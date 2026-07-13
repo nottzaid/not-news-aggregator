@@ -207,7 +207,7 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   Flutter cubic evaluator, unbounded viewport transform, deterministic
   background, grid, and deterministic legacy layout. Eframe/egui no longer
   occurs in the application dependency graph.
-- Renderer evidence: nine tests pass, including exact Flutter curve samples,
+- Renderer evidence: ten tests pass, including exact Flutter curve samples,
   deterministic grain/PNG output, large-coordinate viewport inversion and grid
   rasterization, placement precedence, collision separation, and deterministic
   layouts. Renderer, platform, and app pass warning-denied Clippy. The native
@@ -215,7 +215,7 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   incomplete app; this is not on-window, parity, driver, damage, or timing
   evidence.
 - The 2026-07-14 workspace checkpoint passes formatting, warning-denied Clippy,
-  and all 15 active tests; the one real-database experiment remains explicit
+  and all 16 active tests; the one real-database experiment remains explicit
   and ignored by default. CI now names the broader domain/decoding/renderer
   contract it executes rather than implying every test concerns movement. A
   Windows runner now compiles every workspace target at the declared minimum
@@ -244,6 +244,14 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   two minutes on the reference machine. Package experiments must establish a
   compatible glibc floor and graphics/runtime diagnostics rather than assuming
   this development host's libraries.
+- The first source-generated Flutter raster oracle fixes the 320×180, DPR-1
+  `CanvasBackgroundPainter` output at Flutter 3.44.1 / engine `c416acfeb8` and
+  reference commit `3220d3a`; its PNG hash and regeneration command are recorded
+  beside the golden. Decoded Rust pixels differ by mean 0.960260 channel units
+  out of 255, maximum 8. The executable gate allows mean ≤1 and max ≤8; widening
+  requires reviewed evidence. Engine source inspection also overturned a false
+  “precision” improvement: Flutter gradients currently round fractional color
+  channels to 8-bit ARGB before Skia, so Rust preserves that quantization.
 
 ## Open decisions
 
@@ -290,6 +298,6 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
 - Current code: the app reads the legacy graph, resolves deterministic world
   positions, and invokes the direct surface adapter; only Flutter's background
   and grid layers are painted. The binary was compiled and linted, not launched.
-- Next safe action: build a Flutter-generated offscreen/canonical capture oracle,
-  then port bridges, events, text, panels, and interaction state in Flutter
-  paint order with image/time deltas before any writable migration.
+- Next safe action: extend the now-executable Flutter/Rust raster corpus through
+  bridges, events, text, panels, and interaction states in Flutter paint order;
+  add timestamped motion frames before any writable migration.

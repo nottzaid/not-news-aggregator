@@ -125,9 +125,15 @@ fn to_color4f(argb: u32) -> Color4f {
 
 fn color4f_with_alpha(argb: u32, alpha: f32) -> Color4f {
     Color4f {
-        a: alpha,
+        a: flutter_gradient_channel(alpha),
         ..to_color4f(argb)
     }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn flutter_gradient_channel(channel: f32) -> f32 {
+    assert!((0.0..=1.0).contains(&channel));
+    f32::from((channel * 255.0).round() as u8) / 255.0
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -164,6 +170,8 @@ impl FlutterGrain {
 
 #[cfg(test)]
 mod tests {
+    use skia_safe::{Data, Image, ImageInfo, image::CachingHint};
+
     use super::*;
 
     #[test]
@@ -187,5 +195,48 @@ mod tests {
         for (actual, expected) in values.into_iter().zip(expected) {
             assert!((actual - expected).abs() < f64::EPSILON);
         }
+    }
+
+    #[test]
+    fn background_stays_within_flutter_raster_budget() {
+        const FLUTTER_PNG: &[u8] = include_bytes!("../../../test/goldens/background-320x180.png");
+        let rust_png = render_background_png(320, 180).unwrap();
+        let flutter = decode_png(FLUTTER_PNG, 320, 180);
+        let rust = decode_png(&rust_png, 320, 180);
+        let mut changed_pixels = 0usize;
+        let mut absolute_delta = 0u64;
+        let mut maximum_delta = 0u8;
+        for (flutter, rust) in flutter.chunks_exact(4).zip(rust.chunks_exact(4)) {
+            let mut changed = false;
+            for (&expected, &actual) in flutter.iter().zip(rust) {
+                let delta = expected.abs_diff(actual);
+                changed |= delta != 0;
+                absolute_delta += u64::from(delta);
+                maximum_delta = maximum_delta.max(delta);
+            }
+            changed_pixels += usize::from(changed);
+        }
+        let channel_count = u64::try_from(flutter.len()).unwrap();
+        let mean_absolute_delta = ratio(absolute_delta, channel_count);
+        assert!(
+            mean_absolute_delta <= 1.0 && maximum_delta <= 8,
+            "Flutter/Rust background drift: {changed_pixels}/57600 pixels changed; \
+             mean channel delta {mean_absolute_delta:.6}; max {maximum_delta}"
+        );
+    }
+
+    fn decode_png(png: &[u8], width: i32, height: i32) -> Vec<u8> {
+        let image = Image::from_encoded(Data::new_copy(png)).unwrap();
+        assert_eq!((image.width(), image.height()), (width, height));
+        let info = ImageInfo::new_n32_premul((width, height), None);
+        let row_bytes = info.min_row_bytes();
+        let mut pixels = vec![0; info.compute_byte_size(row_bytes)];
+        assert!(image.read_pixels(&info, &mut pixels, row_bytes, (0, 0), CachingHint::Disallow,));
+        pixels
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn ratio(numerator: u64, denominator: u64) -> f64 {
+        numerator as f64 / denominator as f64
     }
 }
