@@ -1,0 +1,11 @@
+[package]
+name = "not-news-agent"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+not-news-domain = { path = "../domain" }
+
+[lints]
+workspace = true

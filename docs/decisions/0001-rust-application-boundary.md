@@ -1,0 +1,103 @@
+# ADR 0001: Collapse the local application boundary in Rust
+
+- Status: accepted
+- Date: 2026-07-14
+- Governing research: [issue #1](https://github.com/muradkant/not-news-aggregator/issues/1)
+
+## Context
+
+The shipped Linux application divides one local product across a Flutter
+process and a Python/FastAPI process. Graph loading and research mutations cross
+SSE; drag commits cross HTTP; settlement is polled as repeated whole-graph
+snapshots; the backend owns SQLite and Hermes subprocesses. This separation is
+not a product API: both processes are launched together, communicate through
+loopback, and stop together.
+
+The drag implementation also conflates spatial placement with semantic edge
+revision. That fault must be corrected independently of language choice.
+
+The user selected a Rust rewrite while requiring preservation of all Flutter
+history, tags, data, and intentionally retained behavior.
+
+## Decision
+
+Build a Linux-first Cargo workspace with four dependency-directed crates:
+
+```text
+app ───→ domain
+ ├────→ store ───→ domain
+ └────→ agent ───→ domain
+```
+
+- `domain` owns graph/spatial types, commands, deltas, inverses, and pure
+  invariants; it depends on no UI, database, runtime, or agent crate.
+- `store` owns SQLite compatibility, migrations, mutation history, durable
+  jobs, and recovery.
+- `agent` owns the external Hermes line protocol, bounded child lifecycle,
+  proposal validation, and provider-facing edges.
+- `app` owns the eframe/egui Linux shell, interaction state machine, render
+  scene, audio/network adapters, and typed orchestration.
+
+The desktop process calls domain/store/agent interfaces directly. It does not
+recreate the loopback HTTP/SSE boundary. Hermes, SearXNG, Browse.sh, model APIs,
+Kokoro, and the system browser remain external because they represent actual
+capabilities outside the application.
+
+Use eframe 0.35 with its default wgpu renderer for the first measurable slice.
+Keep domain, store, and interaction semantics renderer-independent. Use
+rusqlite 0.40 with a bundled SQLite build so application behavior does not vary
+with the host SQLite version; enable only features demanded by backup,
+migration, hooks, or profiling evidence.
+
+The default drag command is `MoveNode`; it writes placement only. Explicit
+relation and detachment commands will be designed separately. Agent failure is
+non-destructive.
+
+## Alternatives rejected
+
+### Optimize Flutter and retain FastAPI
+
+This could repair pointer jank, and remains proof that Rust is not the semantic
+fix. It retains two language toolchains, DTO duplication, loopback transport,
+whole-snapshot settlement, and split ownership of one local state machine.
+
+### Rust UI over the existing Python backend
+
+This changes the renderer while adding a third migration boundary and preserves
+the accidental transport architecture. It is useful only as a disposable
+renderer experiment, not the target system.
+
+### Begin directly with winit/wgpu
+
+This maximizes render control before evidence shows eframe is inadequate and
+would spend the first implementation phase rebuilding windowing, text, input,
+accessibility, and panels. The crate boundaries allow this substitution later.
+
+### Embed every external dependency
+
+Hermes and SearXNG have independent runtime/tool/provider semantics. Absorbing
+them would expand the rewrite beyond the application and obscure which boundary
+actually became simpler.
+
+## Consequences
+
+- The Python backend and Flutter client remain runnable reference systems until
+  migration evidence permits their removal from the Rust branch.
+- SQLite compatibility becomes the first executable contract, not a late port.
+- Async jobs communicate with the UI through typed channels/deltas and never
+  borrow UI state.
+- eframe is provisional: retain it only if scripted traces meet frame and input
+  latency budgets without compromising interaction semantics.
+- A future public/network API must be justified as a product boundary and may
+  wrap domain commands; it will not shape the in-process model by default.
+- Historical branches, commits, tags, and releases are immutable evidence and
+  are not cleanup targets.
+
+## Reversal conditions
+
+Replace eframe while retaining other decisions if the 71-event release-build
+trace exceeds the recorded carrying budget after scene caching and bounded
+invalidation. Reconsider the single-process boundary only if an independently
+operated client or service becomes a product requirement. Reconsider Rust only
+if the vertical slice cannot reproduce stored-data compatibility and required
+interaction behavior at lower total complexity than the reference system.

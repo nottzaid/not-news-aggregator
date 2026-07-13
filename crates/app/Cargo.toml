@@ -1,0 +1,14 @@
+[package]
+name = "not-news-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+eframe.workspace = true
+not-news-agent = { path = "../agent" }
+not-news-domain = { path = "../domain" }
+not-news-store = { path = "../store" }
+
+[lints]
+workspace = true

@@ -32,6 +32,7 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+/target/
 
 # Local backend/Hermes secrets and project-owned agent state
 .env
