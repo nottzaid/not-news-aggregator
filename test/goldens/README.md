@@ -44,3 +44,20 @@ title, and JetBrains Mono date pixels. Current budgets are mean/max channel
 delta 0.07/5 at 1400×900 and 0.22/4 at 480×270, plus changed-pixel ceilings;
 the scaled allowance accounts for Flutter-engine/direct-Skia coverage, not
 world-geometry drift.
+
+`artifact-graph-open-1400x900.png` and
+`artifact-graph-half-1400x900.png` fix the same expandable event at animation
+progress 1 and 0.5. They cover source-derived layout, eased radial motion,
+tethers, chromatic halos, glass fills, marker rings, provenance ticks/arcs,
+artifact text, shrinking hub, and fading event labels:
+
+```text
+Open PNG sha256 4b69e26368e45977e58430d2b61425d34bc9b17e12dcd29a45f8c8f01e309432
+Half PNG sha256 41e948a18eff7f1b032df768ed09e637b4162d1477660c956e99d827a44fbd9b
+```
+
+The open/half Rust budgets respectively cap mean channel delta at 0.08/0.075,
+maximum delta at 5, and changed-pixel fractions at 0.077/0.073. A low mean
+cannot excuse a displaced glyph: paragraph placement uses SkParagraph's
+realized width after the oracle exposed a 0.449-pixel pre-layout-centering
+error.

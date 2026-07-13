@@ -1523,13 +1523,16 @@ class _PendingDrag {
 }
 
 @visibleForTesting
-CustomPainter buildClosedGraphOraclePainter({
+CustomPainter buildCanvasGraphOraclePainter({
   required List<ResearchEvent> events,
   required List<EventBridge> bridges,
   required Map<String, EventLayout> layouts,
   Offset camera = Offset.zero,
   double zoom = 1,
   double bridgeFlow = 0,
+  String? activeId,
+  String? bridgeActiveId,
+  Map<String, double> expansionProgresses = const {},
 }) {
   final viewport = _CanvasViewportController()
     ..setView(camera: camera, zoom: zoom);
@@ -1538,11 +1541,11 @@ CustomPainter buildClosedGraphOraclePainter({
     events: events,
     bridges: bridges,
     layouts: layouts,
-    activeId: null,
-    bridgeActiveId: null,
+    activeId: activeId,
+    bridgeActiveId: bridgeActiveId,
     hoveredArtifactUrl: null,
     artifactHover: const AlwaysStoppedAnimation(0),
-    expansionProgresses: const {},
+    expansionProgresses: expansionProgresses,
     viewport: viewport,
     bridgeFlow: AlwaysStoppedAnimation(bridgeFlow),
     dragEventId: null,

@@ -215,7 +215,7 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   incomplete app; this is not on-window, parity, driver, damage, or timing
   evidence.
 - The 2026-07-14 workspace checkpoint passes formatting, warning-denied Clippy,
-  and all 20 active tests; the one real-database experiment remains explicit
+  and all 23 active tests; the one real-database experiment remains explicit
   and ignored by default. CI now names the broader domain/decoding/renderer
   contract it executes rather than implying every test concerns movement. A
   Windows runner now compiles every workspace target at the declared minimum
@@ -262,6 +262,15 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   corrected Rust Skia's non-antialiased default for grid paints. A bounded
   thread-local paragraph cache preserves Flutter's reuse discipline; an
   executable check proves unchanged labels are shaped once across frames.
+- Artifact expansion now has a direct source port and two timestamped raster
+  gates. Rust exactly reproduces Flutter's UTF-16-aware optimal line search,
+  ID-seeded radial placement, 80-pass collision relaxation, ease-out motion,
+  tethers, glass/halo/rings, provenance dial, label transition, and hub change.
+  At progress 1 and 0.5, mean/max channel deltas are 0.072517/5 and
+  0.069356/5. A low earlier average concealed a 0.449-pixel glyph shift caused
+  by centering against the requested rather than realized paragraph width; the
+  gate localized and closed it. Artifact layouts and paragraphs are bounded
+  caches, not per-frame recomputation.
 
 ## Open decisions
 
@@ -307,10 +316,10 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   while Windows build/package/backend evidence is required before parity.
 - Current code: the app reads the legacy graph, resolves deterministic unbounded
   world positions, and paints Flutter-matched background, grid, closed bridges,
-  event halos/cores/glints, titles, and dates through direct Skia. Bundled
-  variable fonts are compiled into the renderer. Expanded artifacts, chrome,
-  input, and motion remain absent; the binary has not been presented as a
-  product candidate.
-- Next safe action: port expanded artifact states and surrounding panels in
-  Flutter paint order, then bind pan/zoom/hover and timestamped motion frames;
+  event halos/cores/glints, titles, dates, and closed/expanding artifact graphs
+  through direct Skia. Bundled variable fonts are compiled into the renderer.
+  Chrome, input binding, neighbor displacement, and live motion scheduling
+  remain absent; the binary has not been presented as a product candidate.
+- Next safe action: port neighbor displacement and surrounding chrome in
+  Flutter paint order, then bind pan/zoom/hover to deadline-scheduled frames;
   keep writable migration behind visual and command-interaction evidence.

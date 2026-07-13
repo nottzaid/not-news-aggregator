@@ -44,6 +44,31 @@ const layouts = {
 const bridges = [
   EventBridge(from: 'first', to: 'second', label: 'causes'),
 ];
+const artifactEvent = ResearchEvent(
+  id: 'artifact-oracle',
+  title: 'Artifact oracle',
+  date: 'Jul 14, 2026',
+  color: 0xffe8a44c,
+  summary: 'Expanded evidence.',
+  sourceLabel: 'Source',
+  artifacts: [
+    SourceArtifact(
+      text: 'Official model release',
+      source: 'Official',
+      url: 'https://example.com/official',
+    ),
+    SourceArtifact(
+      text: 'Independent report with a materially longer finding',
+      source: 'Report',
+      url: 'https://example.com/report',
+    ),
+    SourceArtifact(
+      text: 'Concise synthesis',
+      source: 'Summary',
+      url: 'https://example.com/summary',
+    ),
+  ],
+);
 
 void main() {
   setUpAll(() async {
@@ -73,12 +98,62 @@ void main() {
       golden: 'goldens/closed-graph-480x270.png',
     );
   });
+
+  testWidgets('records the fully expanded artifact graph', (tester) async {
+    await expectArtifactFrame(
+      tester,
+      progress: 1,
+      golden: 'goldens/artifact-graph-open-1400x900.png',
+    );
+  });
+
+  testWidgets('records the artifact graph at half expansion', (tester) async {
+    await expectArtifactFrame(
+      tester,
+      progress: 0.5,
+      golden: 'goldens/artifact-graph-half-1400x900.png',
+    );
+  });
+}
+
+Future<void> expectArtifactFrame(
+  WidgetTester tester, {
+  required double progress,
+  required String golden,
+}) async {
+  final metrics = layoutArtifacts(artifactEvent);
+  const center = Offset(700, 450);
+  await expectGraphFrame(
+    tester,
+    size: const Size(1400, 900),
+    golden: golden,
+    events: const [artifactEvent],
+    frameBridges: const [],
+    frameLayouts: {
+      artifactEvent.id: EventLayout(
+        event: artifactEvent,
+        base: center,
+        display: center,
+        artifacts: metrics.artifacts,
+        radius: metrics.radius,
+      ),
+    },
+    activeId: artifactEvent.id,
+    bridgeActiveId: artifactEvent.id,
+    expansionProgresses: {artifactEvent.id: progress},
+  );
 }
 
 Future<void> expectGraphFrame(
   WidgetTester tester, {
   required Size size,
   required String golden,
+  List<ResearchEvent> events = const [first, second],
+  List<EventBridge> frameBridges = bridges,
+  Map<String, EventLayout> frameLayouts = layouts,
+  String? activeId,
+  String? bridgeActiveId,
+  Map<String, double> expansionProgresses = const {},
 }) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = size;
@@ -92,10 +167,13 @@ Future<void> expectGraphFrame(
       child: RepaintBoundary(
         key: oracle,
         child: CustomPaint(
-          painter: buildClosedGraphOraclePainter(
-            events: const [first, second],
-            bridges: bridges,
-            layouts: layouts,
+          painter: buildCanvasGraphOraclePainter(
+            events: events,
+            bridges: frameBridges,
+            layouts: frameLayouts,
+            activeId: activeId,
+            bridgeActiveId: bridgeActiveId,
+            expansionProgresses: expansionProgresses,
           ),
         ),
       ),
