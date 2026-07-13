@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for command in cargo-xwin timeout "${WINE_BINARY:-wine}"; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    printf 'missing required command: %s\n' "$command" >&2
+    exit 2
+  fi
+done
+
+cache_root=${XDG_CACHE_HOME:-"$HOME/.cache"}
+mkdir -p "$cache_root"
+prefix=$(mktemp -d "$cache_root/not-news-wine-smoke.XXXXXX")
+cleanup() {
+  WINEPREFIX="$prefix" wineserver -k >/dev/null 2>&1 || true
+  rm -rf -- "$prefix"
+}
+trap cleanup EXIT
+
+target=x86_64-pc-windows-msvc
+cargo xwin build -p not-news-platform --example hidden_smoke --target "$target"
+
+executable="target/$target/debug/examples/hidden_smoke.exe"
+timeout "${WINE_SMOKE_TIMEOUT:-45s}" env \
+  WINEPREFIX="$prefix" \
+  WINEDEBUG="${WINEDEBUG:--all}" \
+  "${WINE_BINARY:-wine}" "$executable"

@@ -21,8 +21,8 @@ not a promise to preserve accidental architecture.
   following.
 - The visual language includes event color/glow, dashed curved bridges,
   metadata, source labels, research status, and Hermes activity. Exact pixels
-  are reference material; information hierarchy and interaction legibility are
-  the compatibility contract.
+  and animation behavior are compatibility requirements: the Flutter
+  application is the oracle, except for explicitly recorded semantic changes.
 
 ### Input and mutation
 
@@ -153,8 +153,9 @@ drag_transactions(
 ## Runtime boundary inventory
 
 The current developer launch requires Flutter, Python/uv, Hermes, curl, and a
-Podman/Docker SearXNG runtime. The Rust target removes Flutter, Python/uv,
-FastAPI, and the loopback backend from the application boundary. It retains:
+Podman/Docker SearXNG runtime. The Rust target supports Windows and Linux,
+removes Flutter, Python/uv, FastAPI, and the loopback backend from the
+application boundary, and retains:
 
 - `hermes` executable and isolated profile state;
 - Podman/Docker plus SearXNG unless search is later embedded or remote;
@@ -169,6 +170,11 @@ check output, or agent prompts except where the provider requires them.
 
 ## Evidence gaps to close before parity claims
 
+- Direct Skia currently ports only the source-derived background, grid,
+  viewport transform, motion curves, palette, and deterministic layout. The
+  native surface compiles but has not been used as parity evidence.
+- No synchronized screenshot/motion corpus currently compares Flutter and Rust
+  at canonical viewports, interaction states, and animation timestamps.
 - No current widget/integration test drives actual drag arbitration, hover,
   target preview, cancellation, zoom conversion, or undo.
 - No current trace measures build/raster/input latency or repainted area.
@@ -176,5 +182,14 @@ check output, or agent prompts except where the provider requires them.
   newer revision, pending-job restart, or destructive undo conflicts.
 - Text-prompt entry is a backend capability without a complete visible input
   surface.
-- Current mobile/web scaffolding exists, but the documented and operated product
-  is Linux desktop; cross-platform parity is not an initial rewrite constraint.
+- Windows has no current executable reference or packaging check. The rewrite
+  cross-compiles the renderer/platform boundary and compiles the full workspace
+  on a native Windows CI runner, but must still verify native window/input
+  behavior, Skia backend selection, external process/browser/audio adapters,
+  clean installation, and visual parity on Windows; macOS, mobile, and web are
+  explicitly outside product scope.
+- No installer or relocatable artifact yet proves platform-native data paths,
+  clean-machine launch, external-capability diagnosis, safe prior-version
+  upgrade, migration rollback, research-preserving uninstall, hashes, dependency
+  inventory, or signing. Flutter/Python are archival and must not enter new Rust
+  release artifacts.

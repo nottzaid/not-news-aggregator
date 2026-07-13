@@ -1,6 +1,6 @@
 # ADR 0001: Collapse the local application boundary in Rust
 
-- Status: accepted
+- Status: accepted; renderer and platform scope superseded by ADR 0002
 - Date: 2026-07-14
 - Governing research: [issue #1](https://github.com/muradkant/not-news-aggregator/issues/1)
 
@@ -35,16 +35,19 @@ app ───→ domain
   jobs, and recovery.
 - `agent` owns the external Hermes line protocol, bounded child lifecycle,
   proposal validation, and provider-facing edges.
-- `app` owns the eframe/egui Linux shell, interaction state machine, render
-  scene, audio/network adapters, and typed orchestration.
+- `app` owns the desktop shell, interaction state machine, render scene,
+  audio/network adapters, and typed orchestration. Its original eframe/egui
+  implementation clause is historical and superseded by ADR 0002.
 
 The desktop process calls domain/store/agent interfaces directly. It does not
 recreate the loopback HTTP/SSE boundary. Hermes, SearXNG, Browse.sh, model APIs,
 Kokoro, and the system browser remain external because they represent actual
 capabilities outside the application.
 
-Use eframe 0.35 with its default wgpu renderer for the first measurable slice.
-Keep domain, store, and interaction semantics renderer-independent. Use
+The initial decision used eframe 0.35 with its default wgpu renderer for the
+first measurable slice; ADR 0002 replaced it after that slice failed the paint
+fidelity requirement. Keep domain, store, and interaction semantics
+renderer-independent. Use
 rusqlite 0.40 with a bundled SQLite build so application behavior does not vary
 with the host SQLite version; enable only features demanded by backup,
 migration, hooks, or profiling evidence.
@@ -81,13 +84,18 @@ actually became simpler.
 
 ## Consequences
 
+ADR 0002 later replaced the provisional eframe choice with direct Skia and
+expanded product verification from Linux to Windows and Linux. The process,
+crate-direction, persistence, command, and external-capability decisions here
+remain accepted.
+
 - The Python backend and Flutter client remain runnable reference systems until
   migration evidence permits their removal from the Rust branch.
 - SQLite compatibility becomes the first executable contract, not a late port.
 - Async jobs communicate with the UI through typed channels/deltas and never
   borrow UI state.
-- eframe is provisional: retain it only if scripted traces meet frame and input
-  latency budgets without compromising interaction semantics.
+- The provisional eframe clause was exercised and reversed by ADR 0002; it is
+  not part of the current dependency graph.
 - A future public/network API must be justified as a product boundary and may
   wrap domain commands; it will not shape the in-process model by default.
 - Historical branches, commits, tags, and releases are immutable evidence and
@@ -95,9 +103,9 @@ actually became simpler.
 
 ## Reversal conditions
 
-Replace eframe while retaining other decisions if the 71-event release-build
-trace exceeds the recorded carrying budget after scene caching and bounded
-invalidation. Reconsider the single-process boundary only if an independently
-operated client or service becomes a product requirement. Reconsider Rust only
-if the vertical slice cannot reproduce stored-data compatibility and required
-interaction behavior at lower total complexity than the reference system.
+ADR 0002 has satisfied the renderer-specific reversal condition while retaining
+this ADR's process and dependency decisions. Reconsider the single-process
+boundary only if an independently operated client or service becomes a product
+requirement. Reconsider Rust only if the vertical slice cannot reproduce
+stored-data compatibility and required interaction behavior at lower total
+complexity than the reference system.
