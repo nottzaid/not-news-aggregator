@@ -89,6 +89,15 @@ Compress every accepted ADR here; read it before changing its subject.
   releases require native builds, hashes/inventory/signing, safe migration,
   clean-machine install/upgrade/failure-recovery/uninstall evidence, and
   preservation of user research. Format/tool selection remains empirical.
+- [ADR 0004: Commit placement with an append-only reversible
+  log](docs/decisions/0004-transactional-placement-history.md) — accepted
+  2026-07-14. Schema v1 adds per-event placement generations and immutable
+  move/undo/redo rows while retaining legacy tables. Migration creates and
+  integrity-checks a SQLite online backup under a reserved writer lock, then
+  advances atomically. Every write is domain-validated, transactionally binds
+  placement/version/revision/history, rejects stale generations, and deduplicates
+  caller operation IDs. Rust and legacy writers must not share production
+  write ownership after migration.
 
 ## Implementation order
 
@@ -215,7 +224,7 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   incomplete app; this is not on-window, parity, driver, damage, or timing
   evidence.
 - The 2026-07-14 workspace checkpoint passes formatting, warning-denied Clippy,
-  and all 31 active tests; the one real-database experiment remains explicit
+  and all 36 active tests; real-database experiments remain explicit
   and ignored by default. CI now names the broader domain/decoding/renderer
   contract it executes rather than implying every test concerns movement. A
   Windows runner now compiles every workspace target at the declared minimum
@@ -297,10 +306,18 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   neighbor-layout interpolation to the same ease-out clock, closing the gap
   where accurate endpoint frames could conceal a wrong transition. Its PNG
   hash is `0989cbd34c05ce962a3169f521bb1e8e32e76b051788fdbc97ebfa5ec76c692c`.
+- Schema v1 placement durability is implemented behind `DurableGraphStore`.
+  A writer-reserving migration validates the legacy snapshot, creates an
+  online SQLite backup, verifies its integrity, and atomically adds per-event
+  generations plus immutable move/undo/redo history. Experiments prove
+  idempotent retries, stale-writer rejection, restart-spanning undo/redo, redo
+  invalidation without log deletion, and full rollback when log insertion is
+  forcibly aborted after the placement write. An explicitly invoked test
+  copied both preserved databases, migrated them, moved and undid a node, and
+  found events, bridges, aliases, and placements unchanged; originals were
+  never opened writable.
 
 ## Open decisions
-
-- Exact SQLite migration/backup strategy.
 - Exact Linux/Windows Skia backend selection and fallback after on-window,
   driver, device-loss, fidelity, and packaging evidence. ADR 0002 fixes the
   direct painter and thin-adapter boundary, not an unmeasured backend forever.
@@ -325,6 +342,9 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
 - Delivery invariant: ADR 0003 makes clean Windows/Linux packaging, safe
   upgrades, degraded-capability startup, and research-preserving uninstall part
   of product acceptance. Rust releases never package archival Flutter/Python.
+- Mutation invariant: ADR 0004 binds placement, per-node generation, revision,
+  and immutable history in one transaction; operation IDs are idempotent;
+  post-migration production data has one Rust write owner.
 - SQLite evidence: backup has 71 events/85 bridges/9 aliases and only legacy
   tables; live has 71/81/9, two placements, two fallback transactions, revision
   4. Both pass integrity checks; exact hashes live in the inventory.
@@ -340,13 +360,15 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   checks until its claimed state is comparable.
 - Platform scope: Windows and Linux only; Linux is the first executable oracle,
   while Windows build/package/backend evidence is required before parity.
-- Current code: the app reads the legacy graph and paints Flutter-matched graph
-  states through direct Skia with bundled fonts. Native pan, anchored wheel
-  zoom, hover expansion/collapse, transition deadlines, protected artifact
-  paths, and placement-only drag now run through a replayable reducer. Moves
-  are domain-validated but remain process-local; chrome, source activation,
-  durable writes/undo, research/voice flows, and packaging remain absent. The
-  binary has not been presented as a product candidate.
-- Next safe action: specify and implement crash-safe placement persistence plus
-  undo against temporary legacy databases, then port surrounding chrome in
-  Flutter paint order. Never write the preserved live graph during tests.
+- Current code: the app opens a validated, reversibly migrated graph and paints
+  Flutter-matched graph states through direct Skia with bundled fonts. Native
+  pan, anchored wheel zoom, hover expansion/collapse, transition deadlines,
+  protected artifact paths, and placement-only drag now run through a
+  replayable reducer. Drag,
+  `Ctrl+Z`, `Ctrl+Shift+Z`, and `Ctrl+Y` commit through guarded durable history;
+  no move can alter an edge. Chrome, source activation, visible error recovery,
+  research/voice flows, and packaging remain absent. The binary has not been
+  presented as a product candidate.
+- Next safe action: port source activation and surrounding chrome in Flutter
+  paint order, including visible persistence/migration failure states. Never
+  write the preserved live graph during tests.

@@ -1,13 +1,17 @@
+mod durable;
+
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 use not_news_domain::{
-    BridgeId, EventBridge, EventId, GraphSnapshot, Placement, Point, Provenance, ResearchEvent,
-    SnapshotError, SourceArtifact,
+    BridgeId, EventBridge, EventId, GraphSnapshot, MoveNodeError, Placement, Point, Provenance,
+    ResearchEvent, SnapshotError, SourceArtifact,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 use thiserror::Error;
+
+pub use durable::{CommitOutcome, DurableGraphStore};
 
 pub struct LegacyGraphReader {
     path: PathBuf,
@@ -29,33 +33,42 @@ impl LegacyGraphReader {
             &self.path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        let events = read_events(&connection)?;
-        let mut bridges = read_bridges(&connection)?;
-        bridges.retain(|_, bridge| {
-            events.contains_key(&bridge.from) && events.contains_key(&bridge.to)
-        });
-        let mut snapshot = GraphSnapshot {
-            events,
-            bridges,
-            aliases: read_aliases(&connection)?,
-            ..GraphSnapshot::default()
-        };
-        if table_exists(&connection, "placements")? {
-            snapshot.placements = read_placements(&connection)?;
-            snapshot
-                .placements
-                .retain(|event, _| snapshot.events.contains_key(event));
-        }
-        if table_exists(&connection, "graph_meta")? {
-            snapshot.revision = read_revision(&connection)?;
-        }
-        snapshot.validate()?;
-        Ok(snapshot)
+        load_snapshot(&connection)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn load_snapshot(connection: &Connection) -> Result<GraphSnapshot, StoreError> {
+    let events = read_events(connection)?;
+    let mut bridges = read_bridges(connection)?;
+    bridges
+        .retain(|_, bridge| events.contains_key(&bridge.from) && events.contains_key(&bridge.to));
+    let mut snapshot = GraphSnapshot {
+        events,
+        bridges,
+        aliases: read_aliases(connection)?,
+        ..GraphSnapshot::default()
+    };
+    if table_exists(connection, "placements")? {
+        snapshot.placements = read_placements(connection)?;
+        snapshot
+            .placements
+            .retain(|event, _| snapshot.events.contains_key(event));
+    }
+    if table_exists(connection, "graph_meta")? {
+        snapshot.revision = read_revision(connection)?;
+    }
+    if table_exists(connection, "placement_versions")? {
+        snapshot.placement_versions = read_placement_versions(connection)?;
+        snapshot
+            .placement_versions
+            .retain(|event, _| snapshot.events.contains_key(event));
+    }
+    snapshot.validate()?;
+    Ok(snapshot)
 }
 
 fn read_events(connection: &Connection) -> Result<IndexMap<EventId, ResearchEvent>, StoreError> {
@@ -144,6 +157,20 @@ fn read_revision(connection: &Connection) -> Result<u64, StoreError> {
             .parse::<u64>()
             .map_err(|_| StoreError::InvalidRevision(value)),
     }
+}
+
+fn read_placement_versions(connection: &Connection) -> Result<IndexMap<EventId, u64>, StoreError> {
+    let mut statement =
+        connection.prepare("SELECT event_id, version FROM placement_versions ORDER BY rowid")?;
+    let rows = statement.query_map([], |row| Ok((EventId(row.get(0)?), row.get::<_, i64>(1)?)))?;
+    let mut versions = IndexMap::new();
+    for row in rows {
+        let (event, version) = row?;
+        let version = u64::try_from(version)
+            .map_err(|_| StoreError::InvalidPlacementVersion(event.clone()))?;
+        versions.insert(event, version);
+    }
+    Ok(versions)
 }
 
 fn table_exists(connection: &Connection, name: &str) -> Result<bool, rusqlite::Error> {
@@ -253,6 +280,24 @@ pub enum StoreError {
     InvalidField(&'static str),
     #[error("invalid graph revision {0:?}")]
     InvalidRevision(String),
+    #[error("invalid placement version for {0:?}")]
+    InvalidPlacementVersion(EventId),
+    #[error("operation ID must not be blank")]
+    EmptyOperationId,
+    #[error("operation ID {0:?} was already used for a different command")]
+    IdempotencyConflict(String),
+    #[error("mutation history no longer matches durable placement state")]
+    HistoryConflict,
+    #[error("database backup failed integrity verification: {0:?}")]
+    InvalidBackup(PathBuf),
+    #[error("filesystem error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("database schema version {0} is newer than this application supports")]
+    UnsupportedSchema(i64),
+    #[error("counter {0} cannot be represented by SQLite")]
+    CounterTooLarge(u64),
+    #[error(transparent)]
+    Move(#[from] MoveNodeError),
     #[error("duplicate event ID")]
     DuplicateEvent,
     #[error("duplicate bridge ID")]

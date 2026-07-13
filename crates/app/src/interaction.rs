@@ -3,9 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use not_news_domain::{EventId, GraphSnapshot, MoveNode, MoveNodeError, Point};
+use not_news_domain::{EventId, GraphSnapshot, MoveNode, Point};
 use not_news_renderer::{
-    Motion, Viewport, ViewportTransform, expanded_positions, layout_artifacts,
+    Motion, Viewport, ViewportTransform, expanded_positions, layout_artifacts, resolved_positions,
 };
 
 const ACTIVE_MOTION: Duration = Duration::from_millis(220);
@@ -49,6 +49,13 @@ pub struct InteractionFrame {
     pub collapse_progress: f32,
     pub bridge_event: Option<EventId>,
     pub bridge_flow: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum InteractionEffect {
+    Unchanged,
+    PixelsChanged,
+    Move(MoveNode),
 }
 
 #[derive(Clone, Debug)]
@@ -168,13 +175,9 @@ impl CanvasInteraction {
         false
     }
 
-    pub fn pointer_up(
-        &mut self,
-        graph: &mut GraphSnapshot,
-        now: Instant,
-    ) -> Result<bool, MoveNodeError> {
+    pub fn pointer_up(&mut self, graph: &GraphSnapshot, now: Instant) -> InteractionEffect {
         let Some(pointer) = self.pointer.take() else {
-            return Ok(false);
+            return InteractionEffect::Unchanged;
         };
         match pointer {
             PointerGesture::Drag {
@@ -188,20 +191,26 @@ impl CanvasInteraction {
                     .get(&event)
                     .copied()
                     .unwrap_or_default();
-                graph.apply_move(&MoveNode {
+                InteractionEffect::Move(MoveNode {
                     event_id: event.clone(),
                     destination: position,
                     expected_placement_version: version,
-                })?;
-                self.base_positions.insert(event, position);
-                self.retarget_layout_after_placement(graph, now);
-                Ok(true)
+                })
             }
             PointerGesture::Drag { .. } | PointerGesture::Pan { moved: false, .. } => {
-                Ok(self.tap(graph, now))
+                if self.tap(graph, now) {
+                    InteractionEffect::PixelsChanged
+                } else {
+                    InteractionEffect::Unchanged
+                }
             }
-            PointerGesture::Pan { moved: true, .. } => Ok(false),
+            PointerGesture::Pan { moved: true, .. } => InteractionEffect::Unchanged,
         }
+    }
+
+    pub fn placement_committed(&mut self, graph: &GraphSnapshot) {
+        self.base_positions = resolved_positions(graph);
+        self.motion = None;
     }
 
     pub fn cancel_pointer(&mut self) -> bool {
@@ -333,18 +342,6 @@ impl CanvasInteraction {
             self.bridge_epoch.get_or_insert(now);
         }
         true
-    }
-
-    fn retarget_layout_after_placement(&mut self, graph: &GraphSnapshot, now: Instant) {
-        let from_positions = self.current_positions(graph, now);
-        let to_positions = expanded_positions(graph, &self.base_positions, self.active.as_ref());
-        self.motion = Some(ActiveMotion {
-            from_positions,
-            to_positions,
-            from_active: self.active.clone(),
-            to_active: self.active.clone(),
-            started: now,
-        });
     }
 
     fn current_positions(&self, graph: &GraphSnapshot, now: Instant) -> HashMap<EventId, Point> {
@@ -643,13 +640,17 @@ mod tests {
         interaction.cursor_moved(start, &graph, now);
         interaction.pointer_down(&graph, now);
         interaction.cursor_moved(add(start, Point { x: 5.0, y: 0.0 }), &graph, now);
-        interaction.pointer_up(&mut graph, now).unwrap();
+        interaction.pointer_up(&graph, now);
         assert!(graph.placements.is_empty());
 
         interaction.cursor_moved(start, &graph, now);
         interaction.pointer_down(&graph, now);
         interaction.cursor_moved(add(start, Point { x: 70.0, y: 10.0 }), &graph, now);
-        assert!(interaction.pointer_up(&mut graph, now).unwrap());
+        let InteractionEffect::Move(command) = interaction.pointer_up(&graph, now) else {
+            panic!("drag must produce a placement command");
+        };
+        graph.apply_move(&command).unwrap();
+        interaction.placement_committed(&graph);
         assert_eq!(graph.bridges, before_bridges);
         assert!(graph.placements[&EventId("a".into())].pinned);
     }
