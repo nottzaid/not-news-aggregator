@@ -2,6 +2,8 @@ name: Rust rewrite evidence
 
 on:
   push:
+    branches:
+      - "experimental-optimization"
     paths:
       - ".github/workflows/rust-contracts.yml"
       - "Cargo.lock"
@@ -20,7 +22,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: rust-evidence-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  group: rust-evidence-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
