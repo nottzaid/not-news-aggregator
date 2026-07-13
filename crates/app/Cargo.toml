@@ -10,5 +10,8 @@ not-news-platform = { path = "../platform" }
 not-news-renderer = { path = "../renderer" }
 not-news-store = { path = "../store" }
 
+[dev-dependencies]
+indexmap.workspace = true
+
 [lints]
 workspace = true

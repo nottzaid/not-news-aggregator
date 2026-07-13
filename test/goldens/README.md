@@ -71,3 +71,10 @@ neighbor collision solver and active-bridge glow/dash treatment (sha256
 Its Rust gate caps mean drift at 0.08 and changed pixels at 0.085; a separate
 topology experiment proves distant and active positions remain fixed while a
 colliding neighbor moves.
+
+`artifact-neighbor-midpoint-1400x900.png` fixes the complete scene at 110 ms
+of Flutter's 220 ms activation: ease-out-cubic expansion, layout interpolation,
+neighbor displacement, and bridge emphasis share one clock. Its sha256 is
+`0989cbd34c05ce962a3169f521bb1e8e32e76b051788fdbc97ebfa5ec76c692c`;
+the Rust gate caps mean drift at 0.08 and changed pixels at 0.085. This temporal
+oracle prevents independently correct endpoints from concealing a wrong path.

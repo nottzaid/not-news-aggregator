@@ -215,7 +215,7 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   incomplete app; this is not on-window, parity, driver, damage, or timing
   evidence.
 - The 2026-07-14 workspace checkpoint passes formatting, warning-denied Clippy,
-  and all 26 active tests; the one real-database experiment remains explicit
+  and all 31 active tests; the one real-database experiment remains explicit
   and ignored by default. CI now names the broader domain/decoding/renderer
   contract it executes rather than implying every test concerns movement. A
   Windows runner now compiles every workspace target at the declared minimum
@@ -284,6 +284,19 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   highlighted bridge at mean drift 0.076695; a topology experiment proves the
   active and distant events remain fixed while only collision propagation
   moves neighbors.
+- The native event loop now drives a deterministic interaction reducer rather
+  than repainting on every input message. It ports pointer-anchored wheel zoom
+  (0.35–2.8), unbounded pan, ordered 54-world-unit hit testing, 180 ms collapse
+  grace, protected node/artifact/tether hover paths, six-pixel drag arming,
+  220 ms interruptible activation, and seven-second bridge flow. Frame
+  deadlines exist only while collapse or motion can change pixels; active
+  bridge flow remains intentionally continuous. Lost focus cancels ephemeral
+  gestures. A placement commit executes domain `MoveNode`; graph edges remain
+  byte-for-byte unchanged.
+- A 110 ms Flutter/Rust temporal oracle now binds activation expansion and
+  neighbor-layout interpolation to the same ease-out clock, closing the gap
+  where accurate endpoint frames could conceal a wrong transition. Its PNG
+  hash is `0989cbd34c05ce962a3169f521bb1e8e32e76b051788fdbc97ebfa5ec76c692c`.
 
 ## Open decisions
 
@@ -303,8 +316,8 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
 - Date: 2026-07-14.
 - Branch: `rust-rewrite`, created from
   `3220d3af5607d27b8d945026f8c0551921a4addc`.
-- Phase: direct-renderer substrate and compatibility kernel verified; UI is an
-  incomplete paint-port slice, not a design candidate or vertical slice.
+- Phase: graph painter and primary pointer interaction are compatibility-gated;
+  UI remains an incomplete product slice, not a design candidate.
 - Accepted decisions: ADR 0001 fixes the single-process Rust boundary; ADR 0002
   supersedes its provisional eframe/Linux clauses with a direct Skia painter and
   thin Windows/Linux surface adapters. Eframe and Vizia are rejected for this
@@ -327,12 +340,13 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   checks until its claimed state is comparable.
 - Platform scope: Windows and Linux only; Linux is the first executable oracle,
   while Windows build/package/backend evidence is required before parity.
-- Current code: the app reads the legacy graph, resolves deterministic unbounded
-  world positions, and paints Flutter-matched background, grid, closed bridges,
-  event halos/cores/glints, titles, dates, and closed/expanding artifact graphs
-  through direct Skia. Bundled variable fonts are compiled into the renderer.
-  Chrome, input binding, and live motion scheduling remain absent; the binary
-  has not been presented as a product candidate.
-- Next safe action: port surrounding chrome in Flutter paint order, then bind
-  pan/zoom/hover to deadline-scheduled frames;
-  keep writable migration behind visual and command-interaction evidence.
+- Current code: the app reads the legacy graph and paints Flutter-matched graph
+  states through direct Skia with bundled fonts. Native pan, anchored wheel
+  zoom, hover expansion/collapse, transition deadlines, protected artifact
+  paths, and placement-only drag now run through a replayable reducer. Moves
+  are domain-validated but remain process-local; chrome, source activation,
+  durable writes/undo, research/voice flows, and packaging remain absent. The
+  binary has not been presented as a product candidate.
+- Next safe action: specify and implement crash-safe placement persistence plus
+  undo against temporary legacy databases, then port surrounding chrome in
+  Flutter paint order. Never write the preserved live graph during tests.

@@ -35,8 +35,13 @@ pub struct SceneAnimation {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SceneState<'a> {
     pub animation: SceneAnimation,
+    /// Event whose bridges retain emphasis while an activation transition runs.
+    pub bridge_event: Option<&'a EventId>,
     pub expanded_event: Option<&'a EventId>,
     pub expansion_progress: f32,
+    /// Previously active event fading inward during an active-event handoff.
+    pub collapsing_event: Option<&'a EventId>,
+    pub collapse_progress: f32,
 }
 
 /// Paints Flutter's closed bridge, event-node, and label layers over the world grid.
@@ -79,6 +84,7 @@ pub fn paint_graph<S: BuildHasher>(
     state: SceneState<'_>,
 ) {
     assert!((0.0..=1.0).contains(&state.expansion_progress));
+    assert!((0.0..=1.0).contains(&state.collapse_progress));
     let transform = ViewportTransform::new(f64::from(width), f64::from(height), viewport);
     let visible = visible_world_rect(transform, width, height);
     let origin = transform.origin();
@@ -124,14 +130,16 @@ fn paint_bridges<S: BuildHasher>(
             continue;
         }
         let path = bridge_path(*from, *to);
-        let active_progress = if state
-            .expanded_event
-            .is_some_and(|active| active == &bridge.from || active == &bridge.to)
-        {
-            state.expansion_progress
-        } else {
-            0.0
-        };
+        let bridge_event = state.bridge_event.or(state.expanded_event);
+        let active_progress = bridge_event.map_or(0.0, |active| {
+            if active != &bridge.from && active != &bridge.to {
+                0.0
+            } else if state.expanded_event == Some(active) {
+                state.expansion_progress
+            } else {
+                state.collapse_progress
+            }
+        });
         if active_progress > 0.01 {
             let mut glow = Paint::default();
             glow.set_anti_alias(true);
@@ -169,12 +177,18 @@ fn paint_events<S: BuildHasher>(
             continue;
         };
         let center = point(*position);
-        let progress = if event.artifacts.len() > 1
-            && state
-                .expanded_event
-                .is_some_and(|active| active == &event.id)
+        let progress = if event.artifacts.len() <= 1 {
+            0.0
+        } else if state
+            .expanded_event
+            .is_some_and(|active| active == &event.id)
         {
             state.expansion_progress
+        } else if state
+            .collapsing_event
+            .is_some_and(|active| active == &event.id)
+        {
+            state.collapse_progress
         } else {
             0.0
         };
@@ -984,6 +998,84 @@ mod tests {
         assert!(
             mean <= 0.08 && changed_fraction <= 0.085,
             "Flutter/Rust expanded-neighbor drift: {changed_pixels}/1260000 pixels \
+             ({changed_fraction:.6}); mean {mean:.6}; max {maximum_delta}"
+        );
+    }
+
+    #[test]
+    fn activation_midpoint_stays_within_flutter_temporal_raster_budget() {
+        const FLUTTER_PNG: &[u8] =
+            include_bytes!("../../../test/goldens/artifact-neighbor-midpoint-1400x900.png");
+        let active_id = EventId("artifact-oracle".into());
+        let neighbor_id = EventId("displaced-neighbor".into());
+        let active = artifact_event(active_id.clone());
+        let neighbor = ResearchEvent {
+            id: neighbor_id.clone(),
+            title: "Adjacent finding".into(),
+            date: "Jul 15, 2026".into(),
+            color: 0xff4c_c9d6,
+            summary: "Neighbor displaced by expanded evidence.".into(),
+            source_label: "Source".into(),
+            artifacts: vec![],
+            url: None,
+        };
+        let bridge_id = BridgeId("bridge".into());
+        let graph = GraphSnapshot {
+            events: IndexMap::from([(active_id.clone(), active), (neighbor_id.clone(), neighbor)]),
+            bridges: IndexMap::from([(
+                bridge_id.clone(),
+                EventBridge {
+                    id: bridge_id,
+                    from: active_id.clone(),
+                    to: neighbor_id.clone(),
+                    label: "informs".into(),
+                    provenance: Provenance::Legacy,
+                },
+            )]),
+            ..GraphSnapshot::default()
+        };
+        let settled = HashMap::from([
+            (active_id.clone(), WorldPoint { x: 700.0, y: 450.0 }),
+            (neighbor_id, WorldPoint { x: 790.0, y: 450.0 }),
+        ]);
+        let expanded = crate::expanded_positions(&graph, &settled, Some(&active_id));
+        let progress = Motion::ease_out_cubic(0.5);
+        let positions: HashMap<EventId, WorldPoint> = settled
+            .iter()
+            .map(|(id, from)| {
+                let to = expanded[id];
+                (
+                    id.clone(),
+                    WorldPoint {
+                        x: from.x + (to.x - from.x) * progress,
+                        y: from.y + (to.y - from.y) * progress,
+                    },
+                )
+            })
+            .collect();
+        let mut surface = surfaces::raster_n32_premul((1400, 900)).unwrap();
+        paint_grid(surface.canvas(), 1400.0, 900.0, Viewport::default());
+        paint_graph(
+            surface.canvas(),
+            1400.0,
+            900.0,
+            Viewport::default(),
+            &graph,
+            &positions,
+            SceneState {
+                bridge_event: Some(&active_id),
+                expanded_event: Some(&active_id),
+                expansion_progress: scalar(progress),
+                ..SceneState::default()
+            },
+        );
+        let flutter = decode_png(FLUTTER_PNG, 1400, 900);
+        let rust = read_image(&surface.image_snapshot(), 1400, 900);
+        let (changed_pixels, mean, maximum_delta) = raster_metrics(&flutter, &rust);
+        let changed_fraction = ratio_usize(changed_pixels, 1_260_000);
+        assert!(
+            mean <= 0.08 && changed_fraction <= 0.085,
+            "Flutter/Rust activation midpoint drift: {changed_pixels}/1260000 pixels \
              ({changed_fraction:.6}); mean {mean:.6}; max {maximum_delta}"
         );
     }

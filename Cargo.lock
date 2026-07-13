@@ -915,6 +915,7 @@ dependencies = [
 name = "not-news-app"
 version = "0.1.0"
 dependencies = [
+ "indexmap",
  "not-news-domain",
  "not-news-platform",
  "not-news-renderer",

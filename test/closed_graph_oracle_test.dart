@@ -152,6 +152,52 @@ void main() {
       expansionProgresses: const {'artifact-oracle': 1},
     );
   });
+
+  testWidgets('records the temporal midpoint of activation and displacement',
+      (tester) async {
+    const events = [artifactEvent, displacedNeighbor];
+    const bridge = EventBridge(
+      from: 'artifact-oracle',
+      to: 'displaced-neighbor',
+      label: 'informs',
+    );
+    const base = {
+      'artifact-oracle': Offset(700, 450),
+      'displaced-neighbor': Offset(790, 450),
+    };
+    final closed = displayLayout(
+      events: events,
+      basePositions: base,
+      activeId: null,
+    );
+    final open = displayLayout(
+      events: events,
+      basePositions: base,
+      activeId: artifactEvent.id,
+    );
+    final progress = Curves.easeOutCubic.transform(0.5);
+    final frameLayouts = {
+      for (final event in events)
+        event.id: open[event.id]!.copyWith(
+          display: Offset.lerp(
+            closed[event.id]!.display,
+            open[event.id]!.display,
+            progress,
+          )!,
+        ),
+    };
+    await expectGraphFrame(
+      tester,
+      size: const Size(1400, 900),
+      golden: 'goldens/artifact-neighbor-midpoint-1400x900.png',
+      events: events,
+      frameBridges: const [bridge],
+      frameLayouts: frameLayouts,
+      activeId: artifactEvent.id,
+      bridgeActiveId: artifactEvent.id,
+      expansionProgresses: {artifactEvent.id: progress},
+    );
+  });
 }
 
 Future<void> expectArtifactFrame(

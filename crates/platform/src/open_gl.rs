@@ -274,7 +274,13 @@ impl<A: PlatformApplication> ApplicationHandler for Runner<A> {
                 event_loop.exit();
                 return;
             }
-            WindowEvent::Resized(size) => self.native.resize(size.width, size.height),
+            WindowEvent::Resized(size) => {
+                let resized = self.native.resize(size.width, size.height);
+                if resized.is_ok() && self.application.window_event(&event) {
+                    self.native.window.request_redraw();
+                }
+                resized
+            }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             _ => {
                 if self.application.window_event(&event) {
