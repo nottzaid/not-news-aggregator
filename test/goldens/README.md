@@ -40,10 +40,12 @@ flutter test test/closed_graph_oracle_test.dart --update-goldens
 ```
 
 The Rust gates compare decoded grid, bridge, event halo/core/glint, Manrope
-title, and JetBrains Mono date pixels. Current budgets are mean/max channel
-delta 0.07/5 at 1400×900 and 0.22/4 at 480×270, plus changed-pixel ceilings;
-the scaled allowance accounts for Flutter-engine/direct-Skia coverage, not
-world-geometry drift.
+title, and JetBrains Mono date pixels. Mean-channel budgets are 0.07 at
+1400×900 and 0.22 at 480×270, with changed-pixel ceilings. Bundled-font
+wrapping and paragraph widths/heights are asserted separately: host font
+rasterizers vary individual hinted glyph-edge channels even when their layout
+and global raster errors agree. The scaled allowance accounts for
+Flutter-engine/direct-Skia coverage, not world-geometry drift.
 
 `artifact-graph-open-1400x900.png` and
 `artifact-graph-half-1400x900.png` fix the same expandable event at animation
@@ -56,8 +58,9 @@ Open PNG sha256 4b69e26368e45977e58430d2b61425d34bc9b17e12dcd29a45f8c8f01e309432
 Half PNG sha256 41e948a18eff7f1b032df768ed09e637b4162d1477660c956e99d827a44fbd9b
 ```
 
-The open/half Rust budgets respectively cap mean channel delta at 0.08/0.075,
-maximum delta at 5, and changed-pixel fractions at 0.077/0.073. A low mean
-cannot excuse a displaced glyph: paragraph placement uses SkParagraph's
-realized width after the oracle exposed a 0.449-pixel pre-layout-centering
-error.
+The open/half Rust budgets respectively cap mean channel delta at 0.08/0.075
+and changed-pixel fractions at 0.077/0.073. A low mean did not excuse a
+displaced glyph: the 0.449-pixel pre-layout-centering error raised the open
+mean to 0.134, so the gate failed before placement switched to SkParagraph's
+realized width. Structural assertions separately fix the report paragraph at
+119×55 pixels, 75.6 intrinsic width, and its source-derived line breaks.

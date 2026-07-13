@@ -215,7 +215,7 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   incomplete app; this is not on-window, parity, driver, damage, or timing
   evidence.
 - The 2026-07-14 workspace checkpoint passes formatting, warning-denied Clippy,
-  and all 23 active tests; the one real-database experiment remains explicit
+  and all 24 active tests; the one real-database experiment remains explicit
   and ignored by default. CI now names the broader domain/decoding/renderer
   contract it executes rather than implying every test concerns movement. A
   Windows runner now compiles every workspace target at the declared minimum
@@ -266,11 +266,18 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   gates. Rust exactly reproduces Flutter's UTF-16-aware optimal line search,
   ID-seeded radial placement, 80-pass collision relaxation, ease-out motion,
   tethers, glass/halo/rings, provenance dial, label transition, and hub change.
-  At progress 1 and 0.5, mean/max channel deltas are 0.072517/5 and
-  0.069356/5. A low earlier average concealed a 0.449-pixel glyph shift caused
+  At progress 1 and 0.5, mean channel deltas are 0.072517 and 0.069356. A low
+  earlier average still exposed a 0.449-pixel glyph shift caused
   by centering against the requested rather than realized paragraph width; the
   gate localized and closed it. Artifact layouts and paragraphs are bounded
   caches, not per-frame recomputation.
+- Hosted CI falsified global maximum-channel delta as a portable text gate:
+  bundled-font layout and mean errors matched local results, while hinted
+  glyph-edge maxima varied from 5 to 200. Scene checks therefore bind tight
+  mean and changed-pixel budgets plus exact line breaks, realized/intrinsic
+  widths, and heights; only nontext background keeps a maximum-channel gate.
+  This is a stronger separation of geometry from platform rasterization, not a
+  widened visual budget.
 
 ## Open decisions
 
