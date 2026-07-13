@@ -69,6 +69,15 @@ const artifactEvent = ResearchEvent(
     ),
   ],
 );
+const displacedNeighbor = ResearchEvent(
+  id: 'displaced-neighbor',
+  title: 'Adjacent finding',
+  date: 'Jul 15, 2026',
+  color: 0xff4cc9d6,
+  summary: 'Neighbor displaced by expanded evidence.',
+  sourceLabel: 'Source',
+  artifacts: [],
+);
 
 void main() {
   setUpAll(() async {
@@ -112,6 +121,35 @@ void main() {
       tester,
       progress: 0.5,
       golden: 'goldens/artifact-graph-half-1400x900.png',
+    );
+  });
+
+  testWidgets('records expanded neighbor displacement and bridge emphasis',
+      (tester) async {
+    const events = [artifactEvent, displacedNeighbor];
+    const bridge = EventBridge(
+      from: 'artifact-oracle',
+      to: 'displaced-neighbor',
+      label: 'informs',
+    );
+    final frameLayouts = displayLayout(
+      events: events,
+      basePositions: const {
+        'artifact-oracle': Offset(700, 450),
+        'displaced-neighbor': Offset(790, 450),
+      },
+      activeId: artifactEvent.id,
+    );
+    await expectGraphFrame(
+      tester,
+      size: const Size(1400, 900),
+      golden: 'goldens/artifact-neighbor-open-1400x900.png',
+      events: events,
+      frameBridges: const [bridge],
+      frameLayouts: frameLayouts,
+      activeId: artifactEvent.id,
+      bridgeActiveId: artifactEvent.id,
+      expansionProgresses: const {'artifact-oracle': 1},
     );
   });
 }

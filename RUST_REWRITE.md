@@ -215,7 +215,7 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   incomplete app; this is not on-window, parity, driver, damage, or timing
   evidence.
 - The 2026-07-14 workspace checkpoint passes formatting, warning-denied Clippy,
-  and all 24 active tests; the one real-database experiment remains explicit
+  and all 26 active tests; the one real-database experiment remains explicit
   and ignored by default. CI now names the broader domain/decoding/renderer
   contract it executes rather than implying every test concerns movement. A
   Windows runner now compiles every workspace target at the declared minimum
@@ -278,6 +278,12 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   widths, and heights; only nontext background keeps a maximum-channel gate.
   This is a stronger separation of geometry from platform rasterization, not a
   widened visual budget.
+- Active expansion now feeds Flutter's full neighbor solver: active-radius
+  push, artifact obstacles, affected-set propagation, 18 relaxation passes,
+  and pair separation. A composed oracle covers the displaced neighbor plus
+  highlighted bridge at mean drift 0.076695; a topology experiment proves the
+  active and distant events remain fixed while only collision propagation
+  moves neighbors.
 
 ## Open decisions
 
@@ -325,8 +331,8 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   world positions, and paints Flutter-matched background, grid, closed bridges,
   event halos/cores/glints, titles, dates, and closed/expanding artifact graphs
   through direct Skia. Bundled variable fonts are compiled into the renderer.
-  Chrome, input binding, neighbor displacement, and live motion scheduling
-  remain absent; the binary has not been presented as a product candidate.
-- Next safe action: port neighbor displacement and surrounding chrome in
-  Flutter paint order, then bind pan/zoom/hover to deadline-scheduled frames;
+  Chrome, input binding, and live motion scheduling remain absent; the binary
+  has not been presented as a product candidate.
+- Next safe action: port surrounding chrome in Flutter paint order, then bind
+  pan/zoom/hover to deadline-scheduled frames;
   keep writable migration behind visual and command-interaction evidence.

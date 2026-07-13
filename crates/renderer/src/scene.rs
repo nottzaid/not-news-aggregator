@@ -925,15 +925,72 @@ mod tests {
         assert_artifact_raster_budget(FLUTTER_PNG, 0.5, 0.075, 0.073);
     }
 
-    fn assert_artifact_raster_budget(
-        flutter_png: &[u8],
-        progress: f32,
-        maximum_mean: f64,
-        maximum_changed_fraction: f64,
-    ) {
-        let event_id = EventId("artifact-oracle".into());
-        let event = ResearchEvent {
-            id: event_id.clone(),
+    #[test]
+    fn expanded_neighbor_and_bridge_stay_within_flutter_raster_budget() {
+        const FLUTTER_PNG: &[u8] =
+            include_bytes!("../../../test/goldens/artifact-neighbor-open-1400x900.png");
+        let active_id = EventId("artifact-oracle".into());
+        let neighbor_id = EventId("displaced-neighbor".into());
+        let active = artifact_event(active_id.clone());
+        let neighbor = ResearchEvent {
+            id: neighbor_id.clone(),
+            title: "Adjacent finding".into(),
+            date: "Jul 15, 2026".into(),
+            color: 0xff4c_c9d6,
+            summary: "Neighbor displaced by expanded evidence.".into(),
+            source_label: "Source".into(),
+            artifacts: vec![],
+            url: None,
+        };
+        let bridge_id = BridgeId("bridge".into());
+        let graph = GraphSnapshot {
+            events: IndexMap::from([(active_id.clone(), active), (neighbor_id.clone(), neighbor)]),
+            bridges: IndexMap::from([(
+                bridge_id.clone(),
+                EventBridge {
+                    id: bridge_id,
+                    from: active_id.clone(),
+                    to: neighbor_id.clone(),
+                    label: "informs".into(),
+                    provenance: Provenance::Legacy,
+                },
+            )]),
+            ..GraphSnapshot::default()
+        };
+        let settled = HashMap::from([
+            (active_id.clone(), WorldPoint { x: 700.0, y: 450.0 }),
+            (neighbor_id, WorldPoint { x: 790.0, y: 450.0 }),
+        ]);
+        let positions = crate::expanded_positions(&graph, &settled, Some(&active_id));
+        let mut surface = surfaces::raster_n32_premul((1400, 900)).unwrap();
+        paint_grid(surface.canvas(), 1400.0, 900.0, Viewport::default());
+        paint_graph(
+            surface.canvas(),
+            1400.0,
+            900.0,
+            Viewport::default(),
+            &graph,
+            &positions,
+            SceneState {
+                expanded_event: Some(&active_id),
+                expansion_progress: 1.0,
+                ..SceneState::default()
+            },
+        );
+        let flutter = decode_png(FLUTTER_PNG, 1400, 900);
+        let rust = read_image(&surface.image_snapshot(), 1400, 900);
+        let (changed_pixels, mean, maximum_delta) = raster_metrics(&flutter, &rust);
+        let changed_fraction = ratio_usize(changed_pixels, 1_260_000);
+        assert!(
+            mean <= 0.08 && changed_fraction <= 0.085,
+            "Flutter/Rust expanded-neighbor drift: {changed_pixels}/1260000 pixels \
+             ({changed_fraction:.6}); mean {mean:.6}; max {maximum_delta}"
+        );
+    }
+
+    fn artifact_event(id: EventId) -> ResearchEvent {
+        ResearchEvent {
+            id,
             title: "Artifact oracle".into(),
             date: "Jul 14, 2026".into(),
             color: 0xffe8_a44c,
@@ -956,7 +1013,17 @@ mod tests {
             })
             .collect(),
             url: None,
-        };
+        }
+    }
+
+    fn assert_artifact_raster_budget(
+        flutter_png: &[u8],
+        progress: f32,
+        maximum_mean: f64,
+        maximum_changed_fraction: f64,
+    ) {
+        let event_id = EventId("artifact-oracle".into());
+        let event = artifact_event(event_id.clone());
         let graph = GraphSnapshot {
             events: IndexMap::from([(event_id.clone(), event)]),
             ..GraphSnapshot::default()

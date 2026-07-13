@@ -1,7 +1,11 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    hash::BuildHasher,
+};
 
 use not_news_domain::{EventId, GraphSnapshot, Point, ResearchEvent};
 
+use crate::artifacts::layout_artifacts;
 use crate::{REFERENCE_HEIGHT as REFERENCE_VIEW_HEIGHT, REFERENCE_WIDTH as REFERENCE_VIEW_WIDTH};
 const EVENT_COLLISION_RADIUS: f64 = 92.0;
 
@@ -11,6 +15,121 @@ pub fn resolved_positions(graph: &GraphSnapshot) -> HashMap<EventId, Point> {
         positions.insert(event.clone(), placement.point);
     }
     positions
+}
+
+/// Applies Flutter's active-artifact collision displacement to settled positions.
+///
+/// # Panics
+///
+/// Panics when `base_positions` omits an event contained in `graph`.
+pub fn expanded_positions<S: BuildHasher>(
+    graph: &GraphSnapshot,
+    base_positions: &HashMap<EventId, Point, S>,
+    active_id: Option<&EventId>,
+) -> HashMap<EventId, Point> {
+    let mut positions: HashMap<_, _> = graph
+        .events
+        .keys()
+        .map(|id| {
+            (
+                id.clone(),
+                *base_positions
+                    .get(id)
+                    .expect("every graph event requires a settled position"),
+            )
+        })
+        .collect();
+    let Some(active_id) = active_id else {
+        return positions;
+    };
+    let Some(active_event) = graph.events.get(active_id) else {
+        return positions;
+    };
+    let active = positions[active_id];
+    let metrics = layout_artifacts(active_event);
+    let active_radius = metrics.radius + 36.0;
+    let mut affected = HashSet::new();
+
+    for id in graph.events.keys().filter(|id| *id != active_id) {
+        let current = positions[id];
+        let delta = subtract(current, active);
+        let current_distance = delta.x.hypot(delta.y);
+        let safe_distance = if current_distance == 0.0 {
+            1.0
+        } else {
+            current_distance
+        };
+        let minimum = active_radius + 96.0;
+        if current_distance < minimum {
+            let push = minimum - current_distance;
+            positions.insert(id.clone(), add(current, scale(delta, push / safe_distance)));
+            affected.insert(id.clone());
+        }
+    }
+
+    let obstacles: Vec<_> = metrics
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            (
+                add(active, artifact.offset),
+                artifact.collision_radius() + 18.0,
+            )
+        })
+        .collect();
+    let movable: Vec<_> = graph
+        .events
+        .keys()
+        .filter(|id| *id != active_id)
+        .cloned()
+        .collect();
+    for _ in 0..18 {
+        for id in &movable {
+            let mut next = positions[id];
+            for &(obstacle, radius) in &obstacles {
+                let minimum = EVENT_COLLISION_RADIUS + radius;
+                if !affected.contains(id) && distance(next, obstacle) >= minimum {
+                    continue;
+                }
+                affected.insert(id.clone());
+                next = pushed_point(next, obstacle, minimum);
+            }
+            positions.insert(id.clone(), next);
+        }
+
+        for a_index in 0..movable.len() {
+            for b_index in (a_index + 1)..movable.len() {
+                let a_id = &movable[a_index];
+                let b_id = &movable[b_index];
+                if !affected.contains(a_id) && !affected.contains(b_id) {
+                    continue;
+                }
+                let a = positions[a_id];
+                let b = positions[b_id];
+                let minimum = EVENT_COLLISION_RADIUS * 2.0 + 18.0;
+                if distance(a, b) >= minimum {
+                    continue;
+                }
+                let (a, b) = resolved_pair(a, b, minimum);
+                affected.insert(a_id.clone());
+                affected.insert(b_id.clone());
+                positions.insert(a_id.clone(), a);
+                positions.insert(b_id.clone(), b);
+            }
+        }
+    }
+    positions
+}
+
+fn pushed_point(point: Point, fixed: Point, minimum: f64) -> Point {
+    let delta = subtract(point, fixed);
+    let current = delta.x.hypot(delta.y);
+    let safe_distance = if current == 0.0 { 1.0 } else { current };
+    if current >= minimum {
+        point
+    } else {
+        add(point, scale(delta, (minimum - current) / safe_distance))
+    }
 }
 
 pub fn primary_component_ids(graph: &GraphSnapshot) -> Vec<EventId> {
@@ -388,7 +507,7 @@ fn scale(point: Point, factor: f64) -> Point {
 #[cfg(test)]
 mod tests {
     use indexmap::IndexMap;
-    use not_news_domain::{BridgeId, EventBridge, Provenance};
+    use not_news_domain::{BridgeId, EventBridge, Provenance, SourceArtifact};
 
     use super::*;
 
@@ -503,5 +622,39 @@ mod tests {
             resolved_positions(&graph)[&EventId("cosmos-a".to_owned())],
             saved
         );
+    }
+
+    #[test]
+    fn expansion_moves_colliders_without_disturbing_distant_events() {
+        let mut active = event("active", "Active event");
+        active.artifacts = (0..3)
+            .map(|index| SourceArtifact {
+                text: format!("Evidence artifact {index} with distinct text"),
+                source: "Report".into(),
+                url: format!("https://example.com/{index}"),
+            })
+            .collect();
+        let graph = graph(
+            vec![active, event("near", "Near"), event("far", "Far")],
+            &[],
+        );
+        let active_id = EventId("active".into());
+        let near_id = EventId("near".into());
+        let far_id = EventId("far".into());
+        let base = HashMap::from([
+            (active_id.clone(), Point { x: 700.0, y: 450.0 }),
+            (near_id.clone(), Point { x: 780.0, y: 450.0 }),
+            (
+                far_id.clone(),
+                Point {
+                    x: -4_000.0,
+                    y: 8_000.0,
+                },
+            ),
+        ]);
+        let expanded = expanded_positions(&graph, &base, Some(&active_id));
+        assert_ne!(expanded[&near_id], base[&near_id]);
+        assert_eq!(expanded[&far_id], base[&far_id]);
+        assert_eq!(expanded[&active_id], base[&active_id]);
     }
 }

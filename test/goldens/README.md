@@ -64,3 +64,10 @@ displaced glyph: the 0.449-pixel pre-layout-centering error raised the open
 mean to 0.134, so the gate failed before placement switched to SkParagraph's
 realized width. Structural assertions separately fix the report paragraph at
 119×55 pixels, 75.6 intrinsic width, and its source-derived line breaks.
+
+`artifact-neighbor-open-1400x900.png` composes expansion with Flutter's
+neighbor collision solver and active-bridge glow/dash treatment (sha256
+`f91c91c24da83951ed3b43afa1dd1e09b106914a3bc90c4ce64cbb50a1335693`).
+Its Rust gate caps mean drift at 0.08 and changed pixels at 0.085; a separate
+topology experiment proves distant and active positions remain fixed while a
+colliding neighbor moves.
