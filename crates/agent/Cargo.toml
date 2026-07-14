@@ -6,6 +6,9 @@ rust-version.workspace = true
 
 [dependencies]
 not-news-domain = { path = "../domain" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

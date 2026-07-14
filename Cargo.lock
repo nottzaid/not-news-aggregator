@@ -909,6 +909,9 @@ name = "not-news-agent"
 version = "0.1.0"
 dependencies = [
  "not-news-domain",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
