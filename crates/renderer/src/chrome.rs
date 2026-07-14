@@ -1596,11 +1596,12 @@ mod tests {
     #[test]
     fn fixed_chrome_stays_within_flutter_crop_budgets() {
         const FLUTTER: &[u8] =
-            include_bytes!("../../../test/goldens/full-screen-closed-1280x800.png");
+            include_bytes!("../../../fixtures/reference-raster/full-screen-closed-1280x800.png");
         const FLUTTER_BASE: &[u8] =
-            include_bytes!("../../../test/goldens/full-screen-base-1280x800.png");
-        const FLUTTER_BUSY: &[u8] =
-            include_bytes!("../../../test/goldens/full-screen-record-busy-1280x800.png");
+            include_bytes!("../../../fixtures/reference-raster/full-screen-base-1280x800.png");
+        const FLUTTER_BUSY: &[u8] = include_bytes!(
+            "../../../fixtures/reference-raster/full-screen-record-busy-1280x800.png"
+        );
         let flutter_chrome = read_image(&Image::from_encoded(Data::new_copy(FLUTTER)).unwrap());
         let flutter_base = read_image(&Image::from_encoded(Data::new_copy(FLUTTER_BASE)).unwrap());
         let flutter_busy = read_image(&Image::from_encoded(Data::new_copy(FLUTTER_BUSY)).unwrap());
@@ -1659,11 +1660,11 @@ mod tests {
     #[test]
     fn narrow_chrome_metadata_and_status_follow_flutter_breakpoints() {
         const FLUTTER_BASE: &[u8] =
-            include_bytes!("../../../test/goldens/narrow-active-base-640x720.png");
+            include_bytes!("../../../fixtures/reference-raster/narrow-active-base-640x720.png");
         const FLUTTER_ACTIVE: &[u8] =
-            include_bytes!("../../../test/goldens/narrow-active-640x720.png");
+            include_bytes!("../../../fixtures/reference-raster/narrow-active-640x720.png");
         const FLUTTER_STATUS: &[u8] =
-            include_bytes!("../../../test/goldens/narrow-status-640x720.png");
+            include_bytes!("../../../fixtures/reference-raster/narrow-status-640x720.png");
         let flutter_base = read_image_size(
             &Image::from_encoded(Data::new_copy(FLUTTER_BASE)).unwrap(),
             (640, 720),
@@ -1811,9 +1812,10 @@ mod tests {
     #[test]
     fn active_metadata_stays_within_flutter_crop_budget() {
         const FLUTTER: &[u8] =
-            include_bytes!("../../../test/goldens/full-screen-active-1280x800.png");
-        const FLUTTER_BASE: &[u8] =
-            include_bytes!("../../../test/goldens/full-screen-active-base-1280x800.png");
+            include_bytes!("../../../fixtures/reference-raster/full-screen-active-1280x800.png");
+        const FLUTTER_BASE: &[u8] = include_bytes!(
+            "../../../fixtures/reference-raster/full-screen-active-base-1280x800.png"
+        );
         let event = ResearchEvent {
             id: EventId("spacex".into()),
             title: "SpaceX compute partnership".into(),
@@ -2045,9 +2047,9 @@ mod tests {
     #[test]
     fn status_panel_stays_within_flutter_crop_budget() {
         const FLUTTER: &[u8] =
-            include_bytes!("../../../test/goldens/full-screen-status-1280x800.png");
+            include_bytes!("../../../fixtures/reference-raster/full-screen-status-1280x800.png");
         const FLUTTER_BASE: &[u8] =
-            include_bytes!("../../../test/goldens/full-screen-closed-1280x800.png");
+            include_bytes!("../../../fixtures/reference-raster/full-screen-closed-1280x800.png");
         let flutter_status = read_image(&Image::from_encoded(Data::new_copy(FLUTTER)).unwrap());
         let flutter_base = read_image(&Image::from_encoded(Data::new_copy(FLUTTER_BASE)).unwrap());
         let rust_status = paint_over(&flutter_base, |canvas| {
@@ -2122,9 +2124,9 @@ mod tests {
     #[test]
     fn activity_drawer_matches_flutter_geometry_and_raster_budget() {
         const FLUTTER: &[u8] =
-            include_bytes!("../../../test/goldens/full-screen-activity-1280x800.png");
+            include_bytes!("../../../fixtures/reference-raster/full-screen-activity-1280x800.png");
         const FLUTTER_BASE: &[u8] =
-            include_bytes!("../../../test/goldens/full-screen-closed-1280x800.png");
+            include_bytes!("../../../fixtures/reference-raster/full-screen-closed-1280x800.png");
         let flutter = read_image(&Image::from_encoded(Data::new_copy(FLUTTER)).unwrap());
         let base = read_image(&Image::from_encoded(Data::new_copy(FLUTTER_BASE)).unwrap());
         let messages = vec![

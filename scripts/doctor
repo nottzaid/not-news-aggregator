@@ -3,62 +3,69 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-missing=0
-for command in flutter uv hermes curl python; do
-  if command -v "$command" >/dev/null 2>&1; then
-    printf 'ok       %s\n' "$command"
-  else
-    printf 'missing  %s\n' "$command" >&2
-    missing=1
-  fi
-done
-
-if command -v podman >/dev/null 2>&1; then
-  printf 'ok       podman (SearXNG runtime)\n'
-elif command -v docker >/dev/null 2>&1; then
-  printf 'ok       docker (SearXNG runtime)\n'
-else
-  printf 'missing  podman or docker (SearXNG runtime)\n' >&2
-  missing=1
-fi
-
-if [[ ! -f .env ]]; then
-  printf 'missing  .env (copy .env.example, then add private keys)\n' >&2
-  missing=1
-else
+if [[ -f .env ]]; then
   set -a
   # shellcheck disable=SC1091
   source .env
   set +a
-  printf 'ok       .env\n'
-  if [[ "${AI_NEWS_ENABLE_HERMES:-0}" == 1 && \
-        "${HERMES_PROVIDER:-opencode-go}" == opencode-go && \
-        -z "${OPENCODE_GO_API_KEY:-}" ]]; then
-    printf 'missing  OPENCODE_GO_API_KEY (Hermes is enabled with opencode-go)\n' >&2
+fi
+
+missing=0
+for command in cargo rustc; do
+  if command -v "$command" >/dev/null 2>&1; then
+    printf 'ready     %s\n' "$command"
+  else
+    printf 'missing   %s (required to build from source)\n' "$command" >&2
     missing=1
   fi
-  if [[ "${AI_NEWS_ENABLE_HERMES:-0}" == 1 && \
-        -z "${EXA_API_KEY:-}" ]]; then
-    printf 'missing  EXA_API_KEY (Hermes research is enabled)\n' >&2
-    missing=1
-  fi
-  browse_command="${BROWSE_CLI:-browse}"
-  if [[ "${AI_NEWS_ENABLE_HERMES:-0}" == 1 && \
-        "${AI_NEWS_REQUIRE_SEARCH_TRIAD:-1}" == 1 ]]; then
-    if command -v "$browse_command" >/dev/null 2>&1; then
-      printf 'ok       %s (dynamic-page research)\n' "$browse_command"
+done
+
+if command -v pkg-config >/dev/null 2>&1; then
+  printf 'ready     pkg-config\n'
+else
+  printf 'missing   pkg-config (required for Linux native-link discovery)\n' >&2
+  missing=1
+fi
+
+backend=${AI_NEWS_RESEARCH_BACKEND:-auto}
+case "$backend" in
+  auto)
+    if command -v opencode >/dev/null 2>&1; then
+      printf 'optional  OpenCode available; auto research will prefer it\n'
+    elif command -v hermes >/dev/null 2>&1; then
+      printf 'optional  Hermes available; auto research will use it\n'
     else
-      printf 'missing  %s (search triad is required)\n' "$browse_command" >&2
+      printf 'optional  no research CLI; saved-canvas operation remains available\n'
+    fi
+    ;;
+  opencode|hermes)
+    if command -v "$backend" >/dev/null 2>&1; then
+      printf 'ready     %s research backend\n' "$backend"
+    else
+      printf 'missing   selected %s research backend\n' "$backend" >&2
       missing=1
     fi
-  fi
-  if [[ -z "${GROQ_API_KEY:-}" ]]; then
-    printf 'optional GROQ_API_KEY is unset; microphone transcription will be unavailable\n'
-  fi
+    ;;
+  *)
+    printf 'invalid   AI_NEWS_RESEARCH_BACKEND=%s (use auto, opencode, or hermes)\n' "$backend" >&2
+    missing=1
+    ;;
+esac
+
+if [[ -n ${GROQ_API_KEY:-} ]]; then
+  printf 'optional  Groq transcription configured\n'
+else
+  printf 'optional  Groq key absent; text research remains available\n'
 fi
 
-if (( missing )); then
-  exit 1
+if [[ ${AI_NEWS_ENABLE_VOICE:-1} == 0 ]]; then
+  printf 'optional  synthesized voice disabled explicitly\n'
+elif [[ -n ${KOKORO_TTS_BASE_URL:-} ]]; then
+  printf 'optional  Kokoro endpoint configured\n'
+else
+  printf 'optional  Kokoro endpoint defaults to http://127.0.0.1:8890\n'
 fi
 
-printf 'Development prerequisites: PASS\n'
+(( missing == 0 )) || exit 1
+cargo metadata --no-deps --format-version 1 >/dev/null
+printf 'source build contract: PASS\n'

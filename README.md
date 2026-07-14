@@ -1,149 +1,92 @@
-# Not News Aggregator
+# Not News Canvas
 
-Not News Aggregator is a Linux research canvas, not a feed reader. Ask a
-question by voice or text; a project-isolated Hermes agent searches through
-SearXNG, Exa, and Browse.sh, then streams sourced events and relationships into
-a persistent graph.
+Not News is a native Windows/Linux research canvas. A question becomes a
+durable graph of findings, exact sources, and explicit relationships; the
+canvas remains spatially unbounded as years of work accumulate. Dragging moves
+knowledge without inventing meaning. Relating, detaching, and promoting a
+source are deliberate commands in the same append-only undo history as moves.
 
-The graph remains a workspace after research ends. Related events join existing
-regions; unrelated work opens elsewhere; source artifacts stay attached to the
-claims they support. Dragging an event moves and pins it immediately while
-Hermes reconciles only the relationships left at its origin.
+The application is one Rust process: winit owns native input and lifecycle,
+direct Skia painting preserves the reference design, and bundled SQLite owns
+graph state, migrations, verified backups, research activity, and reversible
+mutations. There is no loopback web server or runtime Flutter/Python toolchain.
+OpenCode or Hermes is an optional external researcher; a saved canvas opens and
+remains editable without either.
 
-## What runs
+## Use the canvas
 
-```text
-Flutter Linux canvas
-  ├─ GET  /graph/stream           saved events, bridges, placements, revision
-  ├─ GET  /research/stream        Hermes research as SSE mutations
-  ├─ POST /audio/transcribe       Groq Whisper
-  └─ POST /graph/drag-transactions
-            │
-            ├─ immediate SQLite placement + optional user bridge
-            └─ bounded Hermes origin reconciliation → deterministic fallback
+- `Ctrl+K` or `/` opens the text composer; the record orb captures a spoken
+  question when Groq transcription is configured.
+- Drag a finding to organize space. Scroll forward zooms in; drag empty space
+  to pan. Neither gesture changes graph semantics.
+- Right-click a finding or source, or hover it and press `Ctrl+E`, to relate,
+  detach, or promote it explicitly.
+- `Ctrl+Z` undoes and `Ctrl+Shift+Z` or `Ctrl+Y` redoes the latest committed
+  move or semantic command across restarts.
+- Drop a legacy `graph.sqlite` onto a pristine canvas to import it read-only;
+  the source file is never migrated or overwritten.
+
+Program files and research are separated. By default the database lives at
+`$XDG_DATA_HOME/not-news-canvas/graph.sqlite` on Linux (falling back to
+`~/.local/share`) and `%LOCALAPPDATA%\not-news-canvas\graph.sqlite` on Windows.
+For controlled recovery or testing:
+
+```sh
+not-news-app --database /path/to/graph.sqlite
+not-news-app --database /path/to/new.sqlite --import-legacy /path/to/old.sqlite
 ```
 
-The local FastAPI backend stores the graph in `backend/data/graph.sqlite`.
-Kokoro can speak sparse, agent-chosen orientation notes; those notes never
-become graph nodes.
+## Build from source
 
-## Requirements
-
-- Flutter with Linux desktop support (Dart 3.4+)
-- Python 3.12+ through [`uv`](https://docs.astral.sh/uv/)
-- Podman or Docker for local SearXNG
-- Hermes on `PATH`
-- Browse.sh as `browse` for dynamic-page inspection
-- optional local Kokoro for spoken notes
-
-## From clone to canvas
+Release artifacts are the user-facing delivery path. Development requires Rust
+1.95; Linux linking additionally needs ALSA, Fontconfig, FreeType, OpenGL, and
+X11/Wayland development libraries appropriate to the distribution.
 
 ```sh
 git clone https://github.com/muradkant/not-news-aggregator.git
 cd not-news-aggregator
-cp .env.example .env
-```
-
-For live research with the default provider, set:
-
-```sh
-AI_NEWS_ENABLE_HERMES=1
-OPENCODE_GO_API_KEY=...
-EXA_API_KEY=...
-GROQ_API_KEY=...       # required only for microphone transcription
-```
-
-SearXNG already defaults to `http://127.0.0.1:8889`. Check the complete local
-contract, then start every component:
-
-```sh
 ./scripts/doctor
 ./scripts/dev
 ```
 
-`scripts/dev` prepares the isolated Hermes profile, starts SearXNG, starts the
-backend, waits for `/health`, then launches Flutter. It stops the backend when
-Flutter exits. The API listens on `http://127.0.0.1:8765` unless
-`AI_NEWS_BACKEND_PORT` says otherwise.
+`scripts/dev` loads an optional ignored `.env` and runs the optimized binary.
+It does not start an obsolete backend or require external research services.
 
-With `AI_NEWS_ENABLE_HERMES=0`, saved graph browsing still works and a failed
-drag reconciliation takes the deterministic fallback; no live research model
-is called.
+## Optional research and voice
 
-## Research surfaces
+`AI_NEWS_RESEARCH_BACKEND=auto` prefers the authenticated standalone OpenCode
+CLI and otherwise uses Hermes. Set it to `opencode` or `hermes` to make the
+choice explicit. The application supervises either as a bounded process group,
+accepts only typed research events, validates every graph proposal, and commits
+accepted mutations transactionally. Credentials remain in the external tool's
+private store.
 
-The three search paths have distinct jobs:
+The tracked `hermes/ainews` profile is installed into ignored project-local
+state with `scripts/setup-hermes-ainews`; [HERMES.md](HERMES.md) defines its
+isolation and search policy. SearXNG remains an optional independently managed
+discovery surface through `scripts/searxng`.
 
-- **SearXNG** widens the URL frontier across engines, categories, languages,
-  dates, and pages.
-- **Exa** supplies semantic discovery and fuller extraction.
-- **Browse.sh** handles JavaScript-heavy, interactive, or extraction-hostile
-  pages.
+Groq speech-to-text and OpenAI-compatible Kokoro speech output are direct,
+bounded native adapters. Missing keys, devices, servers, or players disable the
+affected capability without blocking research ingestion or graph access. Copy
+`.env.example` only when configuring those optional surfaces.
 
-Hermes compares those paths, prefers primary material, and uses secondary
-sources as leads when direct evidence exists. Its reusable profile instructions
-live in `hermes/ainews/`; runtime sessions, auth, logs, memory, and cache stay in
-ignored `.hermes/` state. [Hermes profile](HERMES.md) explains that boundary.
-
-Manage SearXNG independently with:
+## Evidence
 
 ```sh
-scripts/searxng start
-scripts/searxng test
-scripts/searxng stop
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo run -p not-news-platform --example hidden_smoke
+NOT_NEWS_FORCE_SOFTWARE=1 cargo run -p not-news-platform --example hidden_smoke
 ```
 
-## Direct manipulation
+The suite combines domain properties, real SQLite crash/rollback boundaries,
+process cancellation, loopback HTTP framing, persisted UI-to-database traces,
+GPU and software presentation, and decoded-pixel comparisons against immutable
+reference rasters. Windows checks execute native process/audio tests and a real
+hidden window. `fixtures/reference-raster` records visual and temporal
+provenance; it is evidence, not a second implementation.
 
-Press an event and move more than six screen pixels to drag; empty-canvas input
-still pans. During the gesture, the event follows local pointer state—no HTTP,
-database, layout regeneration, or model work occurs.
-
-Drop near another event to create a protected user relationship, or drop in
-empty space to move alone. The backend atomically checks the graph revision,
-persists the pinned world position, creates any destination bridge, and returns.
-The UI shows the new state before origin reconciliation finishes.
-
-Hermes receives only the dragged event's former relationships and may keep,
-remove, or relabel each. Its process is isolated from project rules, restricted
-to a non-mutating clarification toolset, bounded by time and turn count, and
-killed on timeout. Malformed output, disabled Hermes, or process failure removes
-the old relationships deterministically; the destination remains authoritative.
-
-After a targeted drop, **LET HERMES CHECK THIS** requests a separate advisory
-review. It cannot mutate the user-authored destination. The backend also exposes
-transaction undo, though the current Canvas has no undo control yet. See
-[Detach and reconciliation](docs/detach-reconciliation-design.md) for shipped
-invariants and remaining work.
-
-## Operate the graph
-
-Clear all saved graph state with the trash control or:
-
-```sh
-curl -X DELETE http://127.0.0.1:8765/graph
-```
-
-Inspect the current snapshot:
-
-```sh
-curl http://127.0.0.1:8765/graph
-```
-
-Secrets, sessions, databases, generated SearXNG configuration, Flutter output,
-and dependency caches are ignored. Tracked templates and lockfiles reconstruct
-the application without publishing private research.
-
-## Verify
-
-```sh
-flutter analyze
-flutter test
-UV_CACHE_DIR="$PWD/.uv-cache" uv run --project backend pytest backend/tests
-flutter build linux --debug
-```
-
-The tests cover layout stability, SSE reduction, transcription failures,
-durable placement and revision streaming, immediate drag commits, protected
-destination bridges, fallback, undo, stale-drop rejection, Hermes JSON parsing,
-and the reconciliation command's tool boundary.
+The prior Flutter/FastAPI application remains intact on
+`experimental-optimization`, in tags, and throughout Git history. It is not
+duplicated in this branch or included in Rust releases.

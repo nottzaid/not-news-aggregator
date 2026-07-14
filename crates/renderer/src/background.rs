@@ -180,7 +180,8 @@ mod tests {
 
     #[test]
     fn background_stays_within_flutter_raster_budget() {
-        const FLUTTER_PNG: &[u8] = include_bytes!("../../../test/goldens/background-320x180.png");
+        const FLUTTER_PNG: &[u8] =
+            include_bytes!("../../../fixtures/reference-raster/background-320x180.png");
         let rust_png = render_background_png(320, 180).unwrap();
         let flutter = decode_png(FLUTTER_PNG, 320, 180);
         let rust = decode_png(&rust_png, 320, 180);

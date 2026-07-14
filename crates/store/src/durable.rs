@@ -1970,10 +1970,13 @@ mod tests {
     #[test]
     #[ignore = "copies the preserved project databases into temporary migration experiments"]
     fn preserved_databases_migrate_backup_move_and_undo_without_knowledge_drift() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for source in [
-            root.join("backend/data/backups/pre-detach-design-20260703.sqlite"),
-            root.join("backend/data/graph.sqlite"),
+            std::env::var_os("NOT_NEWS_LEGACY_PRE_DRAG_DB")
+                .map(PathBuf::from)
+                .expect("NOT_NEWS_LEGACY_PRE_DRAG_DB must name the preserved pre-drag database"),
+            std::env::var_os("NOT_NEWS_LEGACY_DRAG_DB")
+                .map(PathBuf::from)
+                .expect("NOT_NEWS_LEGACY_DRAG_DB must name the preserved drag-era database"),
         ] {
             let directory = TempDir::new().unwrap();
             let copy = directory.path().join("graph.sqlite");

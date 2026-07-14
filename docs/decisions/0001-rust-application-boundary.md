@@ -89,8 +89,9 @@ expanded product verification from Linux to Windows and Linux. The process,
 crate-direction, persistence, command, and external-capability decisions here
 remain accepted.
 
-- The Python backend and Flutter client remain runnable reference systems until
-  migration evidence permits their removal from the Rust branch.
+- The Python/Flutter implementation remains runnable from
+  `experimental-optimization`, tags, and earlier commits; immutable raster and
+  database specimens carry its compatibility evidence into the Rust branch.
 - SQLite compatibility becomes the first executable contract, not a late port.
 - Async jobs communicate with the UI through typed channels/deltas and never
   borrow UI state.

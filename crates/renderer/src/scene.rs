@@ -831,7 +831,7 @@ mod tests {
     #[test]
     fn reference_closed_graph_stays_within_flutter_raster_budget() {
         const FLUTTER_PNG: &[u8] =
-            include_bytes!("../../../test/goldens/closed-graph-1400x900.png");
+            include_bytes!("../../../fixtures/reference-raster/closed-graph-1400x900.png");
         let first_id = EventId("first".into());
         let second_id = EventId("second".into());
         let event = |id: EventId, title: &str, date: &str, color| ResearchEvent {
@@ -905,7 +905,8 @@ mod tests {
 
     #[test]
     fn scaled_closed_graph_stays_within_flutter_raster_budget() {
-        const FLUTTER_PNG: &[u8] = include_bytes!("../../../test/goldens/closed-graph-480x270.png");
+        const FLUTTER_PNG: &[u8] =
+            include_bytes!("../../../fixtures/reference-raster/closed-graph-480x270.png");
         let first_id = EventId("first".into());
         let second_id = EventId("second".into());
         let event = |id: EventId, title: &str, date: &str, color| ResearchEvent {
@@ -980,21 +981,22 @@ mod tests {
     #[test]
     fn expanded_artifact_graph_stays_within_flutter_raster_budget() {
         const FLUTTER_PNG: &[u8] =
-            include_bytes!("../../../test/goldens/artifact-graph-open-1400x900.png");
+            include_bytes!("../../../fixtures/reference-raster/artifact-graph-open-1400x900.png");
         assert_artifact_raster_budget(FLUTTER_PNG, 1.0, 0.08, 0.077);
     }
 
     #[test]
     fn half_expanded_artifact_graph_stays_within_flutter_raster_budget() {
         const FLUTTER_PNG: &[u8] =
-            include_bytes!("../../../test/goldens/artifact-graph-half-1400x900.png");
+            include_bytes!("../../../fixtures/reference-raster/artifact-graph-half-1400x900.png");
         assert_artifact_raster_budget(FLUTTER_PNG, 0.5, 0.075, 0.073);
     }
 
     #[test]
     fn expanded_neighbor_and_bridge_stay_within_flutter_raster_budget() {
-        const FLUTTER_PNG: &[u8] =
-            include_bytes!("../../../test/goldens/artifact-neighbor-open-1400x900.png");
+        const FLUTTER_PNG: &[u8] = include_bytes!(
+            "../../../fixtures/reference-raster/artifact-neighbor-open-1400x900.png"
+        );
         let active_id = EventId("artifact-oracle".into());
         let neighbor_id = EventId("displaced-neighbor".into());
         let active = artifact_event(active_id.clone());
@@ -1056,8 +1058,9 @@ mod tests {
 
     #[test]
     fn activation_midpoint_stays_within_flutter_temporal_raster_budget() {
-        const FLUTTER_PNG: &[u8] =
-            include_bytes!("../../../test/goldens/artifact-neighbor-midpoint-1400x900.png");
+        const FLUTTER_PNG: &[u8] = include_bytes!(
+            "../../../fixtures/reference-raster/artifact-neighbor-midpoint-1400x900.png"
+        );
         let active_id = EventId("artifact-oracle".into());
         let neighbor_id = EventId("displaced-neighbor".into());
         let active = artifact_event(active_id.clone());

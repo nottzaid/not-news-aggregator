@@ -413,12 +413,10 @@ mod tests {
     #[test]
     #[ignore = "requires the ignored local reference databases"]
     fn reads_both_preserved_reference_databases() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let backup = LegacyGraphReader::new(
-            root.join("backend/data/backups/pre-detach-design-20260703.sqlite"),
-        )
-        .load()
-        .unwrap();
+        let backup_path = std::env::var_os("NOT_NEWS_LEGACY_PRE_DRAG_DB")
+            .map(PathBuf::from)
+            .expect("NOT_NEWS_LEGACY_PRE_DRAG_DB must name the preserved pre-drag database");
+        let backup = LegacyGraphReader::new(backup_path).load().unwrap();
         assert_eq!(
             (
                 backup.events.len(),
@@ -430,9 +428,10 @@ mod tests {
         assert!(backup.placements.is_empty());
         assert_eq!(backup.revision, 0);
 
-        let live = LegacyGraphReader::new(root.join("backend/data/graph.sqlite"))
-            .load()
-            .unwrap();
+        let live_path = std::env::var_os("NOT_NEWS_LEGACY_DRAG_DB")
+            .map(PathBuf::from)
+            .expect("NOT_NEWS_LEGACY_DRAG_DB must name the preserved drag-era database");
+        let live = LegacyGraphReader::new(live_path).load().unwrap();
         assert_eq!(
             (live.events.len(), live.bridges.len(), live.aliases.len()),
             (71, 81, 9)

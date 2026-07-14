@@ -2,140 +2,32 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-mkdir -p .hermes
+command -v hermes >/dev/null 2>&1 || {
+  printf 'Hermes is not installed; saved-canvas operation does not require it.\n' >&2
+  exit 2
+}
 
-HERMES_ROOT="$PWD/.hermes"
-HERMES_PROFILE_NAME="ainews"
-HERMES_PROFILE_HOME="$HERMES_ROOT/profiles/$HERMES_PROFILE_NAME"
-HERMES_TEMPLATE_HOME="$PWD/hermes/$HERMES_PROFILE_NAME"
+profile=ainews
+root=$PWD/.hermes
+home=$root/profiles/$profile
+template=$PWD/hermes/$profile
+mkdir -p "$root"
 
-export HERMES_HOME="$HERMES_ROOT"
-
-if hermes profile list | grep -qE "(^|[[:space:]])${HERMES_PROFILE_NAME}([[:space:]]|$)"; then
-  echo "Hermes profile $HERMES_PROFILE_NAME already exists in $HERMES_ROOT"
-else
-  hermes profile create "$HERMES_PROFILE_NAME" --no-skills --no-alias --description "Specialized AI-news research agent for the Flutter Canvas app."
+export HERMES_HOME=$root
+if ! hermes profile list | grep -qE "(^|[[:space:]])${profile}([[:space:]]|$)"; then
+  hermes profile create "$profile" --no-skills --no-alias \
+    --description "Isolated research agent for the native Not News canvas."
 fi
 
-mkdir -p "$HERMES_PROFILE_HOME"
-touch "$HERMES_PROFILE_HOME/.no-bundled-skills"
-
-export HERMES_HOME="$HERMES_PROFILE_HOME"
-export HERMES_PROFILE="$HERMES_PROFILE_NAME"
+mkdir -p "$home/memories"
+touch "$home/.no-bundled-skills"
+export HERMES_HOME=$home
+unset HERMES_PROFILE
 hermes skills opt-out --remove --yes >/dev/null
 
-config_path="$HERMES_PROFILE_HOME/config.yaml"
-mkdir -p "$(dirname "$config_path")"
-touch "$config_path"
+install -m 600 "$template/config.yaml" "$home/config.yaml"
+install -m 600 "$template/SOUL.md" "$home/SOUL.md"
+install -m 600 "$template/memories/USER.md" "$home/memories/USER.md"
 
-if ! grep -qE '^voice:' "$config_path"; then
-  cat >> "$config_path" <<'YAML'
-
-voice:
-  auto_tts: true
-  beep_enabled: false
-YAML
-fi
-
-if ! grep -qE '^tts:' "$config_path"; then
-  cat >> "$config_path" <<'YAML'
-
-tts:
-  provider: kokoro
-  providers:
-    kokoro:
-      type: command
-      command: "scripts/kokoro-tts --input {input_path} --output {output_path} --voice {voice} --speed {speed}"
-      output_format: wav
-      voice: af_heart
-YAML
-fi
-
-if ! grep -qE '^web:' "$config_path"; then
-  cat >> "$config_path" <<'YAML'
-
-web:
-  search_backend: exa
-  extract_backend: exa
-YAML
-fi
-
-if ! grep -qE '^memory:' "$config_path"; then
-  cat >> "$config_path" <<'YAML'
-
-memory:
-  memory_enabled: true
-  user_profile_enabled: true
-YAML
-fi
-
-if ! grep -qE '^skills:' "$config_path"; then
-  cat >> "$config_path" <<'YAML'
-
-skills:
-  external_dirs: []
-YAML
-fi
-
-if ! grep -qE '^terminal:' "$config_path"; then
-  cat >> "$config_path" <<'YAML'
-
-terminal:
-  env_passthrough:
-    - AI_NEWS_SEARXNG_URL
-    - AI_NEWS_SEARXNG_SEARCH_URL
-    - BROWSE_CLI
-YAML
-fi
-
-python - "$config_path" <<'PY'
-from pathlib import Path
-import re
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-
-
-def replace_block(content: str, name: str, block: str) -> str:
-    pattern = re.compile(rf"^{name}:\n(?:^[ \t].*\n?)*", re.MULTILINE)
-    replacement = block.rstrip() + "\n"
-    if pattern.search(content):
-        return pattern.sub(replacement, content, count=1)
-    suffix = "" if content.endswith("\n") else "\n"
-    return content + suffix + "\n" + replacement
-
-
-text = replace_block(
-    text,
-    "web",
-    """
-web:
-  search_backend: exa
-  extract_backend: exa
-""",
-)
-text = replace_block(
-    text,
-    "terminal",
-    """
-terminal:
-  env_passthrough:
-    - AI_NEWS_SEARXNG_URL
-    - AI_NEWS_SEARXNG_SEARCH_URL
-    - BROWSE_CLI
-""",
-)
-path.write_text(text, encoding="utf-8")
-PY
-
-mkdir -p "$HERMES_PROFILE_HOME/memories"
-
-soul_path="$HERMES_PROFILE_HOME/SOUL.md"
-cp "$HERMES_TEMPLATE_HOME/SOUL.md" "$soul_path"
-
-user_path="$HERMES_PROFILE_HOME/memories/USER.md"
-cp "$HERMES_TEMPLATE_HOME/memories/USER.md" "$user_path"
-
-echo "Project Hermes root: $HERMES_ROOT"
-echo "Project Hermes profile home: $HERMES_PROFILE_HOME"
+printf 'Hermes profile home: %s\n' "$home"
+printf 'Credentials remain private; authenticate this exact HERMES_HOME if required.\n'

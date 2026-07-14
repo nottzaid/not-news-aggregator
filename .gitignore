@@ -1,54 +1,34 @@
-# Miscellaneous
-*.class
-*.log
-*.pyc
-*.swp
-.DS_Store
-.atom/
-.build/
-.buildlog/
-.history
-.svn/
-.swiftpm/
-migrate_working_dir/
-
-# IntelliJ related
-*.iml
-*.ipr
-*.iws
-.idea/
-
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
-
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
-.dart_tool/
-.flutter-plugins-dependencies
-.pub-cache/
-.pub/
-/build/
-/coverage/
+# Rust build and delivery output
 /target/
+/dist/
+*.AppImage
+*.AppImage.zsync
 
-# Local backend/Hermes secrets and project-owned agent state
+# Private configuration and application state
 .env
 .hermes/
-.venv/
-.uv-cache/
-backend/data/
-searxng/settings.yml
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+/research-scratch/
+/voice-scratch/
+/searxng/settings.yml
 
-# Symbolication related
-app.*.symbols
+# Local tool state
+.crush/
+.idea/
+.vscode/
+.DS_Store
+*.iml
+*.swp
+*.log
 
-# Obfuscation related
-app.*.map.json
-
-# Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
+# Historical tool output that may survive an in-place branch switch
+/.dart_tool/
+/.flutter-plugins-dependencies
+/.pytest_cache/
+/.uv-cache/
+/.venv/
+/build/
+/backend/data/
