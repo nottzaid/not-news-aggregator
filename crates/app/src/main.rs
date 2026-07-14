@@ -13,7 +13,9 @@ use not_news_agent::{
     AgentEvent, BridgeUpsert, ResearchHandle, ResearchLaunch, ResearchProcessEvent,
     ResearchTermination, build_research_prompt,
 };
-use not_news_audio::{Recorder, TranscriptionConfig, TranscriptionHandle};
+use not_news_audio::{
+    Recorder, SpeechEvent, SpeechSubmit, SpeechWorker, TranscriptionConfig, TranscriptionHandle,
+};
 use not_news_domain::{
     BridgeId, DetachRelationship, EventId, GraphSnapshot, Point, PromoteArtifact,
     PromotionRelation, Provenance, RelateEvents,
@@ -149,6 +151,7 @@ struct CanvasApplication {
     research_directory: PathBuf,
     voice_directory: PathBuf,
     voice: VoiceState,
+    speech: SpeechWorker,
     research_input: Option<String>,
     research_preedit: String,
     curation: Option<CurationFlow>,
@@ -236,6 +239,8 @@ impl CanvasApplication {
     ) -> Self {
         let interaction = CanvasInteraction::new(resolved_positions(&graph));
         let data_directory = data_directory.unwrap_or_else(|| Path::new("."));
+        let voice_directory = data_directory.join("voice-scratch");
+        let speech = SpeechWorker::from_environment(voice_directory.join("synthesis"));
         Self {
             store,
             graph,
@@ -253,8 +258,9 @@ impl CanvasApplication {
             scale_factor: 1.0,
             pointer_owner: PointerOwner::None,
             research_directory: data_directory.join("research-scratch"),
-            voice_directory: data_directory.join("voice-scratch"),
+            voice_directory,
             voice: VoiceState::Idle,
+            speech,
             research_input: None,
             research_preedit: String::new(),
             curation: None,
@@ -920,6 +926,7 @@ impl CanvasApplication {
             && !active.closed
         {
             active.handle.cancel();
+            self.speech.cancel_session();
             self.status = Some("Cancelling research…".into());
             return true;
         }
@@ -1074,6 +1081,7 @@ impl CanvasApplication {
                 self.curation = None;
                 self.curation_preedit.clear();
                 self.research_messages.clear();
+                self.speech.cancel_session();
                 self.generated_research_events.clear();
                 self.auto_follow_research = true;
                 self.activity_open = false;
@@ -1118,6 +1126,7 @@ impl CanvasApplication {
                 self.curation = None;
                 self.curation_preedit.clear();
                 self.research_messages.clear();
+                self.speech.cancel_session();
                 self.generated_research_events.clear();
                 self.auto_follow_research = true;
                 self.activity_open = false;
@@ -1273,6 +1282,7 @@ impl CanvasApplication {
         };
         match launch.spawn() {
             Ok(handle) => {
+                self.speech.reset_session();
                 self.research = Some(ActiveResearch {
                     session_id,
                     handle,
@@ -1318,6 +1328,22 @@ impl CanvasApplication {
         changed
     }
 
+    fn drain_speech(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(event) = self.speech.try_recv() {
+            match event {
+                SpeechEvent::Failed(message) => {
+                    self.status = Some(format!(
+                        "Voice playback unavailable: {message}. Research continues."
+                    ));
+                    changed = true;
+                }
+                SpeechEvent::Played | SpeechEvent::Cancelled | SpeechEvent::Stale => {}
+            }
+        }
+        changed
+    }
+
     fn handle_research_event(&mut self, event: ResearchProcessEvent) {
         if self.research.as_ref().is_some_and(|active| active.closed)
             && !matches!(event, ResearchProcessEvent::Finished(_))
@@ -1353,7 +1379,27 @@ impl CanvasApplication {
                 self.record_research_message(ResearchOutputKind::Message, &message);
             }
             AgentEvent::VoiceNote(message) => {
-                self.record_research_message(ResearchOutputKind::VoiceNote, &message);
+                if self.record_research_message(ResearchOutputKind::VoiceNote, &message) {
+                    match self.speech.submit_note(&message, Instant::now()) {
+                        SpeechSubmit::Unavailable(reason) => {
+                            self.status = Some(format!(
+                                "Voice note logged; playback unavailable: {reason}. Research continues."
+                            ));
+                        }
+                        SpeechSubmit::QueueFull => {
+                            self.status = Some(
+                                "Voice note logged; the bounded playback queue was full. Research continues."
+                                    .into(),
+                            );
+                        }
+                        SpeechSubmit::Queued
+                        | SpeechSubmit::Disabled
+                        | SpeechSubmit::Empty
+                        | SpeechSubmit::Duplicate
+                        | SpeechSubmit::Throttled
+                        | SpeechSubmit::SessionLimit => {}
+                    }
+                }
             }
             AgentEvent::EventUpsert(event) => {
                 let Some((session, sequence)) = self.research_cursor() else {
@@ -2058,6 +2104,7 @@ impl PlatformApplication for CanvasApplication {
     fn render(&mut self, canvas: &Canvas, frame: FrameInfo) -> FrameSchedule {
         self.resolve_record_hold(frame.now);
         self.drain_voice();
+        self.drain_speech();
         self.drain_research();
         let activity_progress = self.activity_progress(frame.now);
         self.interaction
@@ -2075,6 +2122,10 @@ impl PlatformApplication for CanvasApplication {
             .as_ref()
             .map(|_| frame.now + Duration::from_millis(33));
         let voice_deadline = (!self.voice.is_idle()).then(|| frame.now + Duration::from_millis(33));
+        let speech_deadline = self
+            .speech
+            .is_busy()
+            .then(|| frame.now + Duration::from_millis(50));
         let activity_deadline = self
             .activity_motion
             .map(|_| frame.now + Duration::from_millis(16));
@@ -2082,6 +2133,7 @@ impl PlatformApplication for CanvasApplication {
             .into_iter()
             .chain(research_deadline)
             .chain(voice_deadline)
+            .chain(speech_deadline)
             .chain(self.record_hold_deadline)
             .chain(activity_deadline)
             .min()
@@ -2678,6 +2730,7 @@ mod app_tests {
     fn process_parser_store_and_canvas_accept_an_early_bridge_without_polling_snapshots() {
         let directory = TempDir::new().unwrap();
         let mut application = CanvasApplication::load(&directory.path().join("graph.sqlite"));
+        application.speech = SpeechWorker::disabled();
         let session_id = "integration-session".to_owned();
         application
             .store
@@ -2688,6 +2741,7 @@ mod app_tests {
         let script = r#"
 printf '%s\n' 'AI_NEWS_EVENT: {"type":"event.upsert","data":{"id":"a","title":"A","date":"Jul 14, 2026","color":4283218390,"summary":"A finding.","sourceLabel":"Primary","artifacts":[],"url":"https://example.test/a"}}'
 printf '%s\n' 'AI_NEWS_EVENT: {"type":"bridge.upsert","data":{"from":"a","to":"b","label":"Supports"}}'
+printf '%s\n' 'AI_NEWS_EVENT: {"type":"voice.note","data":{"message":"The relationship is now supported by two exact findings."}}'
 printf '%s\n' 'AI_NEWS_EVENT: {"type":"event.upsert","data":{"id":"b","title":"B","date":"Jul 14, 2026","color":4283218390,"summary":"Another finding.","sourceLabel":"Primary","artifacts":[],"url":"https://example.test/b"}}'
 printf '%s\n' 'AI_NEWS_EVENT: {"type":"session.done","data":{"message":"Complete."}}'
 "#;
@@ -2744,6 +2798,7 @@ printf '%s\n' 'AI_NEWS_EVENT: {"type":"session.done","data":{"message":"Complete
                 "message",
                 "event",
                 "protocol_error",
+                "voice_note",
                 "event",
                 "bridge",
                 "done"

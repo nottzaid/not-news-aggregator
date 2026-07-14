@@ -1,4 +1,8 @@
-//! Bounded Windows/Linux microphone capture and disposable speech transcription.
+//! Bounded Windows/Linux speech input, transcription, synthesis, and playback.
+
+mod speech;
+
+pub use speech::{SpeechEvent, SpeechSubmit, SpeechWorker};
 
 use std::{
     env, fs,

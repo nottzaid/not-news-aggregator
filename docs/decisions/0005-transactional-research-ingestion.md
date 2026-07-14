@@ -32,6 +32,16 @@ normalization. Bridge endpoints resolve through aliases, must already exist and
 remain distinct, and produce a deterministic key from ordered endpoints plus a
 dash/whitespace-normalized, case-folded label. Rejection consumes no sequence.
 
+Standalone OpenCode is preferred when present. Explicit Hermes execution binds
+the child to `AI_NEWS_HERMES_HOME`, an inherited `HERMES_HOME`, or the
+development checkout's private `ainews` home; the graph and package never copy
+that profile or its credentials. Hermes 0.18.2 `chat --query` renders terminal
+panels that echo prompts and wrap one-line JSON, so the process boundary uses
+its documented `--oneshot` scripting surface and maps the configured turn limit
+to `HERMES_MAX_ITERATIONS`. Only raw final text reaches the line parser; process
+groups, output ceilings, idle/total deadlines, and cancellation remain owned by
+Rust.
+
 Messages, protocol errors, voice notes, completion, and failure occupy the same
 ordered log even when they do not mutate the graph. A clean completion or error
 closes the session. On application startup, any still-running session becomes

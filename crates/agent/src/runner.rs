@@ -168,30 +168,31 @@ impl ResearchLaunch {
     }
 
     fn hermes(program: PathBuf, prompt: &str, scratch_directory: PathBuf) -> Self {
-        let profile = env::var_os("HERMES_PROFILE").unwrap_or_else(|| "ainews".into());
         let provider = env::var_os("HERMES_PROVIDER").unwrap_or_else(|| "opencode-go".into());
         let model = env::var_os("HERMES_MODEL").unwrap_or_else(|| "mimo-v2.5-pro".into());
         let max_turns = env::var_os("HERMES_MAX_TURNS").unwrap_or_else(|| "12".into());
+        let mut arguments = Vec::new();
+        let mut environment = Vec::new();
+        if let Some(home) = hermes_profile_home() {
+            environment.push((OsString::from("HERMES_HOME"), home));
+        } else if let Some(profile) = env::var_os("HERMES_PROFILE") {
+            arguments.extend([OsString::from("--profile"), profile]);
+        }
+        environment.push((OsString::from("HERMES_MAX_ITERATIONS"), max_turns));
+        arguments.extend([
+            "--oneshot".into(),
+            prompt.into(),
+            "--provider".into(),
+            provider,
+            "--model".into(),
+            model,
+        ]);
         Self {
             backend: ResearchBackend::Hermes,
             program,
-            arguments: vec![
-                "--profile".into(),
-                profile,
-                "chat".into(),
-                "--query".into(),
-                prompt.into(),
-                "--provider".into(),
-                provider,
-                "--model".into(),
-                model,
-                "--source".into(),
-                "ai-news-canvas".into(),
-                "--max-turns".into(),
-                max_turns,
-            ],
+            arguments,
             current_directory: scratch_directory,
-            environment: Vec::new(),
+            environment,
             protocol: OutputProtocol::HermesLines,
             limits: ProcessLimits::default(),
         }
@@ -216,6 +217,23 @@ impl ResearchLaunch {
             cancelled,
         })
     }
+}
+
+fn hermes_profile_home() -> Option<OsString> {
+    if let Some(home) = env::var_os("AI_NEWS_HERMES_HOME").filter(|home| !home.is_empty()) {
+        return Some(home);
+    }
+    if let Some(home) = env::var_os("HERMES_HOME").filter(|home| !home.is_empty()) {
+        return Some(home);
+    }
+    let project_profile = env::current_dir()
+        .ok()?
+        .join(".hermes")
+        .join("profiles")
+        .join("ainews");
+    project_profile
+        .is_dir()
+        .then(|| project_profile.into_os_string())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -737,6 +755,34 @@ mod tests {
             receiver.try_recv().unwrap(),
             ResearchProcessEvent::Output(AgentEvent::SessionDone(message)) if message == "Complete"
         ));
+    }
+
+    #[test]
+    fn hermes_uses_the_raw_scripting_surface_and_bounds_turns_in_child_environment() {
+        let directory = TempDir::new().unwrap();
+        let launch = ResearchLaunch::hermes(
+            PathBuf::from("hermes"),
+            "AI_NEWS_EVENT: typed output only",
+            directory.path().to_path_buf(),
+        );
+        assert!(
+            launch
+                .arguments
+                .iter()
+                .any(|argument| argument == "--oneshot")
+        );
+        assert!(
+            !launch
+                .arguments
+                .iter()
+                .any(|argument| argument == "chat" || argument == "--query")
+        );
+        assert!(
+            launch
+                .environment
+                .iter()
+                .any(|(name, value)| { name == "HERMES_MAX_ITERATIONS" && !value.is_empty() })
+        );
     }
 
     #[cfg(unix)]

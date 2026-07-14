@@ -33,6 +33,7 @@ skia-safe = { version = "0.99.0", features = ["gl", "textlayout"] }
 softbuffer = "0.4.8"
 thiserror = "2.0.18"
 tempfile = "3.24.0"
+tokio = { version = "1.49.0", features = ["macros", "rt", "time"] }
 unicode-segmentation = "1.13.3"
 winit = "0.30.13"
 

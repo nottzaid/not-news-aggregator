@@ -94,5 +94,8 @@ jobs:
       - name: Compile every Windows target without running it
         run: cargo +1.95.0 check --workspace --all-targets
 
+      - name: Exercise Windows research and bounded audio processes
+        run: cargo +1.95.0 test -p not-news-agent -p not-news-audio --lib
+
       - name: Create and present a real hidden Windows window
         run: cargo +1.95.0 run -p not-news-platform --example hidden_smoke
