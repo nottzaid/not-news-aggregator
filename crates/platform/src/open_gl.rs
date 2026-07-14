@@ -1,4 +1,4 @@
-use std::{ffi::CString, num::NonZeroU32, time::Instant};
+use std::{ffi::CString, num::NonZeroU32, sync::Arc, time::Instant};
 
 use gl::types::GLint;
 use glutin::{
@@ -12,7 +12,7 @@ use glutin::{
 use glutin_winit::DisplayBuilder;
 use raw_window_handle::HasWindowHandle;
 use skia_safe::{
-    ColorType, Surface,
+    AlphaType, ColorType, ImageInfo, Surface,
     gpu::{self, SurfaceOrigin, backend_render_targets, gl::FramebufferInfo},
 };
 use thiserror::Error;
@@ -32,6 +32,8 @@ pub struct WindowOptions {
     pub logical_width: f64,
     pub logical_height: f64,
     pub visible: bool,
+    /// Forces Skia's CPU raster backend; used by compatibility diagnostics.
+    pub force_software: bool,
 }
 
 impl Default for WindowOptions {
@@ -41,6 +43,7 @@ impl Default for WindowOptions {
             logical_width: 1_280.0,
             logical_height: 800.0,
             visible: true,
+            force_software: false,
         }
     }
 }
@@ -69,6 +72,10 @@ pub enum PlatformError {
     SkiaSurface,
     #[error("could not present the native framebuffer: {0}")]
     Present(String),
+    #[error(
+        "neither native OpenGL nor software presentation could start; OpenGL: {gpu}; software: {software}"
+    )]
+    RendererUnavailable { gpu: String, software: String },
     #[error("the native event loop failed: {0}")]
     Run(String),
 }
@@ -104,7 +111,7 @@ pub fn run<A: PlatformApplication>(
         .build(&event_loop, template, choose_config)
         .map_err(|error| PlatformError::Display(error.to_string()))?;
     let window = window.ok_or(PlatformError::MissingWindow)?;
-    let native = NativeSurface::new(window, config)?;
+    let native = NativeSurface::new(window, config, options.force_software)?;
     native.window.request_redraw();
 
     let mut runner = Runner {
@@ -113,6 +120,7 @@ pub fn run<A: PlatformApplication>(
         deferred_error: None,
         render_on_resume,
         recovery: RecoveryBudget::default(),
+        ime_allowed: false,
     };
     event_loop
         .run_app(&mut runner)
@@ -138,9 +146,14 @@ fn choose_config(configs: Box<dyn Iterator<Item = Config> + '_>) -> Config {
 }
 
 struct NativeSurface {
-    gpu: Option<GpuSurface>,
+    backend: Option<NativeBackend>,
     config: Config,
-    window: Window,
+    window: Arc<Window>,
+}
+
+enum NativeBackend {
+    Gpu(GpuSurface),
+    Software(SoftwareSurface),
 }
 
 struct GpuSurface {
@@ -153,38 +166,161 @@ struct GpuSurface {
     stencil_bits: usize,
 }
 
+struct SoftwareSurface {
+    skia_surface: Surface,
+    presentation: softbuffer::Surface<Arc<Window>, Arc<Window>>,
+}
+
+enum PresentFailure {
+    Gpu(glutin::error::Error),
+    Software(String),
+}
+
 impl NativeSurface {
-    fn new(window: Window, config: Config) -> Result<Self, PlatformError> {
-        let gpu = GpuSurface::new(&window, &config)?;
+    fn new(window: Window, config: Config, force_software: bool) -> Result<Self, PlatformError> {
+        let window = Arc::new(window);
+        let gpu = if force_software {
+            Err(PlatformError::SkiaInterface)
+        } else {
+            GpuSurface::new(&window, &config)
+        };
+        let backend = match gpu {
+            Ok(gpu) => NativeBackend::Gpu(gpu),
+            Err(gpu) => {
+                NativeBackend::Software(SoftwareSurface::new(&window).map_err(|software| {
+                    PlatformError::RendererUnavailable {
+                        gpu: gpu.to_string(),
+                        software,
+                    }
+                })?)
+            }
+        };
         Ok(Self {
-            gpu: Some(gpu),
+            backend: Some(backend),
             config,
             window,
         })
     }
 
-    fn gpu(&mut self) -> &mut GpuSurface {
-        self.gpu
+    fn backend(&mut self) -> &mut NativeBackend {
+        self.backend
             .as_mut()
             .expect("a native surface is never used between teardown and replacement")
     }
 
-    fn resize(&mut self, width: u32, height: u32) -> Result<(), PlatformError> {
-        let Self { gpu, window, .. } = self;
-        gpu.as_mut()
-            .expect("a native surface is never used between teardown and replacement")
-            .resize(window, width, height)
+    fn canvas(&mut self) -> &skia_safe::Canvas {
+        match self.backend() {
+            NativeBackend::Gpu(gpu) => gpu.skia_surface.canvas(),
+            NativeBackend::Software(software) => software.skia_surface.canvas(),
+        }
     }
 
-    fn present(&mut self) -> Result<(), glutin::error::Error> {
-        self.gpu().present()
+    fn resize(&mut self, width: u32, height: u32) -> Result<(), PlatformError> {
+        let Self {
+            backend, window, ..
+        } = self;
+        match backend
+            .as_mut()
+            .expect("a native surface is never used between teardown and replacement")
+        {
+            NativeBackend::Gpu(gpu) => gpu.resize(window, width, height),
+            NativeBackend::Software(software) => software.resize(width, height),
+        }
+    }
+
+    fn present(&mut self) -> Result<(), PresentFailure> {
+        match self.backend() {
+            NativeBackend::Gpu(gpu) => gpu.present().map_err(PresentFailure::Gpu),
+            NativeBackend::Software(software) => {
+                software.present().map_err(PresentFailure::Software)
+            }
+        }
     }
 
     fn rebuild(&mut self) -> Result<(), PlatformError> {
-        drop(self.gpu.take());
-        self.gpu = Some(GpuSurface::new(&self.window, &self.config)?);
+        drop(self.backend.take());
+        self.backend =
+            Some(match GpuSurface::new(&self.window, &self.config) {
+                Ok(gpu) => NativeBackend::Gpu(gpu),
+                Err(gpu) => NativeBackend::Software(SoftwareSurface::new(&self.window).map_err(
+                    |software| PlatformError::RendererUnavailable {
+                        gpu: gpu.to_string(),
+                        software,
+                    },
+                )?),
+            });
         Ok(())
     }
+}
+
+impl SoftwareSurface {
+    fn new(window: &Arc<Window>) -> Result<Self, String> {
+        let context =
+            softbuffer::Context::new(window.clone()).map_err(|error| error.to_string())?;
+        let mut presentation = softbuffer::Surface::new(&context, window.clone())
+            .map_err(|error| error.to_string())?;
+        let size = window.inner_size();
+        let width = i32::try_from(size.width)
+            .map_err(|_| "software surface width exceeds Skia limits".to_owned())?;
+        let height = i32::try_from(size.height)
+            .map_err(|_| "software surface height exceeds Skia limits".to_owned())?;
+        presentation
+            .resize(nonzero_extent(size.width), nonzero_extent(size.height))
+            .map_err(|error| error.to_string())?;
+        let skia_surface = skia_safe::surfaces::raster_n32_premul((width, height))
+            .ok_or_else(|| "Skia could not create a raster fallback surface".to_owned())?;
+        Ok(Self {
+            skia_surface,
+            presentation,
+        })
+    }
+
+    fn resize(&mut self, width: u32, height: u32) -> Result<(), PlatformError> {
+        self.presentation
+            .resize(nonzero_extent(width), nonzero_extent(height))
+            .map_err(|error| PlatformError::WindowSurface(error.to_string()))?;
+        if width > 0 && height > 0 {
+            let skia_width = i32::try_from(width).map_err(|_| PlatformError::SkiaSurface)?;
+            let skia_height = i32::try_from(height).map_err(|_| PlatformError::SkiaSurface)?;
+            self.skia_surface = skia_safe::surfaces::raster_n32_premul((skia_width, skia_height))
+                .ok_or(PlatformError::SkiaSurface)?;
+        }
+        Ok(())
+    }
+
+    fn present(&mut self) -> Result<(), String> {
+        let width = self.skia_surface.width();
+        let height = self.skia_surface.height();
+        let info = ImageInfo::new(
+            (width, height),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            None,
+        );
+        let row_bytes = info.min_row_bytes();
+        let mut pixels = vec![0_u8; info.compute_byte_size(row_bytes)];
+        if !self.skia_surface.image_snapshot().read_pixels(
+            &info,
+            &mut pixels,
+            row_bytes,
+            (0, 0),
+            skia_safe::image::CachingHint::Disallow,
+        ) {
+            return Err("Skia could not read its raster fallback frame".into());
+        }
+        let mut buffer = self
+            .presentation
+            .buffer_mut()
+            .map_err(|error| error.to_string())?;
+        for (destination, rgba) in buffer.iter_mut().zip(pixels.chunks_exact(4)) {
+            *destination = rgba_to_xrgb(rgba);
+        }
+        buffer.present().map_err(|error| error.to_string())
+    }
+}
+
+fn rgba_to_xrgb(rgba: &[u8]) -> u32 {
+    u32::from(rgba[0]) << 16 | u32::from(rgba[1]) << 8 | u32::from(rgba[2])
 }
 
 impl GpuSurface {
@@ -311,6 +447,7 @@ struct Runner<A> {
     deferred_error: Option<PlatformError>,
     render_on_resume: bool,
     recovery: RecoveryBudget,
+    ime_allowed: bool,
 }
 
 impl<A: PlatformApplication> ApplicationHandler for Runner<A> {
@@ -361,6 +498,7 @@ impl<A: PlatformApplication> ApplicationHandler for Runner<A> {
                 Ok(())
             }
         };
+        self.sync_text_input();
         if let Err(error) = result {
             self.deferred_error = Some(error);
             event_loop.exit();
@@ -369,6 +507,22 @@ impl<A: PlatformApplication> ApplicationHandler for Runner<A> {
 }
 
 impl<A: PlatformApplication> Runner<A> {
+    fn sync_text_input(&mut self) {
+        let allowed = self.application.text_input_active();
+        if allowed == self.ime_allowed {
+            return;
+        }
+        self.ime_allowed = allowed;
+        self.native.window.set_ime_allowed(allowed);
+        if allowed {
+            let size = self.native.window.inner_size();
+            self.native.window.set_ime_cursor_area(
+                winit::dpi::PhysicalPosition::new(size.width / 2, 112),
+                winit::dpi::PhysicalSize::new(1, 24),
+            );
+        }
+    }
+
     fn redraw(&mut self, event_loop: &ActiveEventLoop) -> Result<(), PlatformError> {
         let size = self.native.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -381,18 +535,19 @@ impl<A: PlatformApplication> Runner<A> {
             scale_factor: self.native.window.scale_factor(),
             now: Instant::now(),
         };
-        let schedule = self
-            .application
-            .render(self.native.gpu().skia_surface.canvas(), frame);
+        let schedule = self.application.render(self.native.canvas(), frame);
         match self.native.present() {
             Ok(()) => self.recovery.presented(),
-            Err(error) if self.recovery.permits(error.error_kind()) => {
+            Err(PresentFailure::Gpu(error)) if self.recovery.permits(error.error_kind()) => {
                 self.native.rebuild()?;
                 self.native.window.request_redraw();
                 event_loop.set_control_flow(ControlFlow::Wait);
                 return Ok(());
             }
-            Err(error) => return Err(PlatformError::Present(error.to_string())),
+            Err(PresentFailure::Gpu(error)) => {
+                return Err(PlatformError::Present(error.to_string()));
+            }
+            Err(PresentFailure::Software(error)) => return Err(PlatformError::Present(error)),
         }
         match schedule {
             FrameSchedule::Wait => event_loop.set_control_flow(ControlFlow::Wait),
@@ -493,5 +648,11 @@ mod tests {
         assert!(budget.permits(ErrorKind::BadContextState));
         assert!(!budget.permits(ErrorKind::OutOfMemory));
         assert!(!budget.permits(ErrorKind::BadDisplay));
+    }
+
+    #[test]
+    fn software_presenter_converts_skia_rgba_to_softbuffer_xrgb() {
+        assert_eq!(rgba_to_xrgb(&[0x12, 0x34, 0x56, 0xff]), 0x0012_3456);
+        assert_eq!(rgba_to_xrgb(&[0xff, 0x00, 0x00, 0x40]), 0x00ff_0000);
     }
 }

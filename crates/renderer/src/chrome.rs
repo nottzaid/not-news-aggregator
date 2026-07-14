@@ -670,14 +670,15 @@ pub fn paint_research_prompt(
     physical_height: f32,
     scale_factor: f32,
     prompt: &str,
+    preedit: &str,
 ) {
     let width = physical_width / scale_factor;
     let height = physical_height / scale_factor;
     let panel_width = 680.0_f32.min(width - 44.0);
-    if panel_width <= 160.0 || height < 160.0 {
+    if panel_width <= 160.0 || height < 180.0 {
         return;
     }
-    let bounds = Rect::from_xywh((width - panel_width) / 2.0, 28.0, panel_width, 92.0);
+    let bounds = Rect::from_xywh((width - panel_width) / 2.0, 28.0, panel_width, 118.0);
     canvas.save();
     canvas.scale((scale_factor, scale_factor));
     paint_metadata_shadow(canvas, bounds, INK_0, 0.55, 24.0, 10.0);
@@ -699,24 +700,61 @@ pub fn paint_research_prompt(
         resources
             .label("RESEARCH", true)
             .paint(canvas, (bounds.left + 16.0, bounds.top + 12.0));
-        let content = if prompt.is_empty() {
-            "Ask a research question…"
-        } else {
-            prompt
-        };
         resources
-            .paragraph(content, panel_width - 32.0)
+            .activity_state("ENTER SEND  ·  ESC CLOSE  ·  CTRL+V PASTE")
+            .paint(canvas, (bounds.left + 108.0, bounds.top + 12.0));
+        let content = research_prompt_tail(prompt, preedit);
+        canvas.save();
+        canvas.clip_rect(
+            Rect::from_xywh(
+                bounds.left + 16.0,
+                bounds.top + 36.0,
+                panel_width - 32.0,
+                57.0,
+            ),
+            skia_safe::ClipOp::Intersect,
+            true,
+        );
+        resources
+            .paragraph(&content, panel_width - 32.0)
             .paint(canvas, (bounds.left + 16.0, bounds.top + 37.0));
+        canvas.restore();
+        resources
+            .activity_state(&format!("{} / 4096", prompt.chars().count()))
+            .paint(canvas, (bounds.left + 16.0, bounds.bottom - 17.0));
     });
     let mut cursor = Paint::default();
     cursor.set_color(color(crate::palette::SIGNAL_HOT));
     cursor.set_stroke_width(1.5);
     canvas.draw_line(
-        (bounds.left + 16.0, bounds.bottom - 14.0),
-        (bounds.right - 16.0, bounds.bottom - 14.0),
+        (bounds.left + 104.0, bounds.bottom - 13.0),
+        (bounds.right - 16.0, bounds.bottom - 13.0),
         &cursor,
     );
     canvas.restore();
+}
+
+fn research_prompt_tail(prompt: &str, preedit: &str) -> String {
+    const VISIBLE_CHARACTERS: usize = 480;
+    let mut content = if prompt.is_empty() && preedit.is_empty() {
+        return "Ask a research question…".into();
+    } else {
+        prompt.to_owned()
+    };
+    if !preedit.is_empty() {
+        content.push_str(" 〈");
+        content.push_str(preedit);
+        content.push('〉');
+    }
+    let characters = content.chars().count();
+    if characters <= VISIBLE_CHARACTERS {
+        return content;
+    }
+    let start = content
+        .char_indices()
+        .nth(characters - VISIBLE_CHARACTERS)
+        .map_or(0, |(index, _)| index);
+    format!("…{}", &content[start..])
 }
 
 fn desktop_metadata_width(summary: &str) -> f32 {
@@ -1787,6 +1825,38 @@ mod tests {
                 .chunks_exact(4)
                 .all(|pixel| pixel == background)
         );
+    }
+
+    #[test]
+    fn rewrite_only_research_composer_is_bounded_and_exposes_preedit() {
+        let mut surface = surfaces::raster_n32_premul((1_280, 800)).unwrap();
+        surface.canvas().clear(color(INK_0));
+        paint_research_prompt(
+            surface.canvas(),
+            1_280.0,
+            800.0,
+            1.0,
+            "Compare primary-source claims",
+            "研究",
+        );
+        let pixels = read_image(&surface.image_snapshot());
+        let background = &pixels[0..4];
+        assert!(
+            pixels[1_280 * 210 * 4..]
+                .chunks_exact(4)
+                .all(|pixel| pixel == background)
+        );
+        assert!(
+            pixels[1_280 * 28 * 4..1_280 * 146 * 4]
+                .chunks_exact(4)
+                .any(|pixel| pixel != background)
+        );
+
+        let long = "evidence ".repeat(100);
+        let tail = research_prompt_tail(&long, "候補");
+        assert!(tail.starts_with('…'));
+        assert!(tail.ends_with("〈候補〉"));
+        assert!(tail.chars().count() <= 481);
     }
 
     #[test]

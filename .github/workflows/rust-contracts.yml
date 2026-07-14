@@ -56,7 +56,7 @@ jobs:
         run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt --no-self-update
 
       - name: Install declared native link dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libasound2-dev libfontconfig1-dev libfreetype-dev libgl1-mesa-dri xvfb
+        run: sudo apt-get update && sudo apt-get install --yes libasound2-dev libfontconfig1-dev libfreetype-dev libgl1-mesa-dri libxkbcommon-x11-0 xvfb
 
       - name: Reject formatting drift
         run: cargo +1.95.0 fmt --all -- --check
@@ -68,7 +68,9 @@ jobs:
         run: cargo +1.95.0 test --workspace --all-targets
 
       - name: Create and present a real hidden Linux window
-        run: xvfb-run --auto-servernum cargo +1.95.0 run -p not-news-platform --example hidden_smoke
+        run: |
+          xvfb-run --auto-servernum cargo +1.95.0 run -p not-news-platform --example hidden_smoke
+          NOT_NEWS_FORCE_SOFTWARE=1 xvfb-run --auto-servernum cargo +1.95.0 run -p not-news-platform --example hidden_smoke
 
   windows-compile:
     name: Windows surface and application compile

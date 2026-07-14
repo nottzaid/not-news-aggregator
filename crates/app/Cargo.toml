@@ -5,12 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+arboard.workspace = true
 not-news-agent = { path = "../agent" }
 not-news-audio = { path = "../audio" }
 not-news-domain = { path = "../domain" }
 not-news-platform = { path = "../platform" }
 not-news-renderer = { path = "../renderer" }
 not-news-store = { path = "../store" }
+unicode-segmentation.workspace = true
 
 [dev-dependencies]
 indexmap.workspace = true

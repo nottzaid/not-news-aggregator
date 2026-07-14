@@ -10,6 +10,7 @@ glutin.workspace = true
 glutin-winit.workspace = true
 raw-window-handle = "0.6.2"
 skia-safe.workspace = true
+softbuffer.workspace = true
 thiserror.workspace = true
 winit.workspace = true
 

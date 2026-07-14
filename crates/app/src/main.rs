@@ -21,10 +21,14 @@ use not_news_platform::{
     skia_safe::Canvas,
     winit::{
         dpi::PhysicalPosition,
-        event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+        event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
         keyboard::{Key, ModifiersState, NamedKey},
     },
 };
+use unicode_segmentation::UnicodeSegmentation;
+
+const MAX_RESEARCH_CHARS: usize = 4_096;
+const MAX_RESEARCH_BYTES: usize = 16_384;
 use not_news_renderer::{
     ChromeControl, Motion, RecordOrbState, SceneAnimation, SceneState, active_metadata_scroll_max,
     hit_active_metadata, hit_activity_surface, hit_activity_toggle, hit_fixed_chrome,
@@ -96,6 +100,7 @@ struct CanvasApplication {
     voice_directory: PathBuf,
     voice: VoiceState,
     research_input: Option<String>,
+    research_preedit: String,
     research: Option<ActiveResearch>,
     research_messages: Vec<String>,
     generated_research_events: HashSet<not_news_domain::EventId>,
@@ -199,6 +204,7 @@ impl CanvasApplication {
             voice_directory: data_directory.join("voice-scratch"),
             voice: VoiceState::Idle,
             research_input: None,
+            research_preedit: String::new(),
             research: None,
             research_messages: Vec::new(),
             generated_research_events: HashSet::new(),
@@ -305,41 +311,52 @@ impl CanvasApplication {
     }
 
     fn keyboard_input(&mut self, event: &not_news_platform::winit::event::KeyEvent) -> bool {
-        if event.state != ElementState::Pressed || event.repeat {
+        if event.state != ElementState::Pressed {
             return false;
         }
         if self.research_input.is_some() {
             match &event.logical_key {
                 Key::Named(NamedKey::Enter) => {
+                    self.research_preedit.clear();
                     let question = self.research_input.take().unwrap_or_default();
                     return self.start_research(&question);
                 }
                 Key::Named(NamedKey::Escape) => {
                     self.research_input = None;
+                    self.research_preedit.clear();
                     return true;
                 }
                 Key::Named(NamedKey::Backspace) => {
                     if let Some(input) = self.research_input.as_mut() {
-                        input.pop();
+                        remove_last_grapheme(input);
                     }
                     return true;
                 }
                 _ => {}
             }
-            if !self.modifiers.control_key()
-                && !self.modifiers.super_key()
-                && !self.modifiers.alt_key()
-                && let Some(text) = event.text.as_deref()
-                && let Some(input) = self.research_input.as_mut()
+            let command = self.modifiers.control_key() || self.modifiers.super_key();
+            if command
+                && matches!(&event.logical_key, Key::Character(key) if key.eq_ignore_ascii_case("v"))
             {
-                let remaining = 4_096_usize.saturating_sub(input.chars().count());
-                input.extend(
-                    text.chars()
-                        .filter(|character| !character.is_control())
-                        .take(remaining),
-                );
+                return self.paste_research_input();
+            }
+            if command
+                && matches!(&event.logical_key, Key::Character(key) if key.eq_ignore_ascii_case("u"))
+            {
+                self.research_input.as_mut().unwrap().clear();
+                self.research_preedit.clear();
                 return true;
             }
+            if !command
+                && !self.modifiers.alt_key()
+                && let Some(text) = event.text.as_deref()
+            {
+                self.append_research_text(text);
+                return true;
+            }
+            return false;
+        }
+        if event.repeat {
             return false;
         }
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) && self.cancel_voice() {
@@ -359,6 +376,7 @@ impl CanvasApplication {
         let command = self.modifiers.control_key() || self.modifiers.super_key();
         if (command && character.eq_ignore_ascii_case("k")) || (!command && character == "/") {
             self.research_input = Some(String::new());
+            self.research_preedit.clear();
             return true;
         }
         if !command {
@@ -374,6 +392,50 @@ impl CanvasApplication {
             self.redo()
         } else {
             false
+        }
+    }
+
+    fn append_research_text(&mut self, text: &str) {
+        let Some(input) = self.research_input.as_mut() else {
+            return;
+        };
+        append_bounded_text(input, text);
+    }
+
+    fn paste_research_input(&mut self) -> bool {
+        let result = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text());
+        match result {
+            Ok(text) => {
+                self.append_research_text(&text);
+                true
+            }
+            Err(error) => {
+                self.status = Some(format!("Clipboard text is unavailable: {error}"));
+                true
+            }
+        }
+    }
+
+    fn ime_input(&mut self, ime: &Ime) -> bool {
+        if self.research_input.is_none() {
+            return false;
+        }
+        match ime {
+            Ime::Preedit(text, _) => {
+                self.research_preedit = text.chars().take(256).collect();
+                true
+            }
+            Ime::Commit(text) => {
+                self.research_preedit.clear();
+                self.append_research_text(text);
+                true
+            }
+            Ime::Disabled => {
+                let changed = !self.research_preedit.is_empty();
+                self.research_preedit.clear();
+                changed
+            }
+            Ime::Enabled => false,
         }
     }
 
@@ -426,6 +488,7 @@ impl CanvasApplication {
                     physical_dimension(self.physical_height),
                 );
                 self.research_input = None;
+                self.research_preedit.clear();
                 self.research_messages.clear();
                 self.generated_research_events.clear();
                 self.auto_follow_research = true;
@@ -1160,6 +1223,19 @@ impl CanvasApplication {
             RecordOrbState::Idle
         }
     }
+
+    fn paint_composer(&self, canvas: &Canvas, width: f32, height: f32, scale_factor: f32) {
+        if let Some(prompt) = self.research_input.as_deref() {
+            paint_research_prompt(
+                canvas,
+                width,
+                height,
+                scale_factor,
+                prompt,
+                &self.research_preedit,
+            );
+        }
+    }
 }
 
 impl PlatformApplication for CanvasApplication {
@@ -1207,11 +1283,14 @@ impl PlatformApplication for CanvasApplication {
                 false
             }
             WindowEvent::KeyboardInput { event, .. } => self.keyboard_input(event),
+            WindowEvent::Ime(ime) => self.ime_input(ime),
             WindowEvent::DroppedFile(path) => self.import_legacy(path),
             WindowEvent::Focused(false) => {
                 self.pointer_owner = PointerOwner::None;
                 self.record_hold_deadline = None;
-                self.interaction.cancel_pointer()
+                let changed = !self.research_preedit.is_empty();
+                self.research_preedit.clear();
+                self.interaction.cancel_pointer() || changed
             }
             _ => false,
         }
@@ -1284,15 +1363,7 @@ impl PlatformApplication for CanvasApplication {
                 scale_scalar(activity_progress),
             );
         }
-        if let Some(prompt) = self.research_input.as_deref() {
-            paint_research_prompt(
-                canvas,
-                width,
-                height,
-                scale_scalar(frame.scale_factor),
-                prompt,
-            );
-        }
+        self.paint_composer(canvas, width, height, scale_scalar(frame.scale_factor));
         paint_fixed_chrome(
             canvas,
             width,
@@ -1318,6 +1389,10 @@ impl PlatformApplication for CanvasApplication {
             .chain(activity_deadline)
             .min()
             .map_or(FrameSchedule::Wait, FrameSchedule::RedrawAt)
+    }
+
+    fn text_input_active(&self) -> bool {
+        self.research_input.is_some()
     }
 }
 
@@ -1403,6 +1478,30 @@ fn scroll_pixels(delta: MouseScrollDelta) -> f64 {
     match delta {
         MouseScrollDelta::LineDelta(_, vertical) => f64::from(vertical) * 40.0,
         MouseScrollDelta::PixelDelta(PhysicalPosition { y, .. }) => y,
+    }
+}
+
+fn append_bounded_text(input: &mut String, text: &str) {
+    let mut characters = input.chars().count();
+    for character in text.chars() {
+        let character = match character {
+            '\n' | '\r' | '\t' => ' ',
+            character if character.is_control() => continue,
+            character => character,
+        };
+        if characters >= MAX_RESEARCH_CHARS
+            || input.len() + character.len_utf8() > MAX_RESEARCH_BYTES
+        {
+            break;
+        }
+        input.push(character);
+        characters += 1;
+    }
+}
+
+fn remove_last_grapheme(input: &mut String) {
+    if let Some((index, _)) = input.grapheme_indices(true).next_back() {
+        input.truncate(index);
     }
 }
 
@@ -1532,6 +1631,30 @@ mod app_tests {
             (1_280.0, 800.0)
         );
         assert!((application.scale_factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn composer_bounds_unicode_and_commits_ime_without_splitting_graphemes() {
+        let mut input = String::from("A👨‍👩‍👧‍👦e\u{301}");
+        remove_last_grapheme(&mut input);
+        assert_eq!(input, "A👨‍👩‍👧‍👦");
+        remove_last_grapheme(&mut input);
+        assert_eq!(input, "A");
+
+        let mut bounded = String::new();
+        append_bounded_text(&mut bounded, &format!("{}\nignored\0", "界".repeat(6_000)));
+        assert_eq!(bounded.chars().count(), MAX_RESEARCH_CHARS);
+        assert!(bounded.len() <= MAX_RESEARCH_BYTES);
+        assert!(!bounded.contains('\0'));
+
+        let mut application = CanvasApplication::unavailable("Visible failure".into());
+        application.research_input = Some("Ask ".into());
+        assert!(application.text_input_active());
+        assert!(application.ime_input(&Ime::Preedit("研究".into(), Some((6, 6)))));
+        assert_eq!(application.research_preedit, "研究");
+        assert!(application.ime_input(&Ime::Commit("研究課題".into())));
+        assert_eq!(application.research_input.as_deref(), Some("Ask 研究課題"));
+        assert!(application.research_preedit.is_empty());
     }
 
     #[test]

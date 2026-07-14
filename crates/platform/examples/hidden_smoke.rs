@@ -23,6 +23,7 @@ fn main() -> Result<(), not_news_platform::PlatformError> {
             logical_width: 320.0,
             logical_height: 180.0,
             visible: false,
+            force_software: std::env::var_os("NOT_NEWS_FORCE_SOFTWARE").is_some(),
         },
     )
 }

@@ -184,16 +184,17 @@ check output, or agent prompts except where the provider requires them.
   fixed desktop chrome including its idle/busy record states, active metadata,
   status panel, research activity, and narrow 640×720 bottom-sheet/control
   topology. The keyboard text composer is a rewrite-only affordance—Flutter has
-  no visible counterpart—so it needs a coherent Rust visual/input contract, not
-  a fabricated claim of source parity.
+  no visible counterpart—and now has its own bounded raster/input contract
+  rather than a fabricated claim of source parity.
 - Native pointer tests cover unbounded pan, anchored zoom, hover grace,
   activation, artifact paths, placement-only drag, source opening, and durable
   undo/redo. A settled frame selects event-loop sleep; resize/DPR churn preserves
   camera state; a 200-event dense layout remains collision-free; and a 4,096-
   event frame shapes only visible labels, reusing them on the next frame. Native
-  hidden-window presentation and bounded recoverable GL surface/context rebuild
-  are exercised, while comparative real-window latency, forced driver reset,
-  invalidation-area, and backend traces remain release evidence.
+  hidden-window presentation, bounded recoverable GL surface/context rebuild,
+  and a Skia-raster/Softbuffer fallback are exercised; comparative real-window
+  latency, forced driver reset, invalidation-area, and backend traces remain
+  release evidence.
 - Research now crosses a process-group/Job-Object supervisor, typed parser,
   sequenced SQLite acceptance, and direct in-memory canvas updates. Voice uses
   bounded ALSA/WASAPI capture, a lock-free callback boundary, disposable WAV,

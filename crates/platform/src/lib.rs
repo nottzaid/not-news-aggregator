@@ -140,6 +140,12 @@ pub trait PlatformApplication {
         false
     }
 
+    /// Reports whether the sole window should route native IME composition to
+    /// the application. The runner updates this after every input event.
+    fn text_input_active(&self) -> bool {
+        false
+    }
+
     /// Paints one frame and selects the next animation deadline.
     fn render(&mut self, canvas: &Canvas, frame: FrameInfo) -> FrameSchedule;
 }
