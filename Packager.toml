@@ -37,6 +37,13 @@ depends = [
   "libxkbcommon0",
 ]
 
+[appimage]
+excludedLibs = [
+  "libbrotli*.so*",
+  "libbz2.so*",
+  "libpng*.so*",
+]
+
 [nsis]
 installMode = "currentUser"
 installerIcon = "assets/icon/not-news.ico"

@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-07-14
-- Governing delivery: [issue #2](https://github.com/muradkant/not-news-aggregator/issues/2)
+- Governing delivery: [issue #5](https://github.com/muradkant/not-news-aggregator/issues/5)
 
 ## Context
 
@@ -17,7 +17,7 @@ Flutter/Python are historical implementation sources, not release inputs. The
 immutable evidence; new product artifacts originate only from the Rust line
 after parity and migration gates pass.
 
-Current packaging research found two credible but unselected mechanisms:
+Packaging experiments compared two credible mechanisms:
 
 - [`cargo-packager`](https://github.com/crabnebula-dev/cargo-packager) emits
   Windows NSIS/MSI and Linux AppImage/deb/pacman bundles;
@@ -26,8 +26,12 @@ Current packaging research found two credible but unselected mechanisms:
   across target runners.
 
 Tool breadth is not evidence of clean installation, safe upgrade, desktop
-integration, or dependency completeness. Selection follows package experiments,
-not feature tables.
+integration, or dependency completeness. Native package experiments selected
+`cargo-packager` 0.11.8: one declarative identity emits Debian/AppImage and
+NSIS payloads, while repository-owned scripts retain control of portable
+archives, hashes, build identity, dependency/license inventory, and lifecycle
+verification. `dist` remains credible but would duplicate that proven control
+surface here.
 
 ## Decision
 
@@ -37,6 +41,10 @@ product contracts developed with the application.
 - Publish versioned Windows and Linux artifacts from immutable commits. Each OS
   receives one desktop-integrated installation path and one relocatable artifact
   for diagnosis or users who reject installation.
+- Linux receives `.deb`, AppImage, and `tar.xz`; Windows receives current-user
+  NSIS and `.zip`. All forms contain the same optimized executable for their
+  target. `Packager.toml` owns product identity; `scripts/package-*` and
+  `scripts/verify-*` own reproducible naming and executable evidence.
 - Package the optimized Rust executable, fonts, icons, licenses, and every owned
   runtime asset. Skia and SQLite are build-time/static implementation details;
   release users never compile them. Flutter and Python are not packaged.
@@ -62,9 +70,8 @@ product contracts developed with the application.
   failure, and uninstall without deleting the graph. A developer-machine launch
   or successful archive extraction is insufficient.
 
-Exact installer formats and the packaging/orchestration tool remain open until
-the same staged application survives these experiments. The contract is fixed;
-its mechanism is replaceable.
+The mechanism remains replaceable, but changing it now requires lifecycle
+evidence stronger than the selected path, not a broader feature table.
 
 ## Alternatives rejected
 

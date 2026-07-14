@@ -22,8 +22,8 @@ hermes/ainews/memories/USER.md  → .hermes/profiles/ainews/memories/USER.md
 
 Templates are public policy; ignored `.hermes/` contains authentication,
 sessions, memory, logs, caches, and databases. Never copy or commit it. Add the
-provider credential to this isolated home using Hermes authentication commands,
-then verify the same boundary the application invokes:
+provider credentials and select the provider/model inside Hermes itself, then
+verify the same boundary the application invokes:
 
 ```sh
 HERMES_HOME="$PWD/.hermes/profiles/ainews" hermes skills list
@@ -43,9 +43,13 @@ cargo run --release -p not-news-app
 
 `AI_NEWS_HERMES_HOME` has priority over inherited `HERMES_HOME`; a named
 `HERMES_PROFILE` is consulted only when neither exact home is available. Rust
-uses Hermes' one-shot surface, passes provider/model explicitly, bounds turns
-through `HERMES_MAX_ITERATIONS`, parses only `AI_NEWS_EVENT` lines, and kills
-the entire process group on cancellation, silence, timeout, or output excess.
+uses Hermes' one-shot surface without replacing its configured provider or
+model. `HERMES_PROVIDER` and `HERMES_MODEL` remain explicit deployment
+overrides, not application defaults. Rust bounds turns through
+`HERMES_MAX_ITERATIONS`, parses only `AI_NEWS_EVENT` lines, and kills the entire
+process group on cancellation, silence, timeout, or output excess. Packaged
+users open Hermes' provider/model/API-key/OAuth dashboard from `Ctrl+,` →
+Connections; Not News neither mirrors nor narrows that registry.
 
 ## Research policy
 

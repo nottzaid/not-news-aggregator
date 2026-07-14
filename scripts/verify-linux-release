@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$root"
+version=$(cargo metadata --no-deps --filter-platform x86_64-unknown-linux-gnu --format-version 1 | jq -r '.packages[] | select(.name == "not-news-app") | .version')
+appimage="$root/dist/not-news_${version}_linux-x86_64.AppImage"
+deb="$root/dist/not-news_${version}_linux-x86_64.deb"
+archive="$root/dist/not-news_${version}_linux-x86_64.tar.xz"
+
+for artifact in \
+  "$appimage" \
+  "$deb" \
+  "$archive" \
+  "$root/dist/BUILDINFO-linux-x86_64.json" \
+  "$root/dist/DEPENDENCIES-linux-x86_64.json" \
+  "$root/dist/SHA256SUMS-linux-x86_64.txt"; do
+  test -f "$artifact" || {
+    echo "missing release artifact: $artifact" >&2
+    exit 1
+  }
+done
+(cd dist && sha256sum -c SHA256SUMS-linux-x86_64.txt)
+jq -e --arg commit "$(git rev-parse HEAD)" \
+  '.commit == $commit and .packager == "cargo-packager 0.11.8"' \
+  dist/BUILDINFO-linux-x86_64.json >/dev/null
+jq -e \
+  '.packages | length > 0 and all(.[]; has("name") and has("version") and has("license"))' \
+  dist/DEPENDENCIES-linux-x86_64.json >/dev/null
+
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+
+present() {
+  if [[ -n ${WAYLAND_DISPLAY:-} || -n ${DISPLAY:-} ]]; then
+    "$@"
+  elif command -v xvfb-run >/dev/null; then
+    xvfb-run --auto-servernum "$@"
+  else
+    echo "a compositor or xvfb-run is required for native presentation evidence" >&2
+    exit 1
+  fi
+}
+
+cp "$appimage" "$scratch/relocated-not-news.AppImage"
+chmod +x "$scratch/relocated-not-news.AppImage"
+APPIMAGE_EXTRACT_AND_RUN=1 present \
+  "$scratch/relocated-not-news.AppImage" \
+  --release-self-check "$scratch/appimage-check"
+
+mkdir "$scratch/deb"
+(
+  cd "$scratch/deb"
+  ar x "$deb"
+  tar -xzf data.tar.gz
+)
+cmp target/release/not-news-app "$scratch/deb/usr/bin/not-news-app"
+grep -Fx 'Name=Not News' "$scratch/deb/usr/share/applications/not-news-app.desktop"
+grep -Fx 'Icon=not-news-app' "$scratch/deb/usr/share/applications/not-news-app.desktop"
+present \
+  "$scratch/deb/usr/bin/not-news-app" \
+  --release-self-check "$scratch/deb-check"
+
+mkdir "$scratch/archive"
+tar -xJf "$archive" -C "$scratch/archive"
+portable="$scratch/archive/not-news_${version}_linux-x86_64/not-news-app"
+cmp target/release/not-news-app "$portable"
+present "$portable" --release-self-check "$scratch/archive-check"

@@ -17,6 +17,8 @@ remains editable without either.
 
 - `Ctrl+K` or `/` opens the text composer; the record orb captures a spoken
   question when Groq transcription is configured.
+- `Ctrl+,` opens Connections: choose Auto/OpenCode/Hermes research, store or
+  remove the Groq key, and open Hermes' own provider dashboard.
 - Drag a finding to organize space. Scroll forward zooms in; drag empty space
   to pan. Neither gesture changes graph semantics.
 - Right-click a finding or source, or hover it and press `Ctrl+E`, to relate,
@@ -36,6 +38,25 @@ not-news-app --database /path/to/graph.sqlite
 not-news-app --database /path/to/new.sqlite --import-legacy /path/to/old.sqlite
 ```
 
+## Install a release
+
+Tagged Rust releases provide two payloads per supported OS:
+
+- Linux: a desktop-integrated `.deb`, plus relocatable AppImage and `tar.xz`
+  forms. The `.deb` installs the Not News launcher and icon; an AppImage runs
+  after `chmod +x` without a repository or compiler.
+- Windows: a current-user NSIS installer with Start Menu identity, plus a
+  relocatable `.zip`. Neither form needs Rust, Flutter, Python, Clang, or a
+  source checkout.
+
+Every release carries SHA-256 sums, exact source/build-tool identity, and a
+machine-readable dependency/license inventory. The release workflow executes
+each portable payload, installs each native package, exercises import and
+durable mutation through the packaged executable, then uninstalls while proving
+that per-user research remains. Engineering previews are unsigned and may
+trigger Windows reputation warnings; signing is a stable-release gate, not a
+claim simulated with a self-signed certificate.
+
 ## Build from source
 
 Release artifacts are the user-facing delivery path. Development requires Rust
@@ -54,12 +75,20 @@ It does not start an obsolete backend or require external research services.
 
 ## Optional research and voice
 
-`AI_NEWS_RESEARCH_BACKEND=auto` prefers the authenticated standalone OpenCode
-CLI and otherwise uses Hermes. Set it to `opencode` or `hermes` to make the
-choice explicit. The application supervises either as a bounded process group,
-accepts only typed research events, validates every graph proposal, and commits
-accepted mutations transactionally. Credentials remain in the external tool's
-private store.
+Connections (`Ctrl+,`) persists Auto, OpenCode, or Hermes without storing a
+provider secret. `AI_NEWS_RESEARCH_BACKEND` remains a deployment override. Auto
+prefers the authenticated standalone OpenCode CLI and otherwise uses Hermes.
+The application supervises either as a bounded process group, accepts only
+typed research events, validates every graph proposal, and commits accepted
+mutations transactionally.
+
+Hermes retains ownership of its provider/model/API-key/OAuth registry;
+Connections opens Hermes' dashboard rather than copying or reducing it. Groq
+transcription is different because Not News calls Groq directly: Connections
+stores that key in Windows Credential Manager or Linux Secret Service. KWallet
+may request creation of an application-owned encrypted wallet on first save.
+`GROQ_API_KEY` overrides the vault for managed deployments; there is no
+plaintext settings fallback.
 
 The tracked `hermes/ainews` profile is installed into ignored project-local
 state with `scripts/setup-hermes-ainews`; [HERMES.md](HERMES.md) defines its
@@ -78,6 +107,8 @@ cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p not-news-platform --example hidden_smoke
 NOT_NEWS_FORCE_SOFTWARE=1 cargo run -p not-news-platform --example hidden_smoke
+./scripts/package-linux
+./scripts/verify-linux-release
 ```
 
 The suite combines domain properties, real SQLite crash/rollback boundaries,
