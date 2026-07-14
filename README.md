@@ -49,8 +49,9 @@ Tagged Rust releases provide two payloads per supported OS:
   relocatable `.zip`. Neither form needs Rust, Flutter, Python, Clang, or a
   source checkout.
 
-Every release carries SHA-256 sums, exact source/build-tool identity, and a
-machine-readable dependency/license inventory. The release workflow executes
+Every release carries SHA-256 sums, exact source/build-tool identity, a
+machine-readable dependency/license inventory, and the renderer selected by
+each executed payload. The release workflow executes
 each portable payload, installs each native package, exercises import and
 durable mutation through the packaged executable, then uninstalls while proving
 that per-user research remains. Engineering previews are unsigned and may
@@ -109,6 +110,7 @@ cargo run -p not-news-platform --example hidden_smoke
 NOT_NEWS_FORCE_SOFTWARE=1 cargo run -p not-news-platform --example hidden_smoke
 ./scripts/package-linux
 ./scripts/verify-linux-release
+target/release/not-news-app --performance-check /path/to/preserved-71-event-graph.sqlite
 ```
 
 The suite combines domain properties, real SQLite crash/rollback boundaries,
@@ -117,6 +119,12 @@ GPU and software presentation, and decoded-pixel comparisons against immutable
 reference rasters. Windows checks execute native process/audio tests and a real
 hidden window. `fixtures/reference-raster` records visual and temporal
 provenance; it is evidence, not a second implementation.
+
+The performance check imports its 71-event source read-only, drives 60 warm-up
+and 600 carrying frames through the optimized input, painter, GPU-submission,
+and swap path, then rejects p99 above 16.667 ms. Measurement removes monitor
+refresh waiting; ordinary sessions retain synchronized presentation, unchanged
+motion clocks, and unchanged easing. The source bytes are compared afterward.
 
 The prior Flutter/FastAPI application remains intact on
 `experimental-optimization`, in tags, and throughout Git history. It is not

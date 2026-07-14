@@ -43,3 +43,10 @@ boundary. Repainting after reconstruction is the correct recovery operation.
 - Linux CI runs both backends; Windows CI runs auto-selection natively, so a
   driverless runner proves the fallback instead of receiving a compile-only
   exemption.
+- Packaged self-checks report the backend that presented their final frame;
+  release runtime manifests preserve automatic and forced-software results
+  beside their hashes instead of inferring selection from configuration.
+- The optimized 71-event performance path measures input, paint, GPU
+  submission, and swap after an explicit warm-up. It removes monitor refresh
+  waiting only while measuring; ordinary presentation policy and every motion
+  duration remain unchanged.

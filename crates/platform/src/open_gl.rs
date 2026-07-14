@@ -1,4 +1,9 @@
-use std::{ffi::CString, num::NonZeroU32, sync::Arc, time::Instant};
+use std::{
+    ffi::CString,
+    num::NonZeroU32,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use gl::types::GLint;
 use glutin::{
@@ -7,7 +12,7 @@ use glutin::{
     display::{GetGlDisplay, GlDisplay},
     error::ErrorKind,
     prelude::{GlSurface, NotCurrentGlContext, PossiblyCurrentGlContext},
-    surface::{Surface as GlutinSurface, SurfaceAttributesBuilder, WindowSurface},
+    surface::{Surface as GlutinSurface, SurfaceAttributesBuilder, SwapInterval, WindowSurface},
 };
 use glutin_winit::DisplayBuilder;
 use raw_window_handle::HasWindowHandle;
@@ -26,6 +31,38 @@ use winit::{
 
 use crate::{FrameInfo, FrameSchedule, PlatformApplication};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RendererBackend {
+    SkiaOpenGl,
+    SkiaRaster,
+}
+
+impl RendererBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SkiaOpenGl => "skia-opengl",
+            Self::SkiaRaster => "skia-raster",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunReport {
+    /// Backend that presented the final frame. This reflects automatic
+    /// fallback or bounded recovery, not merely the requested preference.
+    pub renderer: RendererBackend,
+    pub measured_frames: usize,
+    pub p99_frame_time: Option<Duration>,
+    pub p99_application_time: Option<Duration>,
+    pub p99_presentation_time: Option<Duration>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameMeasurement {
+    /// Presented warm-up frames omitted before samples are retained.
+    pub skip: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct WindowOptions {
     pub title: String,
@@ -34,6 +71,9 @@ pub struct WindowOptions {
     pub visible: bool,
     /// Forces Skia's CPU raster backend; used by compatibility diagnostics.
     pub force_software: bool,
+    /// Measures application handling, painting, and native presentation after
+    /// an explicit warm-up. Disabled in ordinary sessions to retain no trace.
+    pub frame_measurement: Option<FrameMeasurement>,
 }
 
 impl Default for WindowOptions {
@@ -44,6 +84,7 @@ impl Default for WindowOptions {
             logical_height: 800.0,
             visible: true,
             force_software: false,
+            frame_measurement: None,
         }
     }
 }
@@ -96,7 +137,7 @@ pub enum PlatformError {
 pub fn run<A: PlatformApplication>(
     application: A,
     options: WindowOptions,
-) -> Result<(), PlatformError> {
+) -> Result<RunReport, PlatformError> {
     let event_loop =
         EventLoop::new().map_err(|error| PlatformError::EventLoop(error.to_string()))?;
     let render_on_resume = !options.visible;
@@ -127,7 +168,12 @@ pub fn run<A: PlatformApplication>(
         .build(&event_loop, template, choose_config)
         .map_err(|error| PlatformError::Display(error.to_string()))?;
     let window = window.ok_or(PlatformError::MissingWindow)?;
-    let native = NativeSurface::new(window, config, options.force_software)?;
+    let native = NativeSurface::new(
+        window,
+        config,
+        options.force_software,
+        options.frame_measurement.is_some(),
+    )?;
     native.window.request_redraw();
 
     let mut runner = Runner {
@@ -137,6 +183,11 @@ pub fn run<A: PlatformApplication>(
         render_on_resume,
         recovery: RecoveryBudget::default(),
         ime_allowed: false,
+        presented_frames: 0,
+        frame_times: options.frame_measurement.map(|_| Vec::new()),
+        measurement_skip: options
+            .frame_measurement
+            .map_or(0, |measurement| measurement.skip),
     };
     event_loop
         .run_app(&mut runner)
@@ -144,7 +195,17 @@ pub fn run<A: PlatformApplication>(
     if let Some(error) = runner.deferred_error {
         return Err(error);
     }
-    Ok(())
+    let samples = runner.frame_times.unwrap_or_default();
+    let p99_frame_time = percentile_99(samples.iter().map(|sample| sample.total));
+    let p99_application_time = percentile_99(samples.iter().map(|sample| sample.application));
+    let p99_presentation_time = percentile_99(samples.iter().map(|sample| sample.presentation));
+    Ok(RunReport {
+        renderer: runner.native.backend_kind(),
+        measured_frames: samples.len(),
+        p99_frame_time,
+        p99_application_time,
+        p99_presentation_time,
+    })
 }
 
 fn choose_config(configs: Box<dyn Iterator<Item = Config> + '_>) -> Config {
@@ -165,6 +226,7 @@ struct NativeSurface {
     backend: Option<NativeBackend>,
     config: Config,
     window: Arc<Window>,
+    measured_presentation: bool,
 }
 
 enum NativeBackend {
@@ -193,12 +255,17 @@ enum PresentFailure {
 }
 
 impl NativeSurface {
-    fn new(window: Window, config: Config, force_software: bool) -> Result<Self, PlatformError> {
+    fn new(
+        window: Window,
+        config: Config,
+        force_software: bool,
+        measured_presentation: bool,
+    ) -> Result<Self, PlatformError> {
         let window = Arc::new(window);
         let gpu = if force_software {
             Err(PlatformError::SkiaInterface)
         } else {
-            GpuSurface::new(&window, &config)
+            GpuSurface::new(&window, &config, measured_presentation)
         };
         let backend = match gpu {
             Ok(gpu) => NativeBackend::Gpu(gpu),
@@ -215,6 +282,7 @@ impl NativeSurface {
             backend: Some(backend),
             config,
             window,
+            measured_presentation,
         })
     }
 
@@ -222,6 +290,17 @@ impl NativeSurface {
         self.backend
             .as_mut()
             .expect("a native surface is never used between teardown and replacement")
+    }
+
+    fn backend_kind(&self) -> RendererBackend {
+        match self
+            .backend
+            .as_ref()
+            .expect("a native surface is never inspected between teardown and replacement")
+        {
+            NativeBackend::Gpu(_) => RendererBackend::SkiaOpenGl,
+            NativeBackend::Software(_) => RendererBackend::SkiaRaster,
+        }
     }
 
     fn canvas(&mut self) -> &skia_safe::Canvas {
@@ -255,8 +334,8 @@ impl NativeSurface {
 
     fn rebuild(&mut self) -> Result<(), PlatformError> {
         drop(self.backend.take());
-        self.backend =
-            Some(match GpuSurface::new(&self.window, &self.config) {
+        self.backend = Some(
+            match GpuSurface::new(&self.window, &self.config, self.measured_presentation) {
                 Ok(gpu) => NativeBackend::Gpu(gpu),
                 Err(gpu) => NativeBackend::Software(SoftwareSurface::new(&self.window).map_err(
                     |software| PlatformError::RendererUnavailable {
@@ -264,7 +343,8 @@ impl NativeSurface {
                         software,
                     },
                 )?),
-            });
+            },
+        );
         Ok(())
     }
 }
@@ -340,7 +420,11 @@ fn rgba_to_xrgb(rgba: &[u8]) -> u32 {
 }
 
 impl GpuSurface {
-    fn new(window: &Window, config: &Config) -> Result<Self, PlatformError> {
+    fn new(
+        window: &Window,
+        config: &Config,
+        measured_presentation: bool,
+    ) -> Result<Self, PlatformError> {
         let raw_window_handle = window
             .window_handle()
             .map_err(|error| PlatformError::WindowHandle(error.to_string()))?
@@ -361,6 +445,12 @@ impl GpuSurface {
         let gl_context = not_current
             .make_current(&gl_surface)
             .map_err(|error| PlatformError::CurrentContext(error.to_string()))?;
+        // Measurement isolates input, paint, GPU submission, and swap work from
+        // the monitor's refresh wait. Ordinary sessions retain the platform's
+        // synchronized default and therefore do not trade fidelity for a score.
+        if measured_presentation {
+            let _ = gl_surface.set_swap_interval(&gl_context, SwapInterval::DontWait);
+        }
 
         gl::load_with(|name| load_symbol(config, name));
         let interface = skia_safe::gpu::gl::Interface::new_load_with(|name| {
@@ -464,6 +554,16 @@ struct Runner<A> {
     render_on_resume: bool,
     recovery: RecoveryBudget,
     ime_allowed: bool,
+    presented_frames: usize,
+    frame_times: Option<Vec<FrameSample>>,
+    measurement_skip: usize,
+}
+
+#[derive(Clone, Copy)]
+struct FrameSample {
+    total: Duration,
+    application: Duration,
+    presentation: Duration,
 }
 
 impl<A: PlatformApplication> ApplicationHandler for Runner<A> {
@@ -545,6 +645,7 @@ impl<A: PlatformApplication> Runner<A> {
             event_loop.set_control_flow(ControlFlow::Wait);
             return Ok(());
         }
+        let started = self.frame_times.as_ref().map(|_| Instant::now());
         let frame = FrameInfo {
             physical_width: size.width,
             physical_height: size.height,
@@ -552,6 +653,7 @@ impl<A: PlatformApplication> Runner<A> {
             now: Instant::now(),
         };
         let schedule = self.application.render(self.native.canvas(), frame);
+        let painted = self.frame_times.as_ref().map(|_| Instant::now());
         match self.native.present() {
             Ok(()) => self.recovery.presented(),
             Err(PresentFailure::Gpu(error)) if self.recovery.permits(error.error_kind()) => {
@@ -565,6 +667,18 @@ impl<A: PlatformApplication> Runner<A> {
             }
             Err(PresentFailure::Software(error)) => return Err(PlatformError::Present(error)),
         }
+        self.presented_frames += 1;
+        if self.presented_frames > self.measurement_skip
+            && let (Some(started), Some(painted), Some(samples)) =
+                (started, painted, self.frame_times.as_mut())
+        {
+            let finished = Instant::now();
+            samples.push(FrameSample {
+                total: finished.saturating_duration_since(started),
+                application: painted.saturating_duration_since(started),
+                presentation: finished.saturating_duration_since(painted),
+            });
+        }
         match schedule {
             FrameSchedule::Wait => event_loop.set_control_flow(ControlFlow::Wait),
             FrameSchedule::RedrawAt(deadline) => {
@@ -574,6 +688,13 @@ impl<A: PlatformApplication> Runner<A> {
         }
         Ok(())
     }
+}
+
+fn percentile_99(samples: impl Iterator<Item = Duration>) -> Option<Duration> {
+    let mut samples = samples.collect::<Vec<_>>();
+    samples.sort_unstable();
+    let rank = samples.len().saturating_mul(99).div_ceil(100);
+    samples.get(rank.saturating_sub(1)).copied()
 }
 
 fn nonzero_extent(value: u32) -> NonZeroU32 {
@@ -653,6 +774,13 @@ fn wrap_surface(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percentile_uses_nearest_rank_and_rejects_no_samples() {
+        assert_eq!(percentile_99(std::iter::empty()), None);
+        let samples = (1..=100).map(Duration::from_micros);
+        assert_eq!(percentile_99(samples), Some(Duration::from_micros(99)));
+    }
 
     #[test]
     fn context_and_surface_loss_rebuild_twice_without_masking_fatal_errors() {

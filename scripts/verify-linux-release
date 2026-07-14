@@ -7,6 +7,11 @@ version=$(cargo metadata --no-deps --filter-platform x86_64-unknown-linux-gnu --
 appimage="$root/dist/not-news_${version}_linux-x86_64.AppImage"
 deb="$root/dist/not-news_${version}_linux-x86_64.deb"
 archive="$root/dist/not-news_${version}_linux-x86_64.tar.xz"
+runtime="$root/dist/RUNTIME-linux-x86_64.json"
+expected_commit=$(git rev-parse HEAD)
+
+rm -f "$runtime"
+sed -i '/  RUNTIME-linux-x86_64\.json$/d' "$root/dist/SHA256SUMS-linux-x86_64.txt"
 
 for artifact in \
   "$appimage" \
@@ -42,11 +47,25 @@ present() {
   fi
 }
 
+assert_self_check() {
+  jq -e --arg commit "${expected_commit:0:12}" --arg renderer "$2" \
+    '.release_self_check == "pass" and .commit == $commit and
+     (if $renderer == "auto" then (.renderer == "skia-opengl" or .renderer == "skia-raster") else .renderer == $renderer end)' \
+    <<<"$1" >/dev/null
+}
+
 cp "$appimage" "$scratch/relocated-not-news.AppImage"
 chmod +x "$scratch/relocated-not-news.AppImage"
-APPIMAGE_EXTRACT_AND_RUN=1 present \
+appimage_auto=$(APPIMAGE_EXTRACT_AND_RUN=1 present \
   "$scratch/relocated-not-news.AppImage" \
-  --release-self-check "$scratch/appimage-check"
+  --release-self-check "$scratch/appimage-check")
+printf '%s\n' "$appimage_auto"
+assert_self_check "$appimage_auto" auto
+appimage_software=$(NOT_NEWS_FORCE_SOFTWARE=1 APPIMAGE_EXTRACT_AND_RUN=1 present \
+  "$scratch/relocated-not-news.AppImage" \
+  --release-self-check "$scratch/appimage-software-check")
+printf '%s\n' "$appimage_software"
+assert_self_check "$appimage_software" skia-raster
 
 mkdir "$scratch/deb"
 (
@@ -57,12 +76,29 @@ mkdir "$scratch/deb"
 cmp target/release/not-news-app "$scratch/deb/usr/bin/not-news-app"
 grep -Fx 'Name=Not News' "$scratch/deb/usr/share/applications/not-news-app.desktop"
 grep -Fx 'Icon=not-news-app' "$scratch/deb/usr/share/applications/not-news-app.desktop"
-present \
+deb_auto=$(present \
   "$scratch/deb/usr/bin/not-news-app" \
-  --release-self-check "$scratch/deb-check"
+  --release-self-check "$scratch/deb-check")
+printf '%s\n' "$deb_auto"
+assert_self_check "$deb_auto" auto
 
 mkdir "$scratch/archive"
 tar -xJf "$archive" -C "$scratch/archive"
 portable="$scratch/archive/not-news_${version}_linux-x86_64/not-news-app"
 cmp target/release/not-news-app "$portable"
-present "$portable" --release-self-check "$scratch/archive-check"
+archive_auto=$(present "$portable" --release-self-check "$scratch/archive-check")
+printf '%s\n' "$archive_auto"
+assert_self_check "$archive_auto" auto
+
+jq -n \
+  --arg commit "$expected_commit" \
+  --argjson appimage_auto "$appimage_auto" \
+  --argjson appimage_software "$appimage_software" \
+  --argjson deb_auto "$deb_auto" \
+  --argjson archive_auto "$archive_auto" \
+  '{schema: 1, commit: $commit, appimage_auto: $appimage_auto, appimage_software: $appimage_software, deb_auto: $deb_auto, archive_auto: $archive_auto}' \
+  > "$runtime"
+(
+  cd dist
+  sha256sum RUNTIME-linux-x86_64.json >> SHA256SUMS-linux-x86_64.txt
+)

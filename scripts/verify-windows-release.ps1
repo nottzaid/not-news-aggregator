@@ -10,6 +10,10 @@ Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $scratch -ItemType Directory | Out-Null
 
 $hashFile = Join-Path $root "dist/SHA256SUMS-windows-x86_64.txt"
+$runtimeFile = Join-Path $root "dist/RUNTIME-windows-x86_64.json"
+Remove-Item $runtimeFile -Force -ErrorAction SilentlyContinue
+$baseHashes = [IO.File]::ReadAllLines($hashFile) | Where-Object { $_ -notmatch '  RUNTIME-windows-x86_64\.json$' }
+[IO.File]::WriteAllLines($hashFile, $baseHashes, [Text.UTF8Encoding]::new($false))
 $buildInfo = Get-Content "dist/BUILDINFO-windows-x86_64.json" -Raw | ConvertFrom-Json
 if ($buildInfo.commit -ne (git rev-parse HEAD).Trim()) { throw "build commit does not match checkout" }
 if ($buildInfo.packager -ne "cargo-packager 0.11.8") { throw "packager identity does not match" }
@@ -21,16 +25,39 @@ foreach ($line in [IO.File]::ReadAllLines($hashFile)) {
     if ($actual -ne $Matches[1]) { throw "hash mismatch: $($Matches[2])" }
 }
 
+function Invoke-ReleaseSelfCheck([string]$Binary, [string]$CheckRoot, [string]$Renderer) {
+    $output = (& $Binary --release-self-check $CheckRoot | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { throw "$Binary self-check failed" }
+    Write-Host $output
+    $result = $output | ConvertFrom-Json
+    if ($result.release_self_check -ne "pass") { throw "$Binary did not report a passing self-check" }
+    if ($result.commit -ne $buildInfo.commit.Substring(0, 12)) { throw "$Binary reported the wrong commit" }
+    if ($Renderer -eq "auto") {
+        if ($result.renderer -notin @("skia-opengl", "skia-raster")) { throw "$Binary reported unknown renderer $($result.renderer)" }
+    } elseif ($result.renderer -ne $Renderer) {
+        throw "$Binary selected $($result.renderer), expected $Renderer"
+    }
+    return $result
+}
+
 $zip = Join-Path $root "dist/not-news_${version}_windows-x86_64.zip"
 Expand-Archive $zip (Join-Path $scratch "portable")
 $portable = Join-Path $scratch "portable/not-news_${version}_windows-x86_64/not-news-app.exe"
-& $portable --release-self-check (Join-Path $scratch "portable-check")
-if ($LASTEXITCODE -ne 0) { throw "portable binary self-check failed" }
+$portableAuto = Invoke-ReleaseSelfCheck $portable (Join-Path $scratch "portable-check") "auto"
+$previousForceSoftware = $env:NOT_NEWS_FORCE_SOFTWARE
+$env:NOT_NEWS_FORCE_SOFTWARE = "1"
+try {
+    $portableSoftware = Invoke-ReleaseSelfCheck $portable (Join-Path $scratch "portable-software-check") "skia-raster"
+} finally {
+    $env:NOT_NEWS_FORCE_SOFTWARE = $previousForceSoftware
+}
 $sourceHash = (Get-FileHash "target/release/not-news-app.exe" -Algorithm SHA256).Hash
 $portableHash = (Get-FileHash $portable -Algorithm SHA256).Hash
 if ($sourceHash -ne $portableHash) { throw "portable archive changed the release executable" }
 
-if (-not $InstallLifecycle) { exit 0 }
+$installedAuto = $null
+
+if ($InstallLifecycle) {
 
 $data = Join-Path $env:LOCALAPPDATA "not-news-canvas"
 $marker = Join-Path $data "release-preservation-marker"
@@ -43,8 +70,7 @@ if ($install.ExitCode -ne 0) { throw "NSIS installation exited $($install.ExitCo
 $installed = Join-Path $env:LOCALAPPDATA "Not News/not-news-app.exe"
 if (-not (Test-Path $installed)) { throw "NSIS did not install the executable" }
 if ((Get-FileHash $installed).Hash -ne $sourceHash) { throw "NSIS changed the release executable" }
-& $installed --release-self-check (Join-Path $scratch "installed-check")
-if ($LASTEXITCODE -ne 0) { throw "installed binary self-check failed" }
+$installedAuto = Invoke-ReleaseSelfCheck $installed (Join-Path $scratch "installed-check") "auto"
 
 $uninstaller = Join-Path $env:LOCALAPPDATA "Not News/uninstall.exe"
 $uninstall = Start-Process $uninstaller -ArgumentList "/S" -PassThru -Wait
@@ -55,3 +81,20 @@ for ($attempt = 0; $attempt -lt 30 -and (Test-Path $installed); $attempt++) {
 if (Test-Path $installed) { throw "NSIS left its executable installed" }
 if (-not (Test-Path $marker)) { throw "NSIS uninstaller deleted user research state" }
 Remove-Item $marker
+}
+
+$runtime = [ordered]@{
+    schema = 1
+    commit = $buildInfo.commit
+    portable_auto = $portableAuto
+    portable_software = $portableSoftware
+    installed_auto = $installedAuto
+}
+$utf8 = [Text.UTF8Encoding]::new($false)
+[IO.File]::WriteAllText($runtimeFile, ($runtime | ConvertTo-Json -Depth 5), $utf8)
+$runtimeHash = (Get-FileHash $runtimeFile -Algorithm SHA256).Hash.ToLowerInvariant()
+[IO.File]::AppendAllText(
+    $hashFile,
+    "$runtimeHash  RUNTIME-windows-x86_64.json`n",
+    $utf8
+)

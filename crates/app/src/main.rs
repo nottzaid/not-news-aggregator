@@ -5,6 +5,7 @@ mod settings;
 use std::{
     collections::{HashSet, VecDeque},
     error::Error,
+    fs,
     path::{Path, PathBuf},
     time::Duration,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -23,8 +24,8 @@ use not_news_domain::{
     PromotionRelation, Provenance, RelateEvents,
 };
 use not_news_platform::{
-    FrameInfo, FrameSchedule, PlatformApplication, WindowOptions, application_data_directory,
-    open_external_url, run,
+    FrameInfo, FrameMeasurement, FrameSchedule, PlatformApplication, WindowOptions,
+    application_data_directory, open_external_url, run,
     skia_safe::Canvas,
     winit::{
         dpi::PhysicalPosition,
@@ -56,8 +57,13 @@ use not_news_renderer::{
     paint_research_prompt, paint_status, resolved_positions,
 };
 use not_news_store::{
-    CommitOutcome, DurableGraphStore, ResearchOutputKind, ResearchSessionStatus, StoreError,
+    CommitOutcome, DurableGraphStore, LegacyGraphReader, ResearchOutputKind, ResearchSessionStatus,
+    StoreError,
 };
+
+const PERFORMANCE_WARMUP_FRAMES: usize = 60;
+const PERFORMANCE_MEASURED_FRAMES: usize = 600;
+const PERFORMANCE_P99_LIMIT_MICROS: u128 = 16_667;
 
 struct ActiveResearch {
     session_id: String,
@@ -2568,13 +2574,43 @@ impl PlatformApplication for CanvasApplication {
     }
 }
 
+struct PerformanceApplication {
+    inner: CanvasApplication,
+    frame_index: usize,
+}
+
+impl PlatformApplication for PerformanceApplication {
+    fn render(&mut self, canvas: &Canvas, frame: FrameInfo) -> FrameSchedule {
+        let cycle = self.frame_index % 472;
+        let offset = if cycle < 236 { cycle } else { 472 - cycle };
+        let cursor = Point {
+            x: 40.0 + usize_to_f64(offset) * 5.0,
+            y: 400.0,
+        };
+        let _ = self.inner.cursor_moved(cursor, frame.now);
+        if self.frame_index == 0 {
+            let _ = self.inner.mouse_input(ElementState::Pressed, frame.now);
+        }
+        let _ = self.inner.render(canvas, frame);
+        self.frame_index += 1;
+        if self.frame_index >= PERFORMANCE_WARMUP_FRAMES + PERFORMANCE_MEASURED_FRAMES {
+            FrameSchedule::Exit
+        } else {
+            FrameSchedule::RedrawAt(frame.now)
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let options = startup_options(std::env::args_os().skip(1))?;
+    if let Some(source) = options.performance_source {
+        return run_reference_performance_check(&source);
+    }
     if let Some(root) = options.release_smoke {
         let check = release_check::run(&root)?;
         let mut application = CanvasApplication::load(&check.database);
         application.exit_after_present = true;
-        run(
+        let report = run(
             application,
             WindowOptions {
                 visible: false,
@@ -2583,9 +2619,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
         )?;
         println!(
-            "{{\"release_self_check\":\"pass\",\"version\":\"{}\",\"commit\":\"{}\",\"events\":{},\"bridges\":{},\"revision\":{}}}",
+            "{{\"release_self_check\":\"pass\",\"version\":\"{}\",\"commit\":\"{}\",\"renderer\":\"{}\",\"events\":{},\"bridges\":{},\"revision\":{}}}",
             env!("CARGO_PKG_VERSION"),
             option_env!("NOT_NEWS_BUILD_COMMIT").unwrap_or("development"),
+            report.renderer.as_str(),
             check.imported_events,
             check.imported_bridges,
             check.final_revision,
@@ -2601,7 +2638,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(source) = options.import_legacy {
         application.import_legacy(&source);
     }
-    run(application, WindowOptions::default())?;
+    let _ = run(application, WindowOptions::default())?;
     Ok(())
 }
 
@@ -2609,6 +2646,7 @@ struct StartupOptions {
     database: Result<PathBuf, std::io::Error>,
     import_legacy: Option<PathBuf>,
     release_smoke: Option<PathBuf>,
+    performance_source: Option<PathBuf>,
 }
 
 fn startup_options(
@@ -2620,11 +2658,13 @@ fn startup_options(
             database: Ok(PathBuf::from(&arguments[0])),
             import_legacy: None,
             release_smoke: None,
+            performance_source: None,
         });
     }
     let mut database = None;
     let mut import_legacy = None;
     let mut release_smoke = None;
+    let mut performance_source = None;
     let mut index = 0;
     while index < arguments.len() {
         let flag = &arguments[index];
@@ -2640,6 +2680,8 @@ fn startup_options(
             import_legacy = Some(PathBuf::from(value));
         } else if flag == "--release-self-check" && release_smoke.is_none() {
             release_smoke = Some(PathBuf::from(value));
+        } else if flag == "--performance-check" && performance_source.is_none() {
+            performance_source = Some(PathBuf::from(value));
         } else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -2648,17 +2690,124 @@ fn startup_options(
         }
         index += 2;
     }
-    if release_smoke.is_some() && (database.is_some() || import_legacy.is_some()) {
+    let exclusive_check = release_smoke.is_some() || performance_source.is_some();
+    if exclusive_check
+        && (database.is_some()
+            || import_legacy.is_some()
+            || release_smoke.is_some() && performance_source.is_some())
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "--release-self-check is exclusive",
+            "release and performance checks are exclusive",
         ));
     }
     Ok(StartupOptions {
         database: database.map_or_else(default_database_path, Ok),
         import_legacy,
         release_smoke,
+        performance_source,
     })
+}
+
+fn run_reference_performance_check(source: &Path) -> Result<(), Box<dyn Error>> {
+    let source_before = fs::read(source)?;
+    let legacy = LegacyGraphReader::new(source).load()?;
+    if legacy.events.len() != 71 {
+        return Err(format!(
+            "reference performance corpus must contain 71 events, found {}",
+            legacy.events.len()
+        )
+        .into());
+    }
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "not-news-performance-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir(&root)?;
+    let cleanup = TemporaryDirectory(root.clone());
+    let database = root.join("graph.sqlite");
+    let store = DurableGraphStore::open(&database)?;
+    let imported = store.import_legacy(source)?;
+    if imported.events != legacy.events
+        || imported.bridges != legacy.bridges
+        || imported.aliases != legacy.aliases
+        || imported.placements != legacy.placements
+    {
+        return Err("performance import changed the reference graph".into());
+    }
+    drop(store);
+
+    let mut application = CanvasApplication::load(&database);
+    application.status = None;
+    application.speech = SpeechWorker::disabled();
+    let report = run(
+        PerformanceApplication {
+            inner: application,
+            frame_index: 0,
+        },
+        WindowOptions {
+            visible: false,
+            frame_measurement: Some(FrameMeasurement {
+                skip: PERFORMANCE_WARMUP_FRAMES,
+            }),
+            ..WindowOptions::default()
+        },
+    )?;
+    if fs::read(source)? != source_before {
+        return Err("performance check modified its reference database".into());
+    }
+    if report.measured_frames != PERFORMANCE_MEASURED_FRAMES {
+        return Err(format!(
+            "performance check measured {} frames instead of {PERFORMANCE_MEASURED_FRAMES}",
+            report.measured_frames
+        )
+        .into());
+    }
+    let p99 = report
+        .p99_frame_time
+        .ok_or("performance check produced no frame samples")?;
+    let application_p99 = report
+        .p99_application_time
+        .ok_or("performance check produced no application samples")?;
+    let presentation_p99 = report
+        .p99_presentation_time
+        .ok_or("performance check produced no presentation samples")?;
+    let passed = p99.as_micros() <= PERFORMANCE_P99_LIMIT_MICROS;
+    println!(
+        "{{\"performance_check\":\"{}\",\"version\":\"{}\",\"commit\":\"{}\",\"renderer\":\"{}\",\"events\":{},\"frames\":{},\"p99_frame_micros\":{},\"p99_input_paint_micros\":{},\"p99_present_micros\":{},\"limit_micros\":{}}}",
+        if passed { "pass" } else { "fail" },
+        env!("CARGO_PKG_VERSION"),
+        option_env!("NOT_NEWS_BUILD_COMMIT").unwrap_or("development"),
+        report.renderer.as_str(),
+        legacy.events.len(),
+        report.measured_frames,
+        p99.as_micros(),
+        application_p99.as_micros(),
+        presentation_p99.as_micros(),
+        PERFORMANCE_P99_LIMIT_MICROS,
+    );
+    drop(cleanup);
+    if !passed {
+        return Err("p99 carrying-frame time exceeds 16.667 ms".into());
+    }
+    Ok(())
+}
+
+struct TemporaryDirectory(PathBuf);
+
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn usize_to_f64(value: usize) -> f64 {
+    value as f64
 }
 
 fn default_database_path() -> Result<PathBuf, std::io::Error> {
@@ -3202,6 +3351,25 @@ mod app_tests {
         );
         assert_eq!(options.import_legacy, Some(PathBuf::from("legacy.sqlite")));
         assert!(startup_options([std::ffi::OsString::from("--import-legacy")]).is_err());
+
+        let performance = startup_options([
+            std::ffi::OsString::from("--performance-check"),
+            std::ffi::OsString::from("reference.sqlite"),
+        ])
+        .unwrap();
+        assert_eq!(
+            performance.performance_source,
+            Some(PathBuf::from("reference.sqlite"))
+        );
+        assert!(
+            startup_options([
+                std::ffi::OsString::from("--performance-check"),
+                std::ffi::OsString::from("reference.sqlite"),
+                std::ffi::OsString::from("--database"),
+                std::ffi::OsString::from("destination.sqlite"),
+            ])
+            .is_err()
+        );
     }
 
     #[cfg(unix)]

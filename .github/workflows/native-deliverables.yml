@@ -85,6 +85,7 @@ jobs:
             dist/*.tar.xz
             dist/BUILDINFO-linux-x86_64.json
             dist/DEPENDENCIES-linux-x86_64.json
+            dist/RUNTIME-linux-x86_64.json
             dist/SHA256SUMS-linux-x86_64.txt
           if-no-files-found: error
           compression-level: 0
@@ -141,6 +142,7 @@ jobs:
             dist/*.zip
             dist/BUILDINFO-windows-x86_64.json
             dist/DEPENDENCIES-windows-x86_64.json
+            dist/RUNTIME-windows-x86_64.json
             dist/SHA256SUMS-windows-x86_64.txt
           if-no-files-found: error
           compression-level: 0

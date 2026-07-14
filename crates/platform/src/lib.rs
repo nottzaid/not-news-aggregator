@@ -10,7 +10,9 @@ use std::{env, fs, io, path::PathBuf, process::Command, thread, time::Instant};
 use skia_safe::Canvas;
 use winit::event::WindowEvent;
 
-pub use open_gl::{PlatformError, WindowOptions, run};
+pub use open_gl::{
+    FrameMeasurement, PlatformError, RendererBackend, RunReport, WindowOptions, run,
+};
 pub use skia_safe;
 pub use winit;
 
