@@ -10,7 +10,6 @@ const BRIDGE: &str =
     r#"{"from":"release-a","to":"release-b","label":"Corroborates","provenance":"agent"}"#;
 
 pub struct ReleaseCheck {
-    pub database: std::path::PathBuf,
     pub imported_events: usize,
     pub imported_bridges: usize,
     pub final_revision: u64,
@@ -98,7 +97,6 @@ pub fn run(root: &Path) -> Result<ReleaseCheck, Box<dyn Error>> {
     reject_future_schema(root)?;
     reject_partial_import(root)?;
     Ok(ReleaseCheck {
-        database,
         imported_events,
         imported_bridges,
         final_revision,

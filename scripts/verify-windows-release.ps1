@@ -31,6 +31,7 @@ function Invoke-ReleaseSelfCheck([string]$Binary, [string]$CheckRoot, [string]$R
     Write-Host $output
     $result = $output | ConvertFrom-Json
     if ($result.release_self_check -ne "pass") { throw "$Binary did not report a passing self-check" }
+    if ($result.empty_launch -ne $true) { throw "$Binary did not present an empty first launch" }
     if ($result.commit -ne $buildInfo.commit.Substring(0, 12)) { throw "$Binary reported the wrong commit" }
     if ($Renderer -eq "auto") {
         if ($result.renderer -notin @("skia-opengl", "skia-raster")) { throw "$Binary reported unknown renderer $($result.renderer)" }

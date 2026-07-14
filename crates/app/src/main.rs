@@ -2613,7 +2613,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some(root) = options.release_smoke {
         let check = release_check::run(&root)?;
-        let mut application = CanvasApplication::load(&check.database);
+        let empty_database = root.join("empty-launch.sqlite");
+        let mut application = CanvasApplication::load(&empty_database);
+        if !application.graph.events.is_empty() {
+            return Err("release self-check empty launch created nonempty research".into());
+        }
         application.exit_after_present = true;
         let report = run(
             application,
@@ -2624,7 +2628,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
         )?;
         println!(
-            "{{\"release_self_check\":\"pass\",\"version\":\"{}\",\"commit\":\"{}\",\"renderer\":\"{}\",\"events\":{},\"bridges\":{},\"revision\":{}}}",
+            "{{\"release_self_check\":\"pass\",\"version\":\"{}\",\"commit\":\"{}\",\"renderer\":\"{}\",\"empty_launch\":true,\"events\":{},\"bridges\":{},\"revision\":{}}}",
             env!("CARGO_PKG_VERSION"),
             option_env!("NOT_NEWS_BUILD_COMMIT").unwrap_or("development"),
             report.renderer.as_str(),

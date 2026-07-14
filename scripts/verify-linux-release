@@ -49,7 +49,7 @@ present() {
 
 assert_self_check() {
   jq -e --arg commit "${expected_commit:0:12}" --arg renderer "$2" \
-    '.release_self_check == "pass" and .commit == $commit and
+    '.release_self_check == "pass" and .empty_launch == true and .commit == $commit and
      (if $renderer == "auto" then (.renderer == "skia-opengl" or .renderer == "skia-raster") else .renderer == $renderer end)' \
     <<<"$1" >/dev/null
 }
