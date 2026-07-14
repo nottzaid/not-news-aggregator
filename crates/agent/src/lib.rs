@@ -10,8 +10,9 @@ use thiserror::Error;
 
 pub use prompt::build_research_prompt;
 pub use runner::{
-    OutputProtocol, ProcessLimits, ResearchBackend, ResearchHandle, ResearchLaunch,
-    ResearchProcessEvent, ResearchTermination,
+    HermesDashboardError, OutputProtocol, ProcessLimits, ResearchBackend, ResearchBackendChoice,
+    ResearchHandle, ResearchLaunch, ResearchProcessEvent, ResearchTermination, hermes_is_available,
+    open_hermes_dashboard,
 };
 
 pub const EVENT_PREFIX: &str = "AI_NEWS_EVENT:";

@@ -6,17 +6,26 @@ rust-version.workspace = true
 
 [dependencies]
 arboard.workspace = true
+keyring.workspace = true
 not-news-agent = { path = "../agent" }
 not-news-audio = { path = "../audio" }
 not-news-domain = { path = "../domain" }
 not-news-platform = { path = "../platform" }
 not-news-renderer = { path = "../renderer" }
 not-news-store = { path = "../store" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 unicode-segmentation.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring-core.workspace = true
+zbus.workspace = true
 
 [dev-dependencies]
 indexmap.workspace = true
-rusqlite.workspace = true
 tempfile.workspace = true
 
 [lints]

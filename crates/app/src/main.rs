@@ -1,4 +1,6 @@
 mod interaction;
+mod release_check;
+mod settings;
 
 use std::{
     collections::{HashSet, VecDeque},
@@ -11,7 +13,7 @@ use std::{
 use interaction::{CanvasInteraction, CanvasSubject, InteractionEffect, InteractionFrame};
 use not_news_agent::{
     AgentEvent, BridgeUpsert, ResearchHandle, ResearchLaunch, ResearchProcessEvent,
-    ResearchTermination, build_research_prompt,
+    ResearchTermination, build_research_prompt, hermes_is_available, open_hermes_dashboard,
 };
 use not_news_audio::{
     Recorder, SpeechEvent, SpeechSubmit, SpeechWorker, TranscriptionConfig, TranscriptionHandle,
@@ -31,12 +33,21 @@ use not_news_platform::{
     },
 };
 use unicode_segmentation::UnicodeSegmentation;
+use zeroize::{Zeroize, Zeroizing};
+
+use settings::{
+    GroqCredentialState, SettingsStore, UserSettings, delete_groq_api_key, groq_api_key,
+    groq_credential_state, save_groq_api_key,
+};
 
 const MAX_RESEARCH_CHARS: usize = 4_096;
 const MAX_RESEARCH_BYTES: usize = 16_384;
 const MAX_PREDICATE_CHARS: usize = 96;
 const MAX_PREDICATE_BYTES: usize = 384;
+const MAX_CREDENTIAL_CHARS: usize = 4_096;
+const MAX_CREDENTIAL_BYTES: usize = 16_384;
 const CURATION_RELATIONSHIPS_PER_PAGE: usize = 7;
+const HERMES_INSTALL_URL: &str = "https://hermes-agent.nousresearch.com";
 use not_news_renderer::{
     ChromeControl, Motion, RecordOrbState, SceneAnimation, SceneState, active_metadata_scroll_max,
     hit_active_metadata, hit_activity_surface, hit_activity_toggle, hit_curation_menu,
@@ -106,6 +117,25 @@ enum CurationChoice {
     NextPage,
 }
 
+enum SettingsFlow {
+    Menu {
+        groq: GroqCredentialState,
+        hermes_available: bool,
+    },
+    GroqKey {
+        input: Zeroizing<String>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum SettingsChoice {
+    CycleBackend,
+    GroqKey,
+    Hermes,
+    RemoveGroq,
+    Close,
+}
+
 impl VoiceState {
     fn is_idle(&self) -> bool {
         matches!(self, Self::Idle)
@@ -156,6 +186,10 @@ struct CanvasApplication {
     research_preedit: String,
     curation: Option<CurationFlow>,
     curation_preedit: String,
+    settings_store: SettingsStore,
+    user_settings: UserSettings,
+    settings: Option<SettingsFlow>,
+    settings_preedit: Zeroizing<String>,
     research: Option<ActiveResearch>,
     research_messages: Vec<String>,
     generated_research_events: HashSet<not_news_domain::EventId>,
@@ -166,6 +200,7 @@ struct CanvasApplication {
     record_hold_deadline: Option<Instant>,
     metadata_scroll_event: Option<EventId>,
     metadata_scroll: f64,
+    exit_after_present: bool,
 }
 
 impl CanvasApplication {
@@ -241,11 +276,21 @@ impl CanvasApplication {
         let data_directory = data_directory.unwrap_or_else(|| Path::new("."));
         let voice_directory = data_directory.join("voice-scratch");
         let speech = SpeechWorker::from_environment(voice_directory.join("synthesis"));
+        let settings_store = SettingsStore::new(data_directory);
+        let (user_settings, settings_error) = match settings_store.load() {
+            Ok(settings) => (settings, None),
+            Err(error) => (
+                UserSettings::default(),
+                Some(format!(
+                    "Saved capability settings were rejected; using AUTO for this run: {error}"
+                )),
+            ),
+        };
         Self {
             store,
             graph,
             interaction,
-            status,
+            status: status.or(settings_error),
             modifiers: ModifiersState::default(),
             operation_epoch: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -265,6 +310,10 @@ impl CanvasApplication {
             research_preedit: String::new(),
             curation: None,
             curation_preedit: String::new(),
+            settings_store,
+            user_settings,
+            settings: None,
+            settings_preedit: Zeroizing::new(String::new()),
             research: None,
             research_messages: Vec::new(),
             generated_research_events: HashSet::new(),
@@ -275,6 +324,7 @@ impl CanvasApplication {
             record_hold_deadline: None,
             metadata_scroll_event: None,
             metadata_scroll: 0.0,
+            exit_after_present: false,
         }
     }
 
@@ -295,6 +345,283 @@ impl CanvasApplication {
         let previous = std::mem::replace(&mut self.graph, outcome.snapshot);
         self.interaction
             .graph_committed(&previous, &self.graph, now);
+    }
+
+    fn settings_choices(&self) -> Vec<(SettingsChoice, String)> {
+        let Some(SettingsFlow::Menu {
+            groq,
+            hermes_available,
+        }) = self.settings.as_ref()
+        else {
+            return Vec::new();
+        };
+        let mut choices = vec![
+            (
+                SettingsChoice::CycleBackend,
+                format!(
+                    "RESEARCH BACKEND  ·  {}",
+                    self.user_settings.research_backend.label()
+                ),
+            ),
+            (
+                SettingsChoice::GroqKey,
+                format!("GROQ VOICE  ·  {}", groq.label()),
+            ),
+            (
+                SettingsChoice::Hermes,
+                if *hermes_available {
+                    "HERMES SETTINGS  ·  OPEN DASHBOARD".into()
+                } else {
+                    "HERMES  ·  INSTALL / CONFIGURE".into()
+                },
+            ),
+        ];
+        if matches!(groq, GroqCredentialState::Vault) {
+            choices.push((SettingsChoice::RemoveGroq, "REMOVE GROQ VAULT KEY".into()));
+        }
+        choices.push((SettingsChoice::Close, "CLOSE CONNECTIONS".into()));
+        choices
+    }
+
+    fn open_settings(&mut self, now: Instant) -> bool {
+        self.interaction.cancel_pointer();
+        self.pointer_owner = PointerOwner::ConsumedChrome;
+        self.research_input = None;
+        self.research_preedit.clear();
+        self.curation = None;
+        self.curation_preedit.clear();
+        let groq = groq_credential_state();
+        if let GroqCredentialState::Unavailable(detail) = &groq {
+            eprintln!("OS credential vault unavailable: {detail}");
+            self.status = Some(
+                "Groq voice needs Credential Manager, KWallet, or GNOME Keyring; reopen Connections after starting one."
+                    .into(),
+            );
+        }
+        self.settings = Some(SettingsFlow::Menu {
+            groq,
+            hermes_available: hermes_is_available(),
+        });
+        self.settings_preedit.zeroize();
+        self.interaction.cursor_left(now);
+        true
+    }
+
+    fn refresh_settings_menu(&mut self) {
+        self.settings = Some(SettingsFlow::Menu {
+            groq: groq_credential_state(),
+            hermes_available: hermes_is_available(),
+        });
+        self.settings_preedit.zeroize();
+    }
+
+    fn settings_anchor(&self) -> Point {
+        Point {
+            x: (self.physical_width * 0.5 - 170.0).max(12.0),
+            y: (self.physical_height * 0.18).max(72.0),
+        }
+    }
+
+    fn settings_menu_at_cursor(&self) -> Option<usize> {
+        let cursor = self.cursor?;
+        let count = self.settings_choices().len();
+        hit_curation_menu(
+            cursor,
+            self.physical_width,
+            self.physical_height,
+            self.scale_factor,
+            self.settings_anchor(),
+            count,
+        )
+    }
+
+    fn settings_left_press(&mut self) -> Option<bool> {
+        match self.settings.as_ref()? {
+            SettingsFlow::Menu { .. } => {
+                let Some(row) = self.settings_menu_at_cursor() else {
+                    self.settings = None;
+                    self.settings_preedit.zeroize();
+                    return Some(true);
+                };
+                Some(self.activate_settings_row(row))
+            }
+            SettingsFlow::GroqKey { .. } => Some(true),
+        }
+    }
+
+    fn activate_settings_row(&mut self, row: usize) -> bool {
+        let Some((choice, _)) = self.settings_choices().get(row).cloned() else {
+            return false;
+        };
+        match choice {
+            SettingsChoice::CycleBackend => {
+                let next = self.user_settings.research_backend.next();
+                let candidate = UserSettings {
+                    research_backend: next,
+                };
+                match self.settings_store.save(candidate) {
+                    Ok(()) => {
+                        self.user_settings = candidate;
+                        self.status = Some(format!(
+                            "Research routing is now {}; environment overrides still take precedence.",
+                            next.label()
+                        ));
+                    }
+                    Err(error) => {
+                        self.status = Some(format!("Research routing was not saved: {error}"));
+                    }
+                }
+                self.refresh_settings_menu();
+            }
+            SettingsChoice::GroqKey => {
+                self.settings = Some(SettingsFlow::GroqKey {
+                    input: Zeroizing::new(String::new()),
+                });
+                self.settings_preedit.zeroize();
+            }
+            SettingsChoice::Hermes => {
+                if hermes_is_available() {
+                    match open_hermes_dashboard() {
+                        Ok(()) => {
+                            self.status = Some(
+                                "Hermes owns provider, model, OAuth, and API-key configuration in the opened dashboard."
+                                    .into(),
+                            );
+                        }
+                        Err(error) => {
+                            self.status = Some(format!("Hermes dashboard did not open: {error}"));
+                        }
+                    }
+                } else {
+                    match open_external_url(HERMES_INSTALL_URL) {
+                        Ok(()) => {
+                            self.status = Some(
+                                "Opened the Hermes installation guide; return here after Hermes is on PATH."
+                                    .into(),
+                            );
+                        }
+                        Err(error) => {
+                            self.status =
+                                Some(format!("Hermes installation guide did not open: {error}"));
+                        }
+                    }
+                }
+                self.refresh_settings_menu();
+            }
+            SettingsChoice::RemoveGroq => {
+                match delete_groq_api_key() {
+                    Ok(()) => self.status = Some("Groq key removed from the OS vault.".into()),
+                    Err(error) => {
+                        self.status = Some(format!("Groq vault key was not removed: {error}"));
+                    }
+                }
+                self.refresh_settings_menu();
+            }
+            SettingsChoice::Close => {
+                self.settings = None;
+                self.settings_preedit.zeroize();
+            }
+        }
+        true
+    }
+
+    fn commit_groq_key(&mut self) -> bool {
+        let Some(SettingsFlow::GroqKey { mut input }) = self.settings.take() else {
+            return false;
+        };
+        match save_groq_api_key(input.as_str()) {
+            Ok(()) => {
+                self.status = Some(
+                    "Groq transcription key stored in the operating-system credential vault."
+                        .into(),
+                );
+            }
+            Err(error) => self.status = Some(format!("Groq key was not stored: {error}")),
+        }
+        input.zeroize();
+        self.refresh_settings_menu();
+        true
+    }
+
+    fn settings_keyboard_input(
+        &mut self,
+        event: &not_news_platform::winit::event::KeyEvent,
+    ) -> Option<bool> {
+        let menu = matches!(self.settings, Some(SettingsFlow::Menu { .. }));
+        let key_input = matches!(self.settings, Some(SettingsFlow::GroqKey { .. }));
+        if !menu && !key_input {
+            return None;
+        }
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            if key_input {
+                self.refresh_settings_menu();
+            } else {
+                self.settings = None;
+                self.settings_preedit.zeroize();
+            }
+            return Some(true);
+        }
+        let command = self.modifiers.control_key() || self.modifiers.super_key();
+        if menu
+            && !command
+            && !self.modifiers.alt_key()
+            && let Key::Character(key) = &event.logical_key
+            && let Some(row) = menu_row_from_key(key)
+        {
+            return Some(self.activate_settings_row(row));
+        }
+        if !key_input {
+            return Some(false);
+        }
+        if matches!(event.logical_key, Key::Named(NamedKey::Enter)) {
+            return Some(self.commit_groq_key());
+        }
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) {
+            if let Some(SettingsFlow::GroqKey { input }) = self.settings.as_mut() {
+                remove_last_grapheme(input);
+            }
+            return Some(true);
+        }
+        if command
+            && matches!(&event.logical_key, Key::Character(key) if key.eq_ignore_ascii_case("v"))
+        {
+            let result = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text());
+            return Some(match result {
+                Ok(text) => {
+                    let mut secret = Zeroizing::new(text);
+                    self.append_settings_text(secret.as_str());
+                    secret.zeroize();
+                    true
+                }
+                Err(error) => {
+                    self.status = Some(format!("Clipboard text is unavailable: {error}"));
+                    true
+                }
+            });
+        }
+        if command
+            && matches!(&event.logical_key, Key::Character(key) if key.eq_ignore_ascii_case("u"))
+        {
+            if let Some(SettingsFlow::GroqKey { input }) = self.settings.as_mut() {
+                input.zeroize();
+            }
+            self.settings_preedit.zeroize();
+            return Some(true);
+        }
+        if !command
+            && !self.modifiers.alt_key()
+            && let Some(text) = event.text.as_deref()
+        {
+            self.append_settings_text(text);
+            return Some(true);
+        }
+        Some(false)
+    }
+
+    fn append_settings_text(&mut self, text: &str) {
+        if let Some(SettingsFlow::GroqKey { input }) = self.settings.as_mut() {
+            append_bounded_secret(input, text);
+        }
     }
 
     fn curation_choices(
@@ -870,6 +1197,9 @@ impl CanvasApplication {
         if event.state != ElementState::Pressed {
             return false;
         }
+        if let Some(changed) = self.settings_keyboard_input(event) {
+            return changed;
+        }
         if let Some(changed) = self.curation_keyboard_input(event, now) {
             return changed;
         }
@@ -934,6 +1264,9 @@ impl CanvasApplication {
             return false;
         };
         let command = self.modifiers.control_key() || self.modifiers.super_key();
+        if command && character == "," {
+            return self.open_settings(now);
+        }
         if command && character.eq_ignore_ascii_case("e") {
             if self.open_curation_menu(now) {
                 return true;
@@ -984,6 +1317,26 @@ impl CanvasApplication {
     }
 
     fn ime_input(&mut self, ime: &Ime) -> bool {
+        if matches!(self.settings, Some(SettingsFlow::GroqKey { .. })) {
+            match ime {
+                Ime::Preedit(text, _) => {
+                    self.settings_preedit =
+                        Zeroizing::new(text.chars().take(MAX_CREDENTIAL_CHARS).collect());
+                    return true;
+                }
+                Ime::Commit(text) => {
+                    self.settings_preedit.zeroize();
+                    self.append_settings_text(text);
+                    return true;
+                }
+                Ime::Disabled => {
+                    let changed = !self.settings_preedit.is_empty();
+                    self.settings_preedit.zeroize();
+                    return changed;
+                }
+                Ime::Enabled => return false,
+            }
+        }
         if matches!(
             self.curation,
             Some(CurationFlow::RelatePredicate { .. } | CurationFlow::PromotePredicate { .. })
@@ -1161,8 +1514,10 @@ impl CanvasApplication {
     }
 
     fn start_recording(&mut self) -> bool {
-        if let Err(error) = TranscriptionConfig::from_environment() {
-            self.status = Some(format!("Voice research unavailable: {error}"));
+        if let Err(error) = Self::transcription_config() {
+            self.status = Some(format!(
+                "Voice research unavailable: {error}. Press Ctrl+, to configure Groq."
+            ));
             return true;
         }
         let recording_id = self.next_operation_id("voice");
@@ -1182,8 +1537,9 @@ impl CanvasApplication {
     fn finish_recording(&mut self, recorder: Recorder) -> bool {
         self.status = Some("Transcribing with Groq Whisper v3 Turbo...".into());
         let result = recorder.stop().and_then(|recording| {
-            let config = TranscriptionConfig::from_environment()?;
-            TranscriptionHandle::start(recording, config)
+            Self::transcription_config()
+                .map_err(|_| not_news_audio::AudioError::MissingApiKey)
+                .and_then(|config| TranscriptionHandle::start(recording, config))
         });
         match result {
             Ok(handle) => self.voice = VoiceState::Transcribing(handle),
@@ -1192,6 +1548,15 @@ impl CanvasApplication {
             }
         }
         true
+    }
+
+    fn transcription_config() -> Result<TranscriptionConfig, String> {
+        groq_api_key()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "no Groq API key is configured".to_owned())
+            .and_then(|key| {
+                TranscriptionConfig::from_api_key(key).map_err(|error| error.to_string())
+            })
     }
 
     fn cancel_voice(&mut self) -> bool {
@@ -1263,7 +1628,11 @@ impl CanvasApplication {
         }
         let prompt = build_research_prompt(question, &self.graph);
         let scratch_directory = self.research_directory.join(&session_id);
-        let launch = match ResearchLaunch::from_environment(&prompt, &scratch_directory) {
+        let launch = match ResearchLaunch::from_configuration(
+            &prompt,
+            &scratch_directory,
+            self.user_settings.research_backend.into(),
+        ) {
             Ok(launch) => launch,
             Err(error) => {
                 let _ = self
@@ -1729,7 +2098,9 @@ impl CanvasApplication {
         {
             self.record_hold_deadline = None;
         }
-        if matches!(self.pointer_owner, PointerOwner::Canvas) {
+        if self.settings.is_some() {
+            self.interaction.cursor_left(now)
+        } else if matches!(self.pointer_owner, PointerOwner::Canvas) {
             let changed = self.interaction.cursor_moved(point, &self.graph, now);
             self.stop_auto_follow_if_panning();
             changed
@@ -1745,6 +2116,10 @@ impl CanvasApplication {
 
     fn mouse_input(&mut self, state: ElementState, now: Instant) -> bool {
         if state == ElementState::Pressed {
+            if let Some(changed) = self.settings_left_press() {
+                self.pointer_owner = PointerOwner::ConsumedChrome;
+                return changed;
+            }
             if let Some(changed) = self.curation_left_press(now) {
                 self.pointer_owner = PointerOwner::ConsumedChrome;
                 return changed;
@@ -1799,6 +2174,10 @@ impl CanvasApplication {
     }
 
     fn right_mouse_input(&mut self, state: ElementState, now: Instant) -> bool {
+        if self.settings.is_some() {
+            self.pointer_owner = PointerOwner::ConsumedChrome;
+            return state == ElementState::Pressed;
+        }
         if state == ElementState::Pressed {
             self.pointer_owner = PointerOwner::ConsumedChrome;
             self.open_curation_menu(now)
@@ -1880,7 +2259,18 @@ impl CanvasApplication {
     }
 
     fn paint_composer(&self, canvas: &Canvas, width: f32, height: f32, scale_factor: f32) {
-        if let Some(CurationFlow::RelatePredicate { input, .. }) = self.curation.as_ref() {
+        if let Some(SettingsFlow::GroqKey { input }) = self.settings.as_ref() {
+            paint_curation_prompt(
+                canvas,
+                width,
+                height,
+                scale_factor,
+                "GROQ TRANSCRIPTION",
+                "ENTER STORE IN OS VAULT  ·  ESC BACK  ·  CTRL+V PASTE",
+                &masked_secret(input),
+                &masked_secret(&self.settings_preedit),
+            );
+        } else if let Some(CurationFlow::RelatePredicate { input, .. }) = self.curation.as_ref() {
             paint_curation_prompt(
                 canvas,
                 width,
@@ -1967,6 +2357,7 @@ impl CanvasApplication {
             viewport.zoom,
             self.record_orb_state(),
         );
+        self.paint_settings_surface(canvas, width, height, scale_factor);
     }
 
     fn paint_frame_layers(
@@ -2034,6 +2425,26 @@ impl CanvasApplication {
             .collect::<Vec<_>>();
         paint_curation_menu(canvas, width, height, scale_factor, *anchor, title, &items);
     }
+
+    fn paint_settings_surface(&self, canvas: &Canvas, width: f32, height: f32, scale_factor: f32) {
+        if !matches!(self.settings, Some(SettingsFlow::Menu { .. })) {
+            return;
+        }
+        let items = self
+            .settings_choices()
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        paint_curation_menu(
+            canvas,
+            width,
+            height,
+            scale_factor,
+            self.settings_anchor(),
+            "CONNECTIONS  ·  CTRL+,",
+            &items,
+        );
+    }
 }
 
 impl PlatformApplication for CanvasApplication {
@@ -2073,7 +2484,9 @@ impl PlatformApplication for CanvasApplication {
                 ..
             } => self.right_mouse_input(*state, now),
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.metadata_at_cursor() {
+                if self.settings.is_some() {
+                    false
+                } else if self.metadata_at_cursor() {
                     self.scroll_metadata(*delta)
                 } else if self.activity_surface_at_cursor(now) {
                     false
@@ -2091,10 +2504,12 @@ impl PlatformApplication for CanvasApplication {
             WindowEvent::Focused(false) => {
                 self.pointer_owner = PointerOwner::None;
                 self.record_hold_deadline = None;
-                let changed =
-                    !self.research_preedit.is_empty() || !self.curation_preedit.is_empty();
+                let changed = !self.research_preedit.is_empty()
+                    || !self.curation_preedit.is_empty()
+                    || !self.settings_preedit.is_empty();
                 self.research_preedit.clear();
                 self.curation_preedit.clear();
+                self.settings_preedit.zeroize();
                 self.interaction.cancel_pointer() || changed
             }
             _ => false,
@@ -2116,6 +2531,9 @@ impl PlatformApplication for CanvasApplication {
         self.sync_metadata_scroll(state.expanded_event.as_ref());
         let viewport = self.interaction.viewport();
         self.paint_frame_layers(canvas, frame, viewport, &state, activity_progress);
+        if self.exit_after_present {
+            return FrameSchedule::Exit;
+        }
         let interaction_deadline = self.interaction.next_deadline(frame.now);
         let research_deadline = self
             .research
@@ -2142,6 +2560,7 @@ impl PlatformApplication for CanvasApplication {
 
     fn text_input_active(&self) -> bool {
         self.research_input.is_some()
+            || matches!(self.settings, Some(SettingsFlow::GroqKey { .. }))
             || matches!(
                 self.curation,
                 Some(CurationFlow::RelatePredicate { .. } | CurationFlow::PromotePredicate { .. })
@@ -2151,6 +2570,28 @@ impl PlatformApplication for CanvasApplication {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = startup_options(std::env::args_os().skip(1))?;
+    if let Some(root) = options.release_smoke {
+        let check = release_check::run(&root)?;
+        let mut application = CanvasApplication::load(&check.database);
+        application.exit_after_present = true;
+        run(
+            application,
+            WindowOptions {
+                visible: false,
+                force_software: std::env::var_os("NOT_NEWS_FORCE_SOFTWARE").is_some(),
+                ..WindowOptions::default()
+            },
+        )?;
+        println!(
+            "{{\"release_self_check\":\"pass\",\"version\":\"{}\",\"commit\":\"{}\",\"events\":{},\"bridges\":{},\"revision\":{}}}",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("NOT_NEWS_BUILD_COMMIT").unwrap_or("development"),
+            check.imported_events,
+            check.imported_bridges,
+            check.final_revision,
+        );
+        return Ok(());
+    }
     let mut application = match options.database {
         Ok(database) => CanvasApplication::load(&database),
         Err(error) => CanvasApplication::unavailable(format!(
@@ -2167,6 +2608,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 struct StartupOptions {
     database: Result<PathBuf, std::io::Error>,
     import_legacy: Option<PathBuf>,
+    release_smoke: Option<PathBuf>,
 }
 
 fn startup_options(
@@ -2177,10 +2619,12 @@ fn startup_options(
         return Ok(StartupOptions {
             database: Ok(PathBuf::from(&arguments[0])),
             import_legacy: None,
+            release_smoke: None,
         });
     }
     let mut database = None;
     let mut import_legacy = None;
+    let mut release_smoke = None;
     let mut index = 0;
     while index < arguments.len() {
         let flag = &arguments[index];
@@ -2194,6 +2638,8 @@ fn startup_options(
             database = Some(PathBuf::from(value));
         } else if flag == "--import-legacy" && import_legacy.is_none() {
             import_legacy = Some(PathBuf::from(value));
+        } else if flag == "--release-self-check" && release_smoke.is_none() {
+            release_smoke = Some(PathBuf::from(value));
         } else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -2202,9 +2648,16 @@ fn startup_options(
         }
         index += 2;
     }
+    if release_smoke.is_some() && (database.is_some() || import_legacy.is_some()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--release-self-check is exclusive",
+        ));
+    }
     Ok(StartupOptions {
         database: database.map_or_else(default_database_path, Ok),
         import_legacy,
+        release_smoke,
     })
 }
 
@@ -2268,6 +2721,32 @@ fn append_bounded_predicate(input: &mut String, text: &str) {
         input.push(character);
         characters += 1;
     }
+}
+
+fn append_bounded_secret(input: &mut String, text: &str) {
+    let mut characters = input.chars().count();
+    for character in text.chars() {
+        if character.is_control() || character.is_whitespace() {
+            continue;
+        }
+        if characters >= MAX_CREDENTIAL_CHARS
+            || input.len() + character.len_utf8() > MAX_CREDENTIAL_BYTES
+        {
+            break;
+        }
+        input.push(character);
+        characters += 1;
+    }
+}
+
+fn masked_secret(secret: &str) -> String {
+    let length = secret.graphemes(true).count();
+    let visible = length.min(32);
+    let mut masked = "●".repeat(visible);
+    if length > visible {
+        masked.push('…');
+    }
+    masked
 }
 
 fn menu_text(value: &str, maximum: usize) -> String {

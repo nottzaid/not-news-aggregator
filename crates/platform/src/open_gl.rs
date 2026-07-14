@@ -21,7 +21,7 @@ use winit::{
     dpi::LogicalSize,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    window::{Window, WindowAttributes, WindowId},
+    window::{Icon, Window, WindowAttributes, WindowId},
 };
 
 use crate::{FrameInfo, FrameSchedule, PlatformApplication};
@@ -39,7 +39,7 @@ pub struct WindowOptions {
 impl Default for WindowOptions {
     fn default() -> Self {
         Self {
-            title: "Not News Aggregator".to_owned(),
+            title: "Not News".to_owned(),
             logical_width: 1_280.0,
             logical_height: 800.0,
             visible: true,
@@ -54,6 +54,8 @@ pub enum PlatformError {
     EventLoop(String),
     #[error("could not choose a native OpenGL configuration: {0}")]
     Display(String),
+    #[error("the embedded launcher icon is invalid: {0}")]
+    Icon(String),
     #[error("the display builder returned no native window")]
     MissingWindow,
     #[error("could not inspect the native window handle: {0}")]
@@ -98,13 +100,27 @@ pub fn run<A: PlatformApplication>(
     let event_loop =
         EventLoop::new().map_err(|error| PlatformError::EventLoop(error.to_string()))?;
     let render_on_resume = !options.visible;
+    let icon = Icon::from_rgba(
+        include_bytes!("../../../assets/icon/not-news-64.rgba").to_vec(),
+        64,
+        64,
+    )
+    .map_err(|error| PlatformError::Icon(error.to_string()))?;
     let attributes = WindowAttributes::default()
         .with_title(options.title)
         .with_inner_size(LogicalSize::new(
             options.logical_width,
             options.logical_height,
         ))
-        .with_visible(options.visible);
+        .with_visible(options.visible)
+        .with_window_icon(Some(icon));
+    #[cfg(target_os = "linux")]
+    let attributes = winit::platform::wayland::WindowAttributesExtWayland::with_name(
+        attributes, "not-news", "not-news",
+    );
+    #[cfg(target_os = "linux")]
+    let attributes =
+        winit::platform::x11::WindowAttributesExtX11::with_name(attributes, "not-news", "not-news");
     let template = ConfigTemplateBuilder::new().with_alpha_size(8);
     let display_builder = DisplayBuilder::new().with_window_attributes(Some(attributes));
     let (window, config) = display_builder

@@ -26,6 +26,25 @@ pub enum ResearchBackend {
     Hermes,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResearchBackendChoice {
+    #[default]
+    Auto,
+    OpenCode,
+    Hermes,
+}
+
+impl ResearchBackendChoice {
+    fn parse(value: &str) -> Result<Self, ResearchLaunchError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "opencode" => Ok(Self::OpenCode),
+            "hermes" => Ok(Self::Hermes),
+            other => Err(ResearchLaunchError::InvalidBackend(other.into())),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputProtocol {
     OpenCodeJson,
@@ -78,6 +97,55 @@ pub enum ResearchLaunchError {
     Scratch(#[source] io::Error),
 }
 
+#[derive(Debug, Error)]
+pub enum HermesDashboardError {
+    #[error("Hermes is not available on PATH")]
+    Missing,
+    #[error("Hermes dashboard could not start: {0}")]
+    Start(#[source] io::Error),
+    #[error("Hermes dashboard reaper could not start: {0}")]
+    Reaper(#[source] io::Error),
+}
+
+pub fn hermes_is_available() -> bool {
+    find_on_path("hermes").is_some()
+}
+
+/// Starts Hermes's own provider/model/credential dashboard. Not News never
+/// reads, mirrors, or narrows the provider registry that Hermes owns.
+///
+/// # Errors
+///
+/// Reports a missing executable, a failed dashboard spawn, or failure to
+/// create the process-reaping thread.
+pub fn open_hermes_dashboard() -> Result<(), HermesDashboardError> {
+    let program = find_on_path("hermes").ok_or(HermesDashboardError::Missing)?;
+    let mut command = hermes_dashboard_command(&program, hermes_profile_home());
+    let mut child = command.spawn().map_err(HermesDashboardError::Start)?;
+    thread::Builder::new()
+        .name("hermes-dashboard".into())
+        .spawn(move || {
+            if let Err(error) = child.wait() {
+                eprintln!("Hermes dashboard process could not be reaped: {error}");
+            }
+        })
+        .map_err(HermesDashboardError::Reaper)?;
+    Ok(())
+}
+
+fn hermes_dashboard_command(program: &Path, home: Option<OsString>) -> Command {
+    let mut command = Command::new(program);
+    command
+        .arg("dashboard")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(home) = home {
+        command.env("HERMES_HOME", home);
+    }
+    command
+}
+
 impl ResearchLaunch {
     /// Builds a launch from environment configuration without reading or
     /// copying credential files. Auto mode prefers the authenticated standalone
@@ -91,28 +159,43 @@ impl ResearchLaunch {
         prompt: &str,
         scratch_directory: impl Into<PathBuf>,
     ) -> Result<Self, ResearchLaunchError> {
+        Self::from_configuration(prompt, scratch_directory, ResearchBackendChoice::Auto)
+    }
+
+    /// Builds a launch from a persisted non-secret preference while retaining
+    /// `AI_NEWS_RESEARCH_BACKEND` as an explicit deployment override.
+    /// Hermes continues to own its provider, model, OAuth, and API-key choices.
+    ///
+    /// # Errors
+    ///
+    /// Rejects blank questions, unknown environment overrides, unavailable
+    /// selected executables, and an unusable scratch directory.
+    pub fn from_configuration(
+        prompt: &str,
+        scratch_directory: impl Into<PathBuf>,
+        fallback: ResearchBackendChoice,
+    ) -> Result<Self, ResearchLaunchError> {
         if prompt.trim().is_empty() {
             return Err(ResearchLaunchError::EmptyQuestion);
         }
         let requested = env::var("AI_NEWS_RESEARCH_BACKEND")
-            .unwrap_or_else(|_| "auto".into())
-            .to_lowercase();
-        let (backend, program) = match requested.as_str() {
-            "auto" => find_on_path("opencode")
+            .ok()
+            .map_or(Ok(fallback), |value| ResearchBackendChoice::parse(&value))?;
+        let (backend, program) = match requested {
+            ResearchBackendChoice::Auto => find_on_path("opencode")
                 .map(|path| (ResearchBackend::OpenCode, path))
                 .or_else(|| find_on_path("hermes").map(|path| (ResearchBackend::Hermes, path)))
                 .ok_or_else(|| ResearchLaunchError::MissingBackend("opencode or hermes".into()))?,
-            "opencode" => (
+            ResearchBackendChoice::OpenCode => (
                 ResearchBackend::OpenCode,
                 find_on_path("opencode")
                     .ok_or_else(|| ResearchLaunchError::MissingBackend("opencode".into()))?,
             ),
-            "hermes" => (
+            ResearchBackendChoice::Hermes => (
                 ResearchBackend::Hermes,
                 find_on_path("hermes")
                     .ok_or_else(|| ResearchLaunchError::MissingBackend("hermes".into()))?,
             ),
-            other => return Err(ResearchLaunchError::InvalidBackend(other.into())),
         };
         let scratch_directory = scratch_directory.into();
         fs::create_dir_all(&scratch_directory).map_err(ResearchLaunchError::Scratch)?;
@@ -168,8 +251,6 @@ impl ResearchLaunch {
     }
 
     fn hermes(program: PathBuf, prompt: &str, scratch_directory: PathBuf) -> Self {
-        let provider = env::var_os("HERMES_PROVIDER").unwrap_or_else(|| "opencode-go".into());
-        let model = env::var_os("HERMES_MODEL").unwrap_or_else(|| "mimo-v2.5-pro".into());
         let max_turns = env::var_os("HERMES_MAX_TURNS").unwrap_or_else(|| "12".into());
         let mut arguments = Vec::new();
         let mut environment = Vec::new();
@@ -179,14 +260,13 @@ impl ResearchLaunch {
             arguments.extend([OsString::from("--profile"), profile]);
         }
         environment.push((OsString::from("HERMES_MAX_ITERATIONS"), max_turns));
-        arguments.extend([
-            "--oneshot".into(),
-            prompt.into(),
-            "--provider".into(),
-            provider,
-            "--model".into(),
-            model,
-        ]);
+        arguments.extend(["--oneshot".into(), prompt.into()]);
+        if let Some(provider) = env::var_os("HERMES_PROVIDER").filter(|value| !value.is_empty()) {
+            arguments.extend([OsString::from("--provider"), provider]);
+        }
+        if let Some(model) = env::var_os("HERMES_MODEL").filter(|value| !value.is_empty()) {
+            arguments.extend([OsString::from("--model"), model]);
+        }
         Self {
             backend: ResearchBackend::Hermes,
             program,
@@ -783,6 +863,25 @@ mod tests {
                 .iter()
                 .any(|(name, value)| { name == "HERMES_MAX_ITERATIONS" && !value.is_empty() })
         );
+        assert!(
+            !launch
+                .arguments
+                .iter()
+                .any(|argument| argument == "--provider" || argument == "--model"),
+            "Hermes must use its own configured provider and model unless explicitly overridden"
+        );
+    }
+
+    #[test]
+    fn hermes_dashboard_keeps_credentials_inside_hermes() {
+        let command = hermes_dashboard_command(
+            Path::new("hermes"),
+            Some(OsString::from("/profiles/research")),
+        );
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["dashboard"]);
+        assert!(command.get_envs().any(|(name, value)| {
+            name == "HERMES_HOME" && value == Some(std::ffi::OsStr::new("/profiles/research"))
+        }));
     }
 
     #[cfg(unix)]

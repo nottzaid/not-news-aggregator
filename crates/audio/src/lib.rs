@@ -27,6 +27,7 @@ use ringbuf::{
 };
 use serde::Deserialize;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 const RING_SECONDS: usize = 2;
 const MAX_WAV_BYTES: u64 = 24 * 1_024 * 1_024;
@@ -432,7 +433,7 @@ impl Drop for RecordedAudio {
 
 /// Groq transcription settings. The API key is deliberately opaque to callers.
 pub struct TranscriptionConfig {
-    api_key: String,
+    api_key: Zeroizing<String>,
     endpoint: String,
     model: String,
 }
@@ -448,6 +449,19 @@ impl TranscriptionConfig {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .ok_or(AudioError::MissingApiKey)?;
+        Self::from_api_key(api_key)
+    }
+
+    /// Builds settings from a key retrieved from the operating-system vault.
+    /// The key is zeroed when the transcription job releases its configuration.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty key before any recording or network request begins.
+    pub fn from_api_key(api_key: String) -> Result<Self, AudioError> {
+        if api_key.trim().is_empty() {
+            return Err(AudioError::MissingApiKey);
+        }
         let model = env::var("STT_GROQ_MODEL")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -458,7 +472,7 @@ impl TranscriptionConfig {
             })
             .unwrap_or_else(|| DEFAULT_MODEL.into());
         Ok(Self {
-            api_key,
+            api_key: Zeroizing::new(api_key),
             endpoint: DEFAULT_ENDPOINT.into(),
             model,
         })
@@ -557,7 +571,7 @@ fn transcribe(
         .map_err(|error| AudioError::BuildClient(error.to_string()))?;
     let response = client
         .post(&config.endpoint)
-        .bearer_auth(&config.api_key)
+        .bearer_auth(config.api_key.as_str())
         .header(reqwest::header::ACCEPT, "application/json")
         .multipart(form)
         .send()
@@ -716,7 +730,7 @@ mod tests {
         let handle = TranscriptionHandle::start(
             recording,
             TranscriptionConfig {
-                api_key: "test-secret".into(),
+                api_key: String::from("test-secret").into(),
                 endpoint,
                 model: DEFAULT_MODEL.into(),
             },
