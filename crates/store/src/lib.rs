@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 use not_news_domain::{
-    BridgeId, EventBridge, EventId, GraphSnapshot, MoveNodeError, Placement, Point, Provenance,
-    ResearchEvent, SnapshotError, SourceArtifact,
+    BridgeId, CurationCommandError, EventBridge, EventId, GraphSnapshot, MoveNodeError, Placement,
+    Point, Provenance, ResearchEvent, SnapshotError, SourceArtifact,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
@@ -326,6 +326,20 @@ pub enum StoreError {
     ResearchSelfLoop(EventId),
     #[error("graph revision overflow")]
     RevisionOverflow,
+    #[error("graph changed: expected revision {expected}, found {actual}")]
+    GraphRevisionConflict { expected: u64, actual: u64 },
+    #[error("curation endpoint {0:?} does not exist")]
+    MissingCurationEndpoint(EventId),
+    #[error("curation relationship {0:?} does not exist")]
+    MissingCurationBridge(BridgeId),
+    #[error("curation would relate {0:?} to itself")]
+    CurationSelfLoop(EventId),
+    #[error("curation identity {0:?} is already occupied")]
+    CurationIdentityCollision(String),
+    #[error("source artifact {0:?} does not exist on the selected event")]
+    MissingArtifact(String),
+    #[error(transparent)]
+    CurationCommand(#[from] CurationCommandError),
     #[error(transparent)]
     Move(#[from] MoveNodeError),
     #[error("duplicate event ID")]

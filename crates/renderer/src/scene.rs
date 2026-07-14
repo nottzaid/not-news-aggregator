@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap, hash::BuildHasher};
 use not_news_domain::{EventId, GraphSnapshot, Point as WorldPoint};
 use skia_safe::{
     BlurStyle, Canvas, Color4f, FontArguments, FontMgr, FontStyle, Paint, PaintCap, PaintStyle,
-    Path, PathBuilder, PathMeasure, Point, Rect, TileMode,
+    Path, PathBuilder, PathEffect, Point, Rect, TileMode,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     gradient::{Colors, Gradient, Interpolation, shaders},
     textlayout::{
@@ -675,21 +675,12 @@ fn bridge_control(from: WorldPoint, to: WorldPoint) -> WorldPoint {
 }
 
 fn draw_dashed_path(canvas: &Canvas, path: &Path, paint: &Paint, phase: f32) {
-    let interval = BRIDGE_DASH + BRIDGE_GAP;
-    let mut measure = PathMeasure::new(path, false, None);
-    let length = measure.length();
-    let mut distance = -(phase % interval);
-    while distance < length {
-        let start = distance.max(0.0);
-        let end = (distance + BRIDGE_DASH).min(length);
-        if end > start {
-            let mut segment = PathBuilder::new();
-            if measure.get_segment(start, end, &mut segment, true) {
-                canvas.draw_path(&segment.detach(), paint);
-            }
-        }
-        distance += interval;
-    }
+    let mut dashed = paint.clone();
+    dashed.set_path_effect(PathEffect::dash(
+        &[BRIDGE_DASH, BRIDGE_GAP],
+        phase % (BRIDGE_DASH + BRIDGE_GAP),
+    ));
+    canvas.draw_path(path, &dashed);
 }
 
 fn point(value: WorldPoint) -> Point {

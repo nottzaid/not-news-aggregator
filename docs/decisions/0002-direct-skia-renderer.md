@@ -69,6 +69,10 @@ winit events ──→ interaction/state ──→ immutable scene ──→ Ski
 - Cache static Skia pictures/text/path geometry and compute scene damage. A
   pointer move invalidates only the old/new dynamic bounds unless an active
   whole-scene effect demonstrably requires more.
+- Retain settled collision layouts and draw flowing dashes through Skia's
+  native path effect. Motion clocks, layer order, and Flutter raster budgets
+  remain optimization invariants; a cache that changes a presented frame is
+  invalid regardless of measured gain.
 - Bundle Manrope and JetBrains Mono. Never rely on host font discovery for
   compatibility rendering.
 - Use cache-supported rust-skia features in normal builds. CI verifies both a

@@ -1,6 +1,7 @@
 # ADR 0004: Commit placement with an append-only reversible log
 
-- Status: accepted
+- Status: accepted for placement concurrency and schema-v1 migration; history
+  topology superseded by ADR 0011
 - Date: 2026-07-14
 - Governs: local graph mutation, compatibility migration, undo/redo, crash and
   concurrency behavior

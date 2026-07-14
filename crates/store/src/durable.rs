@@ -5,14 +5,20 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use not_news_domain::{EventId, GraphSnapshot, MoveNode, Placement, Point, RestorePlacement};
+use not_news_domain::{
+    BridgeId, DetachRelationship, EventBridge, EventId, GraphSnapshot, MoveNode, Placement, Point,
+    PromoteArtifact, Provenance, RelateEvents, ResearchEvent, RestorePlacement, SourceArtifact,
+    normalize_predicate,
+};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
+use serde::{Deserialize, Serialize};
 
+use crate::research::normalize_url;
 use crate::{StoreError, load_snapshot, table_exists};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Clone, Debug)]
 pub struct CommitOutcome {
@@ -79,8 +85,8 @@ impl DurableGraphStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(existing) = mutation_by_operation(&transaction, operation_id)? {
             if existing.kind != MutationKind::Move
-                || existing.event != command.event_id
-                || existing.expected_version != command.expected_placement_version
+                || existing.event.as_ref() != Some(&command.event_id)
+                || existing.expected_version != Some(command.expected_placement_version)
                 || existing.next.map(|placement| placement.point) != Some(command.destination)
             {
                 return Err(StoreError::IdempotencyConflict(operation_id.to_owned()));
@@ -113,7 +119,211 @@ impl DurableGraphStore {
         })
     }
 
-    /// Reverses the latest effective move/redo and appends the inverse to the
+    /// Creates one explicitly identified semantic relationship.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale revisions, missing or identical endpoints, invalid
+    /// predicates, identity collisions, contradictory retries, and failed
+    /// transactions without changing the graph.
+    pub fn commit_relation(
+        &self,
+        operation_id: &str,
+        command: &RelateEvents,
+    ) -> Result<CommitOutcome, StoreError> {
+        validate_operation_id(operation_id)?;
+        let request = serde_json::to_string(command)?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = mutation_by_operation(&transaction, operation_id)? {
+            return retry_semantic(
+                transaction,
+                &existing,
+                operation_id,
+                MutationKind::Relate,
+                &request,
+            );
+        }
+        let graph = load_snapshot(&transaction)?;
+        require_revision(&graph, command.expected_revision)?;
+        let from = resolve_graph_event(&graph, &command.from)?;
+        let to = resolve_graph_event(&graph, &command.to)?;
+        if from == to {
+            return Err(StoreError::CurationSelfLoop(from));
+        }
+        if graph.bridges.contains_key(&command.bridge_id) {
+            return Err(StoreError::CurationIdentityCollision(
+                command.bridge_id.0.clone(),
+            ));
+        }
+        let bridge = EventBridge {
+            id: command.bridge_id.clone(),
+            from,
+            to,
+            label: normalize_predicate(&command.predicate)?,
+            provenance: command.provenance,
+        };
+        let transition = SemanticTransition {
+            prior: SemanticState::bridge(command.bridge_id.clone(), None),
+            next: SemanticState::bridge(command.bridge_id.clone(), Some(bridge)),
+        };
+        commit_semantic_transition(
+            transaction,
+            operation_id,
+            MutationKind::Relate,
+            &request,
+            graph,
+            &transition,
+        )
+    }
+
+    /// Removes exactly one explicitly identified relationship.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale revisions, absent bridges, contradictory retries, and
+    /// failed transactions without inferring any proximity-based scope.
+    pub fn commit_detachment(
+        &self,
+        operation_id: &str,
+        command: &DetachRelationship,
+    ) -> Result<CommitOutcome, StoreError> {
+        validate_operation_id(operation_id)?;
+        let request = serde_json::to_string(command)?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = mutation_by_operation(&transaction, operation_id)? {
+            return retry_semantic(
+                transaction,
+                &existing,
+                operation_id,
+                MutationKind::Detach,
+                &request,
+            );
+        }
+        let graph = load_snapshot(&transaction)?;
+        require_revision(&graph, command.expected_revision)?;
+        let bridge = graph
+            .bridges
+            .get(&command.bridge_id)
+            .cloned()
+            .ok_or_else(|| StoreError::MissingCurationBridge(command.bridge_id.clone()))?;
+        let transition = SemanticTransition {
+            prior: SemanticState::bridge(command.bridge_id.clone(), Some(bridge)),
+            next: SemanticState::bridge(command.bridge_id.clone(), None),
+        };
+        commit_semantic_transition(
+            transaction,
+            operation_id,
+            MutationKind::Detach,
+            &request,
+            graph,
+            &transition,
+        )
+    }
+
+    /// Promotes one named artifact into a first-class event or an alias to an
+    /// existing event with the same canonical primary URL. An optional explicit
+    /// relationship commits in the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale revisions, missing artifacts, identity collisions,
+    /// self-relations, contradictory retries, invalid predicates, and partial
+    /// persistence.
+    pub fn commit_artifact_promotion(
+        &self,
+        operation_id: &str,
+        command: &PromoteArtifact,
+    ) -> Result<CommitOutcome, StoreError> {
+        validate_operation_id(operation_id)?;
+        let request = serde_json::to_string(command)?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = mutation_by_operation(&transaction, operation_id)? {
+            return retry_semantic(
+                transaction,
+                &existing,
+                operation_id,
+                MutationKind::Promote,
+                &request,
+            );
+        }
+        let graph = load_snapshot(&transaction)?;
+        require_revision(&graph, command.expected_revision)?;
+        let source_id = resolve_graph_event(&graph, &command.source_event)?;
+        let source = &graph.events[&source_id];
+        let artifact_key = normalize_url(&command.artifact_url);
+        let artifact = source
+            .artifacts
+            .iter()
+            .find(|artifact| normalize_url(&artifact.url) == artifact_key)
+            .cloned()
+            .ok_or_else(|| StoreError::MissingArtifact(command.artifact_url.clone()))?;
+        if graph.events.contains_key(&command.promoted_id)
+            || graph.aliases.contains_key(&command.promoted_id)
+        {
+            return Err(StoreError::CurationIdentityCollision(
+                command.promoted_id.0.clone(),
+            ));
+        }
+
+        let canonical = graph
+            .events
+            .values()
+            .find(|event| {
+                event
+                    .url
+                    .as_deref()
+                    .is_some_and(|url| normalize_url(url) == artifact_key)
+            })
+            .map(|event| event.id.clone());
+        let mut prior = SemanticState::default();
+        let mut next = SemanticState::default();
+        let canonical = if let Some(canonical) = canonical {
+            prior.aliases.push((command.promoted_id.clone(), None));
+            next.aliases
+                .push((command.promoted_id.clone(), Some(canonical.clone())));
+            canonical
+        } else {
+            let promoted = promoted_event(command, source, &artifact)?;
+            prior.events.push((promoted.id.clone(), None));
+            next.events
+                .push((promoted.id.clone(), Some(promoted.clone())));
+            promoted.id
+        };
+
+        if let Some(relation) = &command.relation {
+            if source_id == canonical {
+                return Err(StoreError::CurationSelfLoop(source_id));
+            }
+            if graph.bridges.contains_key(&relation.bridge_id) {
+                return Err(StoreError::CurationIdentityCollision(
+                    relation.bridge_id.0.clone(),
+                ));
+            }
+            let bridge = EventBridge {
+                id: relation.bridge_id.clone(),
+                from: source_id,
+                to: canonical,
+                label: normalize_predicate(&relation.predicate)?,
+                provenance: Provenance::User,
+            };
+            prior.bridges.push((relation.bridge_id.clone(), None));
+            next.bridges
+                .push((relation.bridge_id.clone(), Some(bridge)));
+        }
+        commit_semantic_transition(
+            transaction,
+            operation_id,
+            MutationKind::Promote,
+            &request,
+            graph,
+            &SemanticTransition { prior, next },
+        )
+    }
+
+    /// Reverses the latest effective graph command/redo and appends the inverse to the
     /// immutable mutation log. Returns `None` when nothing is undoable.
     ///
     /// # Errors
@@ -124,7 +334,7 @@ impl DurableGraphStore {
         self.apply_history(operation_id, MutationKind::Undo)
     }
 
-    /// Reapplies the latest effective undo unless a later move cleared its
+    /// Reapplies the latest effective undo unless a later command cleared its
     /// branch. Returns `None` when nothing is redoable.
     ///
     /// # Errors
@@ -301,7 +511,7 @@ impl DurableGraphStore {
         let target_sequence = match kind {
             MutationKind::Undo => history.undo.last(),
             MutationKind::Redo => history.redo.last(),
-            MutationKind::Move => unreachable!("history only applies undo or redo"),
+            _ => unreachable!("history only applies undo or redo"),
         };
         let Some(&target_sequence) = target_sequence else {
             transaction.commit()?;
@@ -310,36 +520,60 @@ impl DurableGraphStore {
         let target = mutation_by_sequence(&transaction, target_sequence)?
             .ok_or(StoreError::HistoryConflict)?;
         let mut graph = load_snapshot(&transaction)?;
-        let actual_version = graph
-            .placement_versions
-            .get(&target.event)
-            .copied()
-            .unwrap_or_default();
-        let current = graph.placements.get(&target.event).copied();
-        if actual_version != target.committed_version || current != target.next {
+        if target.revision > graph.revision {
             return Err(StoreError::HistoryConflict);
         }
-        let desired = target.prior;
-        let revision = graph.restore_placement(&RestorePlacement {
-            event_id: target.event.clone(),
-            previous: desired,
-            expected_placement_version: actual_version,
-        })?;
-        persist_graph_transition(&transaction, &graph, &target.event)?;
-        let sequence = append_mutation(
-            &transaction,
-            NewMutation {
-                operation_id,
-                kind,
-                target_sequence: Some(target.sequence),
-                event: &target.event,
-                prior: current,
-                next: desired,
-                expected_version: actual_version,
-                committed_version: actual_version + 1,
-                revision,
-            },
-        )?;
+        let sequence = if let Some(transition) = target.semantic.as_ref() {
+            let inverse = transition.reversed();
+            let revision = inverse.apply(&mut graph)?;
+            persist_semantic_transition(&transaction, &graph, &inverse.next)?;
+            append_semantic_mutation(
+                &transaction,
+                NewSemanticMutation {
+                    operation_id,
+                    kind,
+                    target_sequence: Some(target.sequence),
+                    request_json: None,
+                    transition: &inverse,
+                    revision,
+                },
+            )?
+        } else {
+            let event = target.event.as_ref().ok_or(StoreError::HistoryConflict)?;
+            let expected_version = target
+                .committed_version
+                .ok_or(StoreError::HistoryConflict)?;
+            let actual_version = graph
+                .placement_versions
+                .get(event)
+                .copied()
+                .unwrap_or_default();
+            let current = graph.placements.get(event).copied();
+            if actual_version != expected_version || current != target.next {
+                return Err(StoreError::HistoryConflict);
+            }
+            let desired = target.prior;
+            let revision = graph.restore_placement(&RestorePlacement {
+                event_id: event.clone(),
+                previous: desired,
+                expected_placement_version: actual_version,
+            })?;
+            persist_graph_transition(&transaction, &graph, event)?;
+            append_mutation(
+                &transaction,
+                NewMutation {
+                    operation_id,
+                    kind,
+                    target_sequence: Some(target.sequence),
+                    event,
+                    prior: current,
+                    next: desired,
+                    expected_version: actual_version,
+                    committed_version: actual_version + 1,
+                    revision,
+                },
+            )?
+        };
         transaction.commit()?;
         Ok(Some(CommitOutcome {
             sequence,
@@ -386,6 +620,9 @@ fn migrate(connection: &mut Connection, path: &Path) -> Result<Option<PathBuf>, 
     }
     if version <= 2 {
         install_schema_v3(&transaction)?;
+    }
+    if version <= 3 {
+        install_schema_v4(&transaction)?;
     }
     transaction.commit()?;
     Ok(backup)
@@ -498,6 +735,61 @@ fn install_schema_v3(connection: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn install_schema_v4(connection: &Connection) -> Result<(), StoreError> {
+    connection.execute_batch(
+        r"
+        ALTER TABLE mutation_log RENAME TO mutation_log_v3;
+        CREATE TABLE mutation_log (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation_id TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL CHECK (kind IN (
+                'move', 'relate', 'detach', 'promote', 'undo', 'redo'
+            )),
+            target_sequence INTEGER,
+            event_id TEXT,
+            prior_x REAL,
+            prior_y REAL,
+            prior_pinned INTEGER,
+            next_x REAL,
+            next_y REAL,
+            next_pinned INTEGER,
+            expected_version INTEGER CHECK (expected_version >= 0),
+            committed_version INTEGER,
+            revision INTEGER NOT NULL CHECK (revision >= 0),
+            request_json TEXT,
+            prior_json TEXT,
+            next_json TEXT,
+            CHECK ((prior_x IS NULL) = (prior_y IS NULL)),
+            CHECK ((prior_x IS NULL) = (prior_pinned IS NULL)),
+            CHECK ((next_x IS NULL) = (next_y IS NULL)),
+            CHECK ((next_x IS NULL) = (next_pinned IS NULL)),
+            CHECK (
+                (event_id IS NOT NULL AND expected_version IS NOT NULL AND
+                 committed_version > expected_version AND prior_json IS NULL AND
+                 next_json IS NULL)
+                OR
+                (event_id IS NULL AND expected_version IS NULL AND
+                 committed_version IS NULL AND prior_json IS NOT NULL AND
+                 next_json IS NOT NULL)
+            ),
+            FOREIGN KEY (target_sequence) REFERENCES mutation_log(sequence)
+        );
+        INSERT INTO mutation_log (
+            sequence, operation_id, kind, target_sequence, event_id,
+            prior_x, prior_y, prior_pinned, next_x, next_y, next_pinned,
+            expected_version, committed_version, revision
+        )
+        SELECT sequence, operation_id, kind, target_sequence, event_id,
+            prior_x, prior_y, prior_pinned, next_x, next_y, next_pinned,
+            expected_version, committed_version, revision
+        FROM mutation_log_v3 ORDER BY sequence;
+        DROP TABLE mutation_log_v3;
+        PRAGMA user_version = 4;
+        ",
+    )?;
+    Ok(())
+}
+
 fn ensure_verified_backup(source_path: &Path, backup: &Path) -> Result<(), StoreError> {
     if backup.exists() {
         return verify_backup(backup);
@@ -550,6 +842,9 @@ fn temporary_backup_path(path: &Path) -> PathBuf {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MutationKind {
     Move,
+    Relate,
+    Detach,
+    Promote,
     Undo,
     Redo,
 }
@@ -558,6 +853,9 @@ impl MutationKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Move => "move",
+            Self::Relate => "relate",
+            Self::Detach => "detach",
+            Self::Promote => "promote",
             Self::Undo => "undo",
             Self::Redo => "redo",
         }
@@ -566,9 +864,112 @@ impl MutationKind {
     fn parse(value: &str) -> Result<Self, StoreError> {
         match value {
             "move" => Ok(Self::Move),
+            "relate" => Ok(Self::Relate),
+            "detach" => Ok(Self::Detach),
+            "promote" => Ok(Self::Promote),
             "undo" => Ok(Self::Undo),
             "redo" => Ok(Self::Redo),
             _ => Err(StoreError::HistoryConflict),
+        }
+    }
+
+    fn is_action(self) -> bool {
+        matches!(
+            self,
+            Self::Move | Self::Relate | Self::Detach | Self::Promote
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SemanticState {
+    events: Vec<(EventId, Option<ResearchEvent>)>,
+    bridges: Vec<(BridgeId, Option<EventBridge>)>,
+    aliases: Vec<(EventId, Option<EventId>)>,
+}
+
+impl SemanticState {
+    fn bridge(id: BridgeId, value: Option<EventBridge>) -> Self {
+        Self {
+            bridges: vec![(id, value)],
+            ..Self::default()
+        }
+    }
+
+    fn matches(&self, graph: &GraphSnapshot) -> bool {
+        self.events
+            .iter()
+            .all(|(id, value)| graph.events.get(id) == value.as_ref())
+            && self
+                .bridges
+                .iter()
+                .all(|(id, value)| graph.bridges.get(id) == value.as_ref())
+            && self
+                .aliases
+                .iter()
+                .all(|(id, value)| graph.aliases.get(id) == value.as_ref())
+    }
+
+    fn apply(&self, graph: &mut GraphSnapshot) {
+        for (id, value) in &self.events {
+            set_entry(&mut graph.events, id, value.as_ref());
+            if value.is_none() {
+                graph.placements.shift_remove(id);
+                graph.placement_versions.shift_remove(id);
+            }
+        }
+        for (id, value) in &self.bridges {
+            set_entry(&mut graph.bridges, id, value.as_ref());
+        }
+        for (id, value) in &self.aliases {
+            set_entry(&mut graph.aliases, id, value.as_ref());
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SemanticTransition {
+    prior: SemanticState,
+    next: SemanticState,
+}
+
+impl SemanticTransition {
+    fn reversed(&self) -> Self {
+        Self {
+            prior: self.next.clone(),
+            next: self.prior.clone(),
+        }
+    }
+
+    fn apply(&self, graph: &mut GraphSnapshot) -> Result<u64, StoreError> {
+        if !self.prior.matches(graph) {
+            return Err(StoreError::HistoryConflict);
+        }
+        let mut candidate = graph.clone();
+        self.next.apply(&mut candidate);
+        candidate.revision = candidate
+            .revision
+            .checked_add(1)
+            .ok_or(StoreError::RevisionOverflow)?;
+        candidate.validate()?;
+        let revision = candidate.revision;
+        *graph = candidate;
+        Ok(revision)
+    }
+}
+
+fn set_entry<K, V>(map: &mut indexmap::IndexMap<K, V>, key: &K, value: Option<&V>)
+where
+    K: Clone + Eq + std::hash::Hash,
+    V: Clone,
+{
+    match value {
+        Some(value) => {
+            map.insert(key.clone(), value.clone());
+        }
+        None => {
+            map.shift_remove(key);
         }
     }
 }
@@ -578,11 +979,14 @@ struct Mutation {
     sequence: i64,
     kind: MutationKind,
     _target_sequence: Option<i64>,
-    event: EventId,
+    event: Option<EventId>,
     prior: Option<Placement>,
     next: Option<Placement>,
-    expected_version: u64,
-    committed_version: u64,
+    expected_version: Option<u64>,
+    committed_version: Option<u64>,
+    revision: u64,
+    request_json: Option<String>,
+    semantic: Option<SemanticTransition>,
 }
 
 #[derive(Clone, Copy)]
@@ -605,7 +1009,8 @@ fn mutation_by_operation(
     query_mutation(
         connection,
         "SELECT sequence, kind, target_sequence, event_id, prior_x, prior_y, prior_pinned, \
-         next_x, next_y, next_pinned, expected_version, committed_version \
+         next_x, next_y, next_pinned, expected_version, committed_version, request_json, \
+         prior_json, next_json, revision \
          FROM mutation_log WHERE operation_id = ?1",
         rusqlite::params![operation_id],
     )
@@ -618,7 +1023,8 @@ fn mutation_by_sequence(
     query_mutation(
         connection,
         "SELECT sequence, kind, target_sequence, event_id, prior_x, prior_y, prior_pinned, \
-         next_x, next_y, next_pinned, expected_version, committed_version \
+         next_x, next_y, next_pinned, expected_version, committed_version, request_json, \
+         prior_json, next_json, revision \
          FROM mutation_log WHERE sequence = ?1",
         rusqlite::params![sequence],
     )
@@ -632,22 +1038,45 @@ fn query_mutation<P: rusqlite::Params>(
     connection
         .query_row(sql, parameters, |row| {
             let kind: String = row.get(1)?;
-            let expected: i64 = row.get(10)?;
-            let committed: i64 = row.get(11)?;
             Ok((
                 row.get(0)?,
                 kind,
                 row.get(2)?,
-                EventId(row.get(3)?),
+                row.get::<_, Option<String>>(3)?.map(EventId),
                 placement_from_columns(row, 4)?,
                 placement_from_columns(row, 7)?,
-                expected,
-                committed,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, Option<i64>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, Option<String>>(14)?,
+                row.get::<_, i64>(15)?,
             ))
         })
         .optional()?
         .map(
-            |(sequence, kind, target_sequence, event, prior, next, expected, committed)| {
+            |(
+                sequence,
+                kind,
+                target_sequence,
+                event,
+                prior,
+                next,
+                expected,
+                committed,
+                request_json,
+                prior_json,
+                next_json,
+                revision,
+            )| {
+                let semantic = match (prior_json, next_json) {
+                    (Some(prior), Some(next)) => Some(SemanticTransition {
+                        prior: serde_json::from_str(&prior)?,
+                        next: serde_json::from_str(&next)?,
+                    }),
+                    (None, None) => None,
+                    _ => return Err(StoreError::HistoryConflict),
+                };
                 Ok(Mutation {
                     sequence,
                     kind: MutationKind::parse(&kind)?,
@@ -655,14 +1084,110 @@ fn query_mutation<P: rusqlite::Params>(
                     event,
                     prior,
                     next,
-                    expected_version: u64::try_from(expected)
-                        .map_err(|_| StoreError::HistoryConflict)?,
-                    committed_version: u64::try_from(committed)
-                        .map_err(|_| StoreError::HistoryConflict)?,
+                    expected_version: expected
+                        .map(|value| u64::try_from(value).map_err(|_| StoreError::HistoryConflict))
+                        .transpose()?,
+                    committed_version: committed
+                        .map(|value| u64::try_from(value).map_err(|_| StoreError::HistoryConflict))
+                        .transpose()?,
+                    revision: u64::try_from(revision).map_err(|_| StoreError::HistoryConflict)?,
+                    request_json,
+                    semantic,
                 })
             },
         )
         .transpose()
+}
+
+fn retry_semantic(
+    transaction: Transaction<'_>,
+    existing: &Mutation,
+    operation_id: &str,
+    expected_kind: MutationKind,
+    request: &str,
+) -> Result<CommitOutcome, StoreError> {
+    if existing.kind != expected_kind
+        || existing.request_json.as_deref() != Some(request)
+        || existing.semantic.is_none()
+    {
+        return Err(StoreError::IdempotencyConflict(operation_id.to_owned()));
+    }
+    outcome_and_commit(transaction, existing.sequence)
+}
+
+fn require_revision(graph: &GraphSnapshot, expected: u64) -> Result<(), StoreError> {
+    if graph.revision == expected {
+        Ok(())
+    } else {
+        Err(StoreError::GraphRevisionConflict {
+            expected,
+            actual: graph.revision,
+        })
+    }
+}
+
+fn resolve_graph_event(graph: &GraphSnapshot, id: &EventId) -> Result<EventId, StoreError> {
+    if graph.events.contains_key(id) {
+        return Ok(id.clone());
+    }
+    graph
+        .aliases
+        .get(id)
+        .filter(|canonical| graph.events.contains_key(*canonical))
+        .cloned()
+        .ok_or_else(|| StoreError::MissingCurationEndpoint(id.clone()))
+}
+
+fn promoted_event(
+    command: &PromoteArtifact,
+    source: &ResearchEvent,
+    artifact: &SourceArtifact,
+) -> Result<ResearchEvent, StoreError> {
+    let event = ResearchEvent {
+        id: command.promoted_id.clone(),
+        title: artifact.text.trim().to_owned(),
+        date: command.date.trim().to_owned(),
+        color: source.color,
+        summary: format!("Promoted evidence from {}.", source.title.trim()),
+        source_label: artifact.source.trim().to_owned(),
+        artifacts: Vec::new(),
+        url: Some(artifact.url.trim().to_owned()),
+    };
+    let mut candidate = GraphSnapshot::default();
+    candidate.events.insert(event.id.clone(), event.clone());
+    candidate.validate()?;
+    Ok(event)
+}
+
+fn commit_semantic_transition(
+    transaction: Transaction<'_>,
+    operation_id: &str,
+    kind: MutationKind,
+    request: &str,
+    mut graph: GraphSnapshot,
+    transition: &SemanticTransition,
+) -> Result<CommitOutcome, StoreError> {
+    if !kind.is_action() || kind == MutationKind::Move {
+        return Err(StoreError::HistoryConflict);
+    }
+    let revision = transition.apply(&mut graph)?;
+    persist_semantic_transition(&transaction, &graph, &transition.next)?;
+    let sequence = append_semantic_mutation(
+        &transaction,
+        NewSemanticMutation {
+            operation_id,
+            kind,
+            target_sequence: None,
+            request_json: Some(request),
+            transition,
+            revision,
+        },
+    )?;
+    transaction.commit()?;
+    Ok(CommitOutcome {
+        sequence,
+        snapshot: graph,
+    })
 }
 
 fn placement_from_columns(
@@ -704,6 +1229,36 @@ fn append_mutation(connection: &Connection, mutation: NewMutation<'_>) -> Result
             to_sql_counter(mutation.expected_version)?,
             to_sql_counter(mutation.committed_version)?,
             to_sql_counter(mutation.revision)?,
+        ],
+    )?;
+    Ok(connection.last_insert_rowid())
+}
+
+#[derive(Clone, Copy)]
+struct NewSemanticMutation<'a> {
+    operation_id: &'a str,
+    kind: MutationKind,
+    target_sequence: Option<i64>,
+    request_json: Option<&'a str>,
+    transition: &'a SemanticTransition,
+    revision: u64,
+}
+
+fn append_semantic_mutation(
+    connection: &Connection,
+    mutation: NewSemanticMutation<'_>,
+) -> Result<i64, StoreError> {
+    connection.execute(
+        "INSERT INTO mutation_log (operation_id, kind, target_sequence, revision, \
+         request_json, prior_json, next_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            mutation.operation_id,
+            mutation.kind.as_str(),
+            mutation.target_sequence,
+            to_sql_counter(mutation.revision)?,
+            mutation.request_json,
+            serde_json::to_string(&mutation.transition.prior)?,
+            serde_json::to_string(&mutation.transition.next)?,
         ],
     )?;
     Ok(connection.last_insert_rowid())
@@ -753,6 +1308,65 @@ fn persist_graph_transition(
     Ok(())
 }
 
+fn persist_semantic_transition(
+    connection: &Connection,
+    graph: &GraphSnapshot,
+    touched: &SemanticState,
+) -> Result<(), StoreError> {
+    for (id, _) in &touched.bridges {
+        match graph.bridges.get(id) {
+            Some(bridge) => {
+                let payload = serde_json::to_string(&serde_json::json!({
+                    "from": bridge.from,
+                    "to": bridge.to,
+                    "label": bridge.label,
+                    "provenance": bridge.provenance,
+                }))?;
+                connection.execute(
+                    "INSERT INTO bridges (id, payload) VALUES (?1, ?2) \
+                     ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                    params![id.0, payload],
+                )?;
+            }
+            None => {
+                connection.execute("DELETE FROM bridges WHERE id=?1", [&id.0])?;
+            }
+        }
+    }
+    for (alias, _) in &touched.aliases {
+        match graph.aliases.get(alias) {
+            Some(canonical) => {
+                connection.execute(
+                    "INSERT INTO event_aliases (alias, canonical_id) VALUES (?1, ?2) \
+                     ON CONFLICT(alias) DO UPDATE SET canonical_id=excluded.canonical_id",
+                    params![alias.0, canonical.0],
+                )?;
+            }
+            None => {
+                connection.execute("DELETE FROM event_aliases WHERE alias=?1", [&alias.0])?;
+            }
+        }
+    }
+    for (id, _) in &touched.events {
+        if let Some(event) = graph.events.get(id) {
+            connection.execute(
+                "INSERT INTO events (id, payload) VALUES (?1, ?2) \
+                 ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                params![id.0, serde_json::to_string(event)?],
+            )?;
+        } else {
+            connection.execute("DELETE FROM placements WHERE event_id=?1", [&id.0])?;
+            connection.execute("DELETE FROM placement_versions WHERE event_id=?1", [&id.0])?;
+            connection.execute("DELETE FROM events WHERE id=?1", [&id.0])?;
+        }
+    }
+    connection.execute(
+        "UPDATE graph_meta SET value=?1 WHERE key='revision'",
+        [graph.revision.to_string()],
+    )?;
+    Ok(())
+}
+
 #[derive(Default)]
 struct ReplayedHistory {
     undo: Vec<i64>,
@@ -772,22 +1386,25 @@ fn replay_history(connection: &Connection) -> Result<ReplayedHistory, StoreError
     let mut history = ReplayedHistory::default();
     for row in rows {
         let (sequence, kind, target) = row?;
-        match MutationKind::parse(&kind)? {
-            MutationKind::Move => {
-                history.undo.push(sequence);
-                history.redo.clear();
-            }
-            MutationKind::Undo => {
-                if history.undo.pop() != target {
-                    return Err(StoreError::HistoryConflict);
+        let kind = MutationKind::parse(&kind)?;
+        if kind.is_action() {
+            history.undo.push(sequence);
+            history.redo.clear();
+        } else {
+            match kind {
+                MutationKind::Undo => {
+                    if history.undo.pop() != target {
+                        return Err(StoreError::HistoryConflict);
+                    }
+                    history.redo.push(sequence);
                 }
-                history.redo.push(sequence);
-            }
-            MutationKind::Redo => {
-                if history.redo.pop() != target {
-                    return Err(StoreError::HistoryConflict);
+                MutationKind::Redo => {
+                    if history.redo.pop() != target {
+                        return Err(StoreError::HistoryConflict);
+                    }
+                    history.undo.push(sequence);
                 }
-                history.undo.push(sequence);
+                _ => unreachable!("action kinds were handled above"),
             }
         }
     }
@@ -863,6 +1480,193 @@ mod tests {
             destination: Point { x, y: -20.25 },
             expected_placement_version,
         }
+    }
+
+    fn curation_store() -> (TempDir, DurableGraphStore) {
+        let (directory, path) = legacy_graph();
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                r#"UPDATE events SET payload =
+                '{"id":"a","title":"A","date":"2026-07-14","color":4279312947,
+                  "summary":"S","sourceLabel":"Source",
+                  "artifacts":[{"text":"Primary paper","source":"Journal",
+                    "url":"https://Example.test/Paper/#section"}]}'
+                WHERE id='a'"#,
+                [],
+            )
+            .unwrap();
+        let store = DurableGraphStore::open(&path).unwrap();
+        (directory, store)
+    }
+
+    fn relation(expected_revision: u64) -> RelateEvents {
+        RelateEvents {
+            bridge_id: BridgeId("user:a:b:supports".into()),
+            from: EventId("a".into()),
+            to: EventId("b".into()),
+            predicate: "  Supports — with   evidence ".into(),
+            provenance: Provenance::User,
+            expected_revision,
+        }
+    }
+
+    fn promotion(expected_revision: u64) -> PromoteArtifact {
+        PromoteArtifact {
+            source_event: EventId("a".into()),
+            artifact_url: "https://example.test/paper".into(),
+            promoted_id: EventId("paper".into()),
+            date: "Jul 14, 2026".into(),
+            relation: Some(not_news_domain::PromotionRelation {
+                bridge_id: BridgeId("user:a:paper:cites".into()),
+                predicate: "Cites as primary evidence".into(),
+            }),
+            expected_revision,
+        }
+    }
+
+    #[test]
+    fn mixed_command_history_survives_restart_and_restores_only_named_facts() {
+        let (directory, store) = curation_store();
+        let before = store.load().unwrap();
+        let related = store
+            .commit_relation("relate", &relation(before.revision))
+            .unwrap();
+        assert_eq!(
+            related.snapshot.bridges[&BridgeId("user:a:b:supports".into())].label,
+            "Supports - with evidence"
+        );
+        assert_eq!(related.snapshot.events, before.events);
+        assert_eq!(
+            related.snapshot.bridges[&BridgeId("a::b::related".into())],
+            before.bridges[&BridgeId("a::b::related".into())]
+        );
+
+        drop(store);
+        let reopened = DurableGraphStore::open(directory.path().join("graph.sqlite")).unwrap();
+        let retry = reopened
+            .commit_relation("relate", &relation(before.revision))
+            .unwrap();
+        assert_eq!(retry.sequence, related.sequence);
+        let mut contradictory = relation(before.revision);
+        contradictory.predicate = "Contradicts".into();
+        assert!(matches!(
+            reopened.commit_relation("relate", &contradictory),
+            Err(StoreError::IdempotencyConflict(_))
+        ));
+
+        let detached = reopened
+            .commit_detachment(
+                "detach",
+                &DetachRelationship {
+                    bridge_id: BridgeId("user:a:b:supports".into()),
+                    expected_revision: retry.snapshot.revision,
+                },
+            )
+            .unwrap();
+        assert!(
+            !detached
+                .snapshot
+                .bridges
+                .contains_key(&BridgeId("user:a:b:supports".into()))
+        );
+        let moved = reopened.commit_move("move", &command(75.0, 0)).unwrap();
+        assert_eq!(moved.snapshot.revision, before.revision + 3);
+
+        let without_move = reopened.undo("undo-move").unwrap().unwrap().snapshot;
+        assert!(!without_move.placements.contains_key(&EventId("a".into())));
+        let with_relation = reopened.undo("undo-detach").unwrap().unwrap().snapshot;
+        assert!(
+            with_relation
+                .bridges
+                .contains_key(&BridgeId("user:a:b:supports".into()))
+        );
+        let restored = reopened.undo("undo-relate").unwrap().unwrap().snapshot;
+        assert_eq!(restored.events, before.events);
+        assert_eq!(restored.bridges, before.bridges);
+        assert_eq!(restored.aliases, before.aliases);
+        assert_eq!(restored.placements, before.placements);
+
+        let redone_relation = reopened.redo("redo-relate").unwrap().unwrap().snapshot;
+        assert!(
+            redone_relation
+                .bridges
+                .contains_key(&BridgeId("user:a:b:supports".into()))
+        );
+        let redone_detach = reopened.redo("redo-detach").unwrap().unwrap().snapshot;
+        assert!(
+            !redone_detach
+                .bridges
+                .contains_key(&BridgeId("user:a:b:supports".into()))
+        );
+        let redone_move = reopened.redo("redo-move").unwrap().unwrap().snapshot;
+        assert!((redone_move.placements[&EventId("a".into())].point.x - 75.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn promotion_deduplicates_primary_urls_and_refuses_dangling_inverse() {
+        let (_directory, store) = curation_store();
+        let before = store.load().unwrap();
+        let promoted = store
+            .commit_artifact_promotion("promote", &promotion(before.revision))
+            .unwrap();
+        assert_eq!(promoted.snapshot.events.len(), before.events.len() + 1);
+        assert_eq!(
+            promoted.snapshot.events[&EventId("paper".into())]
+                .url
+                .as_deref(),
+            Some("https://Example.test/Paper/#section")
+        );
+        assert!(
+            promoted
+                .snapshot
+                .bridges
+                .contains_key(&BridgeId("user:a:paper:cites".into()))
+        );
+
+        let mut alias_promotion = promotion(promoted.snapshot.revision);
+        alias_promotion.promoted_id = EventId("paper-alias".into());
+        alias_promotion.relation = None;
+        let aliased = store
+            .commit_artifact_promotion("alias", &alias_promotion)
+            .unwrap();
+        assert_eq!(
+            aliased.snapshot.events.len(),
+            promoted.snapshot.events.len()
+        );
+        assert_eq!(
+            aliased.snapshot.aliases[&EventId("paper-alias".into())],
+            EventId("paper".into())
+        );
+        let without_alias = store.undo("undo-alias").unwrap().unwrap().snapshot;
+        assert!(
+            !without_alias
+                .aliases
+                .contains_key(&EventId("paper-alias".into()))
+        );
+
+        store
+            .start_research_session("later", "Find corroboration")
+            .unwrap();
+        let dependent = store
+            .accept_research_bridge(
+                "later",
+                0,
+                &EventId("b".into()),
+                &EventId("paper".into()),
+                "Corroborates",
+            )
+            .unwrap()
+            .snapshot;
+        assert!(store.undo("unsafe-promotion-undo").is_err());
+        assert_eq!(store.load().unwrap(), dependent);
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .events
+                .contains_key(&EventId("paper".into()))
+        );
     }
 
     #[test]

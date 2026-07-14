@@ -672,6 +672,58 @@ pub fn paint_research_prompt(
     prompt: &str,
     preedit: &str,
 ) {
+    paint_text_prompt(
+        canvas,
+        physical_width,
+        physical_height,
+        scale_factor,
+        "RESEARCH",
+        "ENTER SEND  ·  ESC CLOSE  ·  CTRL+V PASTE",
+        prompt,
+        preedit,
+        4_096,
+        "Ask a research question…",
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn paint_curation_prompt(
+    canvas: &Canvas,
+    physical_width: f32,
+    physical_height: f32,
+    scale_factor: f32,
+    title: &str,
+    instruction: &str,
+    input: &str,
+    preedit: &str,
+) {
+    paint_text_prompt(
+        canvas,
+        physical_width,
+        physical_height,
+        scale_factor,
+        title,
+        instruction,
+        input,
+        preedit,
+        96,
+        "Type an explicit relationship predicate…",
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_text_prompt(
+    canvas: &Canvas,
+    physical_width: f32,
+    physical_height: f32,
+    scale_factor: f32,
+    title: &str,
+    instruction: &str,
+    input: &str,
+    preedit: &str,
+    maximum: usize,
+    placeholder: &str,
+) {
     let width = physical_width / scale_factor;
     let height = physical_height / scale_factor;
     let panel_width = 680.0_f32.min(width - 44.0);
@@ -698,12 +750,12 @@ pub fn paint_research_prompt(
     STATUS_TEXT.with(|resources| {
         let mut resources = resources.borrow_mut();
         resources
-            .label("RESEARCH", true)
+            .label(title, true)
             .paint(canvas, (bounds.left + 16.0, bounds.top + 12.0));
         resources
-            .activity_state("ENTER SEND  ·  ESC CLOSE  ·  CTRL+V PASTE")
+            .activity_state(instruction)
             .paint(canvas, (bounds.left + 108.0, bounds.top + 12.0));
-        let content = research_prompt_tail(prompt, preedit);
+        let content = prompt_tail(input, preedit, placeholder);
         canvas.save();
         canvas.clip_rect(
             Rect::from_xywh(
@@ -720,7 +772,7 @@ pub fn paint_research_prompt(
             .paint(canvas, (bounds.left + 16.0, bounds.top + 37.0));
         canvas.restore();
         resources
-            .activity_state(&format!("{} / 4096", prompt.chars().count()))
+            .activity_state(&format!("{} / {maximum}", input.chars().count()))
             .paint(canvas, (bounds.left + 16.0, bounds.bottom - 17.0));
     });
     let mut cursor = Paint::default();
@@ -734,10 +786,10 @@ pub fn paint_research_prompt(
     canvas.restore();
 }
 
-fn research_prompt_tail(prompt: &str, preedit: &str) -> String {
+fn prompt_tail(prompt: &str, preedit: &str, placeholder: &str) -> String {
     const VISIBLE_CHARACTERS: usize = 480;
     let mut content = if prompt.is_empty() && preedit.is_empty() {
-        return "Ask a research question…".into();
+        return placeholder.into();
     } else {
         prompt.to_owned()
     };
@@ -755,6 +807,112 @@ fn research_prompt_tail(prompt: &str, preedit: &str) -> String {
         .nth(characters - VISIBLE_CHARACTERS)
         .map_or(0, |(index, _)| index);
     format!("…{}", &content[start..])
+}
+
+pub fn hit_curation_menu(
+    physical_point: WorldPoint,
+    physical_width: f64,
+    physical_height: f64,
+    scale_factor: f64,
+    anchor: WorldPoint,
+    item_count: usize,
+) -> Option<usize> {
+    if item_count == 0 || !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return None;
+    }
+    let width = physical_width / scale_factor;
+    let height = physical_height / scale_factor;
+    let point = WorldPoint {
+        x: physical_point.x / scale_factor,
+        y: physical_point.y / scale_factor,
+    };
+    let anchor = WorldPoint {
+        x: anchor.x / scale_factor,
+        y: anchor.y / scale_factor,
+    };
+    let bounds = curation_menu_bounds(width, height, anchor, item_count);
+    if point.x < f64::from(bounds.left)
+        || point.x > f64::from(bounds.right)
+        || point.y < f64::from(bounds.top + 34.0)
+        || point.y > f64::from(bounds.bottom)
+    {
+        return None;
+    }
+    let relative = point.y - f64::from(bounds.top + 34.0);
+    (0..item_count).find(|index| {
+        let row = f64::from(u32::try_from(*index).unwrap_or(u32::MAX)) * 38.0;
+        relative >= row && relative < row + 38.0
+    })
+}
+
+pub fn paint_curation_menu(
+    canvas: &Canvas,
+    physical_width: f32,
+    physical_height: f32,
+    scale_factor: f32,
+    anchor: WorldPoint,
+    title: &str,
+    items: &[String],
+) {
+    if items.is_empty() || scale_factor <= 0.0 {
+        return;
+    }
+    let width = physical_width / scale_factor;
+    let height = physical_height / scale_factor;
+    let anchor = WorldPoint {
+        x: anchor.x / f64::from(scale_factor),
+        y: anchor.y / f64::from(scale_factor),
+    };
+    let bounds = curation_menu_bounds(f64::from(width), f64::from(height), anchor, items.len());
+    canvas.save();
+    canvas.scale((scale_factor, scale_factor));
+    paint_metadata_shadow(canvas, bounds, INK_0, 0.62, 24.0, 10.0);
+    let rounded = RRect::new_rect_xy(bounds, 9.0, 9.0);
+    let mut panel = Paint::default();
+    panel.set_anti_alias(true);
+    panel.set_color(color(PANEL));
+    canvas.draw_rrect(rounded, &panel);
+    let mut border = Paint::default();
+    border.set_anti_alias(true);
+    border.set_style(PaintStyle::Stroke);
+    border.set_stroke_width(1.0);
+    border.set_color(color(SIGNAL));
+    canvas.draw_rrect(rounded, &border);
+
+    STATUS_TEXT.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        resources
+            .menu_header(title)
+            .paint(canvas, (bounds.left + 14.0, bounds.top + 10.0));
+        for (index, item) in items.iter().enumerate() {
+            let y = bounds.top + 34.0 + f32::from(u16::try_from(index).unwrap_or(u16::MAX)) * 38.0;
+            if index > 0 {
+                let mut divider = Paint::default();
+                divider.set_color(color(HAIRLINE_DIM));
+                canvas.draw_line((bounds.left + 10.0, y), (bounds.right - 10.0, y), &divider);
+            }
+            resources
+                .activity_state(&format!("{}  {item}", index + 1))
+                .paint(canvas, (bounds.left + 14.0, y + 11.0));
+        }
+    });
+    canvas.restore();
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn curation_menu_bounds(width: f64, height: f64, anchor: WorldPoint, item_count: usize) -> Rect {
+    let menu_width = 340.0_f64.min((width - 24.0).max(180.0));
+    let menu_height = 34.0 + 38.0 * f64::from(u32::try_from(item_count).unwrap_or(u32::MAX));
+    let left = anchor.x.clamp(12.0, (width - menu_width - 12.0).max(12.0));
+    let top = anchor
+        .y
+        .clamp(12.0, (height - menu_height - 12.0).max(12.0));
+    Rect::from_xywh(
+        left as f32,
+        top as f32,
+        menu_width as f32,
+        menu_height as f32,
+    )
 }
 
 fn desktop_metadata_width(summary: &str) -> f32 {
@@ -1351,6 +1509,10 @@ impl StatusText {
         self.text(text, StatusStyle::ActivityHeader, 90.0)
     }
 
+    fn menu_header(&mut self, text: &str) -> &skia_safe::textlayout::Paragraph {
+        self.text(text, StatusStyle::Live, 280.0)
+    }
+
     fn activity_state(&mut self, text: &str) -> &skia_safe::textlayout::Paragraph {
         self.text(text, StatusStyle::ActivityState, 220.0)
     }
@@ -1853,10 +2015,31 @@ mod tests {
         );
 
         let long = "evidence ".repeat(100);
-        let tail = research_prompt_tail(&long, "候補");
+        let tail = prompt_tail(&long, "候補", "Ask a research question…");
         assert!(tail.starts_with('…'));
         assert!(tail.ends_with("〈候補〉"));
         assert!(tail.chars().count() <= 481);
+    }
+
+    #[test]
+    fn curation_menu_hits_exact_rows_without_leaking_into_its_heading() {
+        let anchor = WorldPoint { x: 120.0, y: 100.0 };
+        let hit = |x, y| hit_curation_menu(WorldPoint { x, y }, 1_280.0, 800.0, 1.0, anchor, 3);
+        assert_eq!(hit(140.0, 120.0), None);
+        assert_eq!(hit(140.0, 150.0), Some(0));
+        assert_eq!(hit(140.0, 190.0), Some(1));
+        assert_eq!(hit(140.0, 228.0), Some(2));
+        assert_eq!(hit(500.0, 190.0), None);
+        STATUS_TEXT.with(|resources| {
+            assert!(
+                resources
+                    .borrow_mut()
+                    .menu_header("DETACH EXACT RELATIONSHIP")
+                    .height()
+                    < 20.0,
+                "curation headings must remain a single line"
+            );
+        });
     }
 
     #[test]

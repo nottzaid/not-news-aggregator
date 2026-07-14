@@ -66,9 +66,16 @@ pub enum InteractionEffect {
     OpenUrl(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CanvasSubject {
+    pub event: EventId,
+    pub artifact_index: Option<usize>,
+}
+
 #[derive(Clone, Debug)]
 pub struct CanvasInteraction {
     base_positions: HashMap<EventId, Point>,
+    settled_positions: HashMap<EventId, Point>,
     viewport: Viewport,
     width: f64,
     height: f64,
@@ -83,8 +90,10 @@ pub struct CanvasInteraction {
 
 impl CanvasInteraction {
     pub fn new(base_positions: HashMap<EventId, Point>) -> Self {
+        let settled_positions = base_positions.clone();
         Self {
             base_positions,
+            settled_positions,
             viewport: Viewport::default(),
             width: 1_280.0,
             height: 800.0,
@@ -107,6 +116,33 @@ impl CanvasInteraction {
         self.base_positions
             .get(event)
             .map(|position| (event, *position))
+    }
+
+    pub fn subject_at_cursor(&self, graph: &GraphSnapshot, now: Instant) -> Option<CanvasSubject> {
+        let screen = self.cursor?;
+        let positions = self.current_positions(graph, now);
+        let world = self.transform().screen_to_world(screen);
+        if let Some(active_id) = self.active.as_ref()
+            && let Some(event) = graph.events.get(active_id)
+            && event.artifacts.len() > 1
+            && let Some(artifact_index) = hit_artifact_index(
+                world,
+                positions[active_id],
+                event,
+                f64::from(self.active_paint_ease(now)),
+            )
+        {
+            return Some(CanvasSubject {
+                event: active_id.clone(),
+                artifact_index: Some(artifact_index),
+            });
+        }
+        let event = hit_event(world, graph, &positions)?;
+        let artifact_index = (graph.events[&event].artifacts.len() == 1).then_some(0);
+        Some(CanvasSubject {
+            event,
+            artifact_index,
+        })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -224,6 +260,8 @@ impl CanvasInteraction {
 
     pub fn placement_committed(&mut self, graph: &GraphSnapshot) {
         self.base_positions = resolved_positions(graph);
+        self.settled_positions =
+            expanded_positions(graph, &self.base_positions, self.active.as_ref());
         self.motion = None;
     }
 
@@ -254,6 +292,7 @@ impl CanvasInteraction {
                 .is_some_and(|(from, to)| distance(*from, *to) > f64::EPSILON)
         });
         self.base_positions = next_base;
+        self.settled_positions.clone_from(&to_positions);
         self.motion = changed.then(|| ActiveMotion {
             from_positions,
             to_positions,
@@ -309,7 +348,7 @@ impl CanvasInteraction {
         if vertical_pixels == 0.0 || !vertical_pixels.is_finite() {
             return false;
         }
-        let factor = (-vertical_pixels * 0.0016).exp();
+        let factor = (vertical_pixels * 0.0016).exp();
         self.set_zoom(self.viewport.zoom * factor, anchor)
     }
 
@@ -481,6 +520,7 @@ impl CanvasInteraction {
         let to_positions = expanded_positions(graph, &self.base_positions, next);
         let previous = self.active.clone();
         self.active = next.cloned();
+        self.settled_positions.clone_from(&to_positions);
         self.motion = Some(ActiveMotion {
             from_positions,
             to_positions,
@@ -496,7 +536,7 @@ impl CanvasInteraction {
 
     fn current_positions(&self, graph: &GraphSnapshot, now: Instant) -> HashMap<EventId, Point> {
         let Some(motion) = &self.motion else {
-            return expanded_positions(graph, &self.base_positions, self.active.as_ref());
+            return self.settled_positions.clone();
         };
         if self.motion_complete(now) {
             return motion.to_positions.clone();
@@ -640,14 +680,23 @@ fn hit_artifact_url(
     event: &not_news_domain::ResearchEvent,
     ease: f64,
 ) -> Option<String> {
+    hit_artifact_index(world, center, event, ease)
+        .map(|artifact_index| event.artifacts[artifact_index].url.clone())
+}
+
+fn hit_artifact_index(
+    world: Point,
+    center: Point,
+    event: &not_news_domain::ResearchEvent,
+    ease: f64,
+) -> Option<usize> {
     layout_artifacts(event)
         .artifacts
         .iter()
         .find_map(|artifact| {
             let position = add(center, scale_point(artifact.offset, ease));
             let radius = artifact.radius * lerp(0.2, 1.0, ease);
-            (distance(world, position) <= radius)
-                .then(|| event.artifacts[artifact.artifact_index].url.clone())
+            (distance(world, position) <= radius).then_some(artifact.artifact_index)
         })
 }
 
@@ -784,6 +833,24 @@ mod tests {
     }
 
     #[test]
+    fn conventional_wheel_direction_zooms_toward_then_away_from_the_canvas() {
+        let mut interaction = interaction();
+        let now = Instant::now();
+        interaction.cursor_moved(Point { x: 317.0, y: 229.0 }, &graph(), now);
+
+        let initial = interaction.viewport().zoom;
+        assert!(interaction.scroll(40.0));
+        let forward = interaction.viewport().zoom;
+        assert!(forward > initial, "wheel-forward/up must zoom in");
+
+        assert!(interaction.scroll(-40.0));
+        assert!(
+            (interaction.viewport().zoom - initial).abs() < 1.0e-12,
+            "equal wheel-back/down input must restore the prior zoom"
+        );
+    }
+
+    #[test]
     fn hover_expands_then_gracefully_collapses_on_a_deadline() {
         let graph = graph();
         let mut interaction = interaction();
@@ -881,6 +948,13 @@ mod tests {
             .transform()
             .world_to_screen(add(center, artifact.offset));
         interaction.cursor_moved(artifact_screen, &graph, now + ACTIVE_MOTION);
+        assert_eq!(
+            interaction.subject_at_cursor(&graph, now + ACTIVE_MOTION),
+            Some(CanvasSubject {
+                event: EventId("a".into()),
+                artifact_index: Some(0),
+            })
+        );
         interaction.pointer_down(&graph, now + ACTIVE_MOTION);
         assert_eq!(
             interaction.pointer_up(&graph, now + ACTIVE_MOTION),

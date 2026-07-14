@@ -8,13 +8,16 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use interaction::{CanvasInteraction, InteractionEffect};
+use interaction::{CanvasInteraction, CanvasSubject, InteractionEffect, InteractionFrame};
 use not_news_agent::{
     AgentEvent, BridgeUpsert, ResearchHandle, ResearchLaunch, ResearchProcessEvent,
     ResearchTermination, build_research_prompt,
 };
 use not_news_audio::{Recorder, TranscriptionConfig, TranscriptionHandle};
-use not_news_domain::{EventId, GraphSnapshot, Point};
+use not_news_domain::{
+    BridgeId, DetachRelationship, EventId, GraphSnapshot, Point, PromoteArtifact,
+    PromotionRelation, Provenance, RelateEvents,
+};
 use not_news_platform::{
     FrameInfo, FrameSchedule, PlatformApplication, WindowOptions, application_data_directory,
     open_external_url, run,
@@ -29,11 +32,15 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const MAX_RESEARCH_CHARS: usize = 4_096;
 const MAX_RESEARCH_BYTES: usize = 16_384;
+const MAX_PREDICATE_CHARS: usize = 96;
+const MAX_PREDICATE_BYTES: usize = 384;
+const CURATION_RELATIONSHIPS_PER_PAGE: usize = 7;
 use not_news_renderer::{
     ChromeControl, Motion, RecordOrbState, SceneAnimation, SceneState, active_metadata_scroll_max,
-    hit_active_metadata, hit_activity_surface, hit_activity_toggle, hit_fixed_chrome,
-    paint_active_metadata, paint_activity_drawer, paint_background, paint_fixed_chrome,
-    paint_graph, paint_grid, paint_research_prompt, paint_status, resolved_positions,
+    hit_active_metadata, hit_activity_surface, hit_activity_toggle, hit_curation_menu,
+    hit_fixed_chrome, paint_active_metadata, paint_activity_drawer, paint_background,
+    paint_curation_menu, paint_curation_prompt, paint_fixed_chrome, paint_graph, paint_grid,
+    paint_research_prompt, paint_status, resolved_positions,
 };
 use not_news_store::{
     CommitOutcome, DurableGraphStore, ResearchOutputKind, ResearchSessionStatus, StoreError,
@@ -52,6 +59,49 @@ enum VoiceState {
     Idle,
     Recording(Recorder),
     Transcribing(TranscriptionHandle),
+}
+
+#[derive(Clone, Copy)]
+enum CurationMenuStage {
+    Actions,
+    Detach,
+}
+
+#[derive(Clone)]
+enum CurationFlow {
+    Menu {
+        anchor: Point,
+        subject: CanvasSubject,
+        stage: CurationMenuStage,
+        page: usize,
+        expected_revision: u64,
+    },
+    RelateTarget {
+        from: EventId,
+        expected_revision: u64,
+    },
+    RelatePredicate {
+        from: EventId,
+        to: EventId,
+        expected_revision: u64,
+        input: String,
+    },
+    PromotePredicate {
+        source: EventId,
+        artifact_index: usize,
+        expected_revision: u64,
+        input: String,
+    },
+}
+
+#[derive(Clone)]
+enum CurationChoice {
+    Relate,
+    Detach,
+    Promote,
+    Bridge(BridgeId),
+    PreviousPage,
+    NextPage,
 }
 
 impl VoiceState {
@@ -101,6 +151,8 @@ struct CanvasApplication {
     voice: VoiceState,
     research_input: Option<String>,
     research_preedit: String,
+    curation: Option<CurationFlow>,
+    curation_preedit: String,
     research: Option<ActiveResearch>,
     research_messages: Vec<String>,
     generated_research_events: HashSet<not_news_domain::EventId>,
@@ -156,7 +208,7 @@ impl CanvasApplication {
                 }
                 if status.is_none() && graph.events.is_empty() {
                     status = Some(
-                        "Canvas ready. Press Ctrl+K, use the record orb, or drop a legacy graph.sqlite here to import it."
+                        "Canvas ready. Ctrl+K researches; right-click a finding curates; dropping a legacy graph.sqlite imports it."
                             .into(),
                     );
                 }
@@ -205,6 +257,8 @@ impl CanvasApplication {
             voice: VoiceState::Idle,
             research_input: None,
             research_preedit: String::new(),
+            curation: None,
+            curation_preedit: String::new(),
             research: None,
             research_messages: Vec::new(),
             generated_research_events: HashSet::new(),
@@ -219,8 +273,403 @@ impl CanvasApplication {
     }
 
     fn apply_outcome(&mut self, outcome: CommitOutcome) {
-        self.graph = outcome.snapshot;
-        self.interaction.placement_committed(&self.graph);
+        let semantic_change = self.graph.events != outcome.snapshot.events
+            || self.graph.bridges != outcome.snapshot.bridges
+            || self.graph.aliases != outcome.snapshot.aliases;
+        let previous = std::mem::replace(&mut self.graph, outcome.snapshot);
+        if semantic_change {
+            self.interaction
+                .graph_committed(&previous, &self.graph, Instant::now());
+        } else {
+            self.interaction.placement_committed(&self.graph);
+        }
+    }
+
+    fn apply_semantic_outcome(&mut self, outcome: CommitOutcome, now: Instant) {
+        let previous = std::mem::replace(&mut self.graph, outcome.snapshot);
+        self.interaction
+            .graph_committed(&previous, &self.graph, now);
+    }
+
+    fn curation_choices(
+        &self,
+        subject: &CanvasSubject,
+        stage: CurationMenuStage,
+        page: usize,
+    ) -> Vec<(CurationChoice, String)> {
+        let Some(event) = self.graph.events.get(&subject.event) else {
+            return Vec::new();
+        };
+        match stage {
+            CurationMenuStage::Actions => {
+                let mut choices = vec![(
+                    CurationChoice::Relate,
+                    format!("RELATE FROM {}", menu_text(&event.title, 34)),
+                )];
+                if self
+                    .graph
+                    .bridges
+                    .values()
+                    .any(|bridge| bridge.from == subject.event || bridge.to == subject.event)
+                {
+                    choices.push((CurationChoice::Detach, "DETACH ONE RELATIONSHIP…".into()));
+                }
+                if let Some(index) = subject.artifact_index
+                    && let Some(artifact) = event.artifacts.get(index)
+                {
+                    choices.push((
+                        CurationChoice::Promote,
+                        format!("PROMOTE {}", menu_text(&artifact.text, 37)),
+                    ));
+                }
+                choices
+            }
+            CurationMenuStage::Detach => {
+                let relationships = self
+                    .graph
+                    .bridges
+                    .values()
+                    .filter(|bridge| bridge.from == subject.event || bridge.to == subject.event)
+                    .collect::<Vec<_>>();
+                let last_page = relationships
+                    .len()
+                    .saturating_sub(1)
+                    .checked_div(CURATION_RELATIONSHIPS_PER_PAGE)
+                    .unwrap_or(0);
+                let page = page.min(last_page);
+                let start = page * CURATION_RELATIONSHIPS_PER_PAGE;
+                let end = (start + CURATION_RELATIONSHIPS_PER_PAGE).min(relationships.len());
+                let mut choices = Vec::with_capacity(CURATION_RELATIONSHIPS_PER_PAGE + 2);
+                if page > 0 {
+                    choices.push((
+                        CurationChoice::PreviousPage,
+                        "← PREVIOUS RELATIONSHIPS".into(),
+                    ));
+                }
+                choices.extend(relationships[start..end].iter().map(|bridge| {
+                    let direction = if bridge.from == subject.event {
+                        format!("→ {}", event_title(&self.graph, &bridge.to))
+                    } else {
+                        format!("← {}", event_title(&self.graph, &bridge.from))
+                    };
+                    (
+                        CurationChoice::Bridge(bridge.id.clone()),
+                        menu_text(&format!("{direction}  ·  {}", bridge.label), 49),
+                    )
+                }));
+                if page < last_page {
+                    choices.push((CurationChoice::NextPage, "MORE RELATIONSHIPS →".into()));
+                }
+                choices
+            }
+        }
+    }
+
+    fn open_curation_menu(&mut self, now: Instant) -> bool {
+        self.interaction.cancel_pointer();
+        let Some(anchor) = self.cursor else {
+            return false;
+        };
+        let Some(subject) = self.interaction.subject_at_cursor(&self.graph, now) else {
+            let changed = self.curation.take().is_some();
+            self.curation_preedit.clear();
+            return changed;
+        };
+        self.research_input = None;
+        self.research_preedit.clear();
+        self.curation = Some(CurationFlow::Menu {
+            anchor,
+            subject,
+            stage: CurationMenuStage::Actions,
+            page: 0,
+            expected_revision: self.graph.revision,
+        });
+        self.curation_preedit.clear();
+        true
+    }
+
+    fn curation_menu_at_cursor(&self) -> Option<usize> {
+        let cursor = self.cursor?;
+        let CurationFlow::Menu {
+            anchor,
+            subject,
+            stage,
+            page,
+            ..
+        } = self.curation.as_ref()?
+        else {
+            return None;
+        };
+        let count = self.curation_choices(subject, *stage, *page).len();
+        hit_curation_menu(
+            cursor,
+            self.physical_width,
+            self.physical_height,
+            self.scale_factor,
+            *anchor,
+            count,
+        )
+    }
+
+    fn curation_left_press(&mut self, now: Instant) -> Option<bool> {
+        let flow = self.curation.clone()?;
+        match flow {
+            CurationFlow::Menu { .. } => {
+                let Some(row) = self.curation_menu_at_cursor() else {
+                    self.curation = None;
+                    self.curation_preedit.clear();
+                    return Some(true);
+                };
+                Some(self.activate_curation_row(row, now))
+            }
+            CurationFlow::RelateTarget {
+                from,
+                expected_revision,
+            } => {
+                let Some(target) = self.interaction.subject_at_cursor(&self.graph, now) else {
+                    self.status = Some("Choose an exact target finding, or press Escape.".into());
+                    return Some(true);
+                };
+                if target.event == from {
+                    self.status = Some("A finding cannot be related to itself.".into());
+                    return Some(true);
+                }
+                self.curation = Some(CurationFlow::RelatePredicate {
+                    from,
+                    to: target.event,
+                    expected_revision,
+                    input: String::new(),
+                });
+                self.curation_preedit.clear();
+                self.status = None;
+                Some(true)
+            }
+            CurationFlow::RelatePredicate { .. } | CurationFlow::PromotePredicate { .. } => {
+                Some(false)
+            }
+        }
+    }
+
+    fn activate_curation_row(&mut self, row: usize, now: Instant) -> bool {
+        let Some(CurationFlow::Menu {
+            anchor,
+            subject,
+            stage,
+            page,
+            expected_revision,
+        }) = self.curation.clone()
+        else {
+            return false;
+        };
+        let choices = self.curation_choices(&subject, stage, page);
+        let Some((choice, _)) = choices.get(row).cloned() else {
+            return false;
+        };
+        self.activate_curation_choice(choice, anchor, subject, stage, page, expected_revision, now)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn activate_curation_choice(
+        &mut self,
+        choice: CurationChoice,
+        anchor: Point,
+        subject: CanvasSubject,
+        stage: CurationMenuStage,
+        page: usize,
+        expected_revision: u64,
+        now: Instant,
+    ) -> bool {
+        match choice {
+            CurationChoice::Relate => {
+                self.curation = Some(CurationFlow::RelateTarget {
+                    from: subject.event,
+                    expected_revision,
+                });
+                self.status =
+                    Some("Choose the exact target finding; movement remains disabled.".into());
+                true
+            }
+            CurationChoice::Detach if matches!(stage, CurationMenuStage::Actions) => {
+                self.curation = Some(CurationFlow::Menu {
+                    anchor,
+                    subject,
+                    stage: CurationMenuStage::Detach,
+                    page: 0,
+                    expected_revision,
+                });
+                true
+            }
+            CurationChoice::Promote => {
+                let Some(artifact_index) = subject.artifact_index else {
+                    return false;
+                };
+                self.curation = Some(CurationFlow::PromotePredicate {
+                    source: subject.event,
+                    artifact_index,
+                    expected_revision,
+                    input: String::new(),
+                });
+                self.curation_preedit.clear();
+                self.status = None;
+                true
+            }
+            CurationChoice::Bridge(bridge_id) => {
+                self.commit_detachment(bridge_id, expected_revision, now)
+            }
+            CurationChoice::PreviousPage if matches!(stage, CurationMenuStage::Detach) => {
+                self.curation = Some(CurationFlow::Menu {
+                    anchor,
+                    subject,
+                    stage,
+                    page: page.saturating_sub(1),
+                    expected_revision,
+                });
+                true
+            }
+            CurationChoice::NextPage if matches!(stage, CurationMenuStage::Detach) => {
+                self.curation = Some(CurationFlow::Menu {
+                    anchor,
+                    subject,
+                    stage,
+                    page: page.saturating_add(1),
+                    expected_revision,
+                });
+                true
+            }
+            CurationChoice::Detach | CurationChoice::PreviousPage | CurationChoice::NextPage => {
+                false
+            }
+        }
+    }
+
+    fn commit_detachment(
+        &mut self,
+        bridge_id: BridgeId,
+        expected_revision: u64,
+        now: Instant,
+    ) -> bool {
+        let operation = self.next_operation_id("detach");
+        let command = DetachRelationship {
+            bridge_id,
+            expected_revision,
+        };
+        let result = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "the graph store is unavailable".to_owned())
+            .and_then(|store| {
+                store
+                    .commit_detachment(&operation, &command)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(outcome) => {
+                self.apply_semantic_outcome(outcome, now);
+                self.curation = None;
+                self.status =
+                    Some("Relationship detached; Ctrl+Z restores that exact fact.".into());
+            }
+            Err(error) => self.status = Some(format!("Relationship was not detached: {error}")),
+        }
+        true
+    }
+
+    fn commit_relation_input(&mut self, now: Instant) -> bool {
+        let Some(CurationFlow::RelatePredicate {
+            from,
+            to,
+            expected_revision,
+            input,
+        }) = self.curation.clone()
+        else {
+            return false;
+        };
+        if input.trim().is_empty() {
+            self.status = Some("Name what the relationship means before committing it.".into());
+            return true;
+        }
+        let operation = self.next_operation_id("relate");
+        let command = RelateEvents {
+            bridge_id: BridgeId(format!("{operation}:bridge")),
+            from,
+            to,
+            predicate: input,
+            provenance: Provenance::User,
+            expected_revision,
+        };
+        let result = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "the graph store is unavailable".to_owned())
+            .and_then(|store| {
+                store
+                    .commit_relation(&operation, &command)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(outcome) => {
+                self.apply_semantic_outcome(outcome, now);
+                self.curation = None;
+                self.curation_preedit.clear();
+                self.status = Some("Relationship committed; movement was not changed.".into());
+            }
+            Err(error) => self.status = Some(format!("Relationship was not committed: {error}")),
+        }
+        true
+    }
+
+    fn commit_promotion_input(&mut self, now: Instant) -> bool {
+        let Some(CurationFlow::PromotePredicate {
+            source,
+            artifact_index,
+            expected_revision,
+            input,
+        }) = self.curation.clone()
+        else {
+            return false;
+        };
+        let Some(source_event) = self.graph.events.get(&source) else {
+            self.status = Some("The selected source finding no longer exists.".into());
+            return true;
+        };
+        let Some(artifact) = source_event.artifacts.get(artifact_index) else {
+            self.status = Some("The selected artifact no longer exists.".into());
+            return true;
+        };
+        let artifact_url = artifact.url.clone();
+        let date = source_event.date.clone();
+        let operation = self.next_operation_id("promote");
+        let relation = (!input.trim().is_empty()).then(|| PromotionRelation {
+            bridge_id: BridgeId(format!("{operation}:bridge")),
+            predicate: input,
+        });
+        let command = PromoteArtifact {
+            source_event: source,
+            artifact_url,
+            promoted_id: EventId(format!("{operation}:event")),
+            date,
+            relation,
+            expected_revision,
+        };
+        let result = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "the graph store is unavailable".to_owned())
+            .and_then(|store| {
+                store
+                    .commit_artifact_promotion(&operation, &command)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(outcome) => {
+                self.apply_semantic_outcome(outcome, now);
+                self.curation = None;
+                self.curation_preedit.clear();
+                self.status = Some("Artifact promoted into a durable finding.".into());
+            }
+            Err(error) => self.status = Some(format!("Artifact was not promoted: {error}")),
+        }
+        true
     }
 
     fn next_operation_id(&mut self, kind: &str) -> String {
@@ -310,9 +759,113 @@ impl CanvasApplication {
         }
     }
 
-    fn keyboard_input(&mut self, event: &not_news_platform::winit::event::KeyEvent) -> bool {
+    fn curation_keyboard_input(
+        &mut self,
+        event: &not_news_platform::winit::event::KeyEvent,
+        now: Instant,
+    ) -> Option<bool> {
+        let flow = self.curation.clone()?;
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            self.curation = None;
+            self.curation_preedit.clear();
+            self.status = None;
+            return Some(true);
+        }
+        let command = self.modifiers.control_key() || self.modifiers.super_key();
+        if matches!(&flow, CurationFlow::Menu { .. })
+            && !command
+            && !self.modifiers.alt_key()
+            && let Key::Character(key) = &event.logical_key
+            && let Some(row) = menu_row_from_key(key)
+        {
+            return Some(self.activate_curation_row(row, now));
+        }
+        if matches!(&flow, CurationFlow::RelatePredicate { .. })
+            && matches!(event.logical_key, Key::Named(NamedKey::Enter))
+        {
+            self.curation_preedit.clear();
+            return Some(self.commit_relation_input(now));
+        }
+        if matches!(&flow, CurationFlow::PromotePredicate { .. })
+            && matches!(event.logical_key, Key::Named(NamedKey::Enter))
+        {
+            self.curation_preedit.clear();
+            return Some(self.commit_promotion_input(now));
+        }
+        if !matches!(
+            &flow,
+            CurationFlow::RelatePredicate { .. } | CurationFlow::PromotePredicate { .. }
+        ) {
+            return Some(false);
+        }
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) {
+            if let Some(input) = self.curation_input_mut() {
+                remove_last_grapheme(input);
+            }
+            return Some(true);
+        }
+        if command
+            && matches!(&event.logical_key, Key::Character(key) if key.eq_ignore_ascii_case("v"))
+        {
+            return Some(self.paste_curation_input());
+        }
+        if command
+            && matches!(&event.logical_key, Key::Character(key) if key.eq_ignore_ascii_case("u"))
+        {
+            if let Some(input) = self.curation_input_mut() {
+                input.clear();
+            }
+            self.curation_preedit.clear();
+            return Some(true);
+        }
+        if !command
+            && !self.modifiers.alt_key()
+            && let Some(text) = event.text.as_deref()
+        {
+            self.append_curation_text(text);
+            return Some(true);
+        }
+        Some(false)
+    }
+
+    fn curation_input_mut(&mut self) -> Option<&mut String> {
+        match self.curation.as_mut()? {
+            CurationFlow::RelatePredicate { input, .. }
+            | CurationFlow::PromotePredicate { input, .. } => Some(input),
+            CurationFlow::Menu { .. } | CurationFlow::RelateTarget { .. } => None,
+        }
+    }
+
+    fn append_curation_text(&mut self, text: &str) {
+        if let Some(input) = self.curation_input_mut() {
+            append_bounded_predicate(input, text);
+        }
+    }
+
+    fn paste_curation_input(&mut self) -> bool {
+        let result = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text());
+        match result {
+            Ok(text) => {
+                self.append_curation_text(&text);
+                true
+            }
+            Err(error) => {
+                self.status = Some(format!("Clipboard text is unavailable: {error}"));
+                true
+            }
+        }
+    }
+
+    fn keyboard_input(
+        &mut self,
+        event: &not_news_platform::winit::event::KeyEvent,
+        now: Instant,
+    ) -> bool {
         if event.state != ElementState::Pressed {
             return false;
+        }
+        if let Some(changed) = self.curation_keyboard_input(event, now) {
+            return changed;
         }
         if self.research_input.is_some() {
             match &event.logical_key {
@@ -374,6 +927,13 @@ impl CanvasApplication {
             return false;
         };
         let command = self.modifiers.control_key() || self.modifiers.super_key();
+        if command && character.eq_ignore_ascii_case("e") {
+            if self.open_curation_menu(now) {
+                return true;
+            }
+            self.status = Some("Hover a finding or source artifact, then press Ctrl+E.".into());
+            return true;
+        }
         if (command && character.eq_ignore_ascii_case("k")) || (!command && character == "/") {
             self.research_input = Some(String::new());
             self.research_preedit.clear();
@@ -417,6 +977,28 @@ impl CanvasApplication {
     }
 
     fn ime_input(&mut self, ime: &Ime) -> bool {
+        if matches!(
+            self.curation,
+            Some(CurationFlow::RelatePredicate { .. } | CurationFlow::PromotePredicate { .. })
+        ) {
+            match ime {
+                Ime::Preedit(text, _) => {
+                    self.curation_preedit = text.chars().take(96).collect();
+                    return true;
+                }
+                Ime::Commit(text) => {
+                    self.curation_preedit.clear();
+                    self.append_curation_text(text);
+                    return true;
+                }
+                Ime::Disabled => {
+                    let changed = !self.curation_preedit.is_empty();
+                    self.curation_preedit.clear();
+                    return changed;
+                }
+                Ime::Enabled => return false,
+            }
+        }
         if self.research_input.is_none() {
             return false;
         }
@@ -489,6 +1071,8 @@ impl CanvasApplication {
                 );
                 self.research_input = None;
                 self.research_preedit.clear();
+                self.curation = None;
+                self.curation_preedit.clear();
                 self.research_messages.clear();
                 self.generated_research_events.clear();
                 self.auto_follow_research = true;
@@ -529,6 +1113,18 @@ impl CanvasApplication {
                     physical_dimension(self.physical_width),
                     physical_dimension(self.physical_height),
                 );
+                self.research_input = None;
+                self.research_preedit.clear();
+                self.curation = None;
+                self.curation_preedit.clear();
+                self.research_messages.clear();
+                self.generated_research_events.clear();
+                self.auto_follow_research = true;
+                self.activity_open = false;
+                self.activity_openness = 0.0;
+                self.activity_motion = None;
+                self.metadata_scroll_event = None;
+                self.metadata_scroll = 0.0;
                 self.status = Some(format!(
                     "Imported {events} events and {bridges} relationships; the source database was not changed."
                 ));
@@ -1103,6 +1699,10 @@ impl CanvasApplication {
 
     fn mouse_input(&mut self, state: ElementState, now: Instant) -> bool {
         if state == ElementState::Pressed {
+            if let Some(changed) = self.curation_left_press(now) {
+                self.pointer_owner = PointerOwner::ConsumedChrome;
+                return changed;
+            }
             if self.activity_toggle_at_cursor(now) {
                 self.pointer_owner = PointerOwner::ActivityToggle;
                 return self.interaction.cursor_left(now);
@@ -1149,6 +1749,15 @@ impl CanvasApplication {
             | PointerOwner::MetadataSurface
             | PointerOwner::ConsumedChrome
             | PointerOwner::FixedChrome(_) => false,
+        }
+    }
+
+    fn right_mouse_input(&mut self, state: ElementState, now: Instant) -> bool {
+        if state == ElementState::Pressed {
+            self.pointer_owner = PointerOwner::ConsumedChrome;
+            self.open_curation_menu(now)
+        } else {
+            false
         }
     }
 
@@ -1225,7 +1834,29 @@ impl CanvasApplication {
     }
 
     fn paint_composer(&self, canvas: &Canvas, width: f32, height: f32, scale_factor: f32) {
-        if let Some(prompt) = self.research_input.as_deref() {
+        if let Some(CurationFlow::RelatePredicate { input, .. }) = self.curation.as_ref() {
+            paint_curation_prompt(
+                canvas,
+                width,
+                height,
+                scale_factor,
+                "RELATE",
+                "ENTER COMMIT  ·  ESC CANCEL  ·  CTRL+V PASTE",
+                input,
+                &self.curation_preedit,
+            );
+        } else if let Some(CurationFlow::PromotePredicate { input, .. }) = self.curation.as_ref() {
+            paint_curation_prompt(
+                canvas,
+                width,
+                height,
+                scale_factor,
+                "PROMOTE",
+                "ENTER PROMOTE  ·  OPTIONAL TEXT RELATES  ·  ESC CANCEL",
+                input,
+                &self.curation_preedit,
+            );
+        } else if let Some(prompt) = self.research_input.as_deref() {
             paint_research_prompt(
                 canvas,
                 width,
@@ -1235,6 +1866,127 @@ impl CanvasApplication {
                 &self.research_preedit,
             );
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_foreground(
+        &self,
+        canvas: &Canvas,
+        width: f32,
+        height: f32,
+        scale_factor: f32,
+        viewport: not_news_renderer::Viewport,
+        state: &InteractionFrame,
+        activity_progress: f64,
+    ) {
+        if let Some(active) = state.expanded_event.as_ref() {
+            paint_active_metadata(
+                canvas,
+                width,
+                height,
+                scale_factor,
+                &self.graph.events[active],
+                state.positions[active],
+                scale_scalar(self.metadata_scroll),
+            );
+        }
+        if let Some(status) = self.status.as_deref() {
+            paint_status(
+                canvas,
+                width,
+                height,
+                scale_factor,
+                status,
+                self.research.is_some(),
+            );
+        }
+        if self.activity_visible() {
+            paint_activity_drawer(
+                canvas,
+                width,
+                height,
+                scale_factor,
+                &self.research_messages,
+                self.research.is_some(),
+                scale_scalar(activity_progress),
+            );
+        }
+        self.paint_composer(canvas, width, height, scale_factor);
+        self.paint_curation_surface(canvas, width, height, scale_factor);
+        paint_fixed_chrome(
+            canvas,
+            width,
+            height,
+            scale_factor,
+            viewport.zoom,
+            self.record_orb_state(),
+        );
+    }
+
+    fn paint_frame_layers(
+        &self,
+        canvas: &Canvas,
+        frame: FrameInfo,
+        viewport: not_news_renderer::Viewport,
+        state: &InteractionFrame,
+        activity_progress: f64,
+    ) {
+        let width = physical_scalar(frame.physical_width);
+        let height = physical_scalar(frame.physical_height);
+        let scale_factor = scale_scalar(frame.scale_factor);
+        let scene_state = SceneState {
+            animation: SceneAnimation {
+                bridge_flow: state.bridge_flow,
+            },
+            bridge_event: state.bridge_event.as_ref(),
+            expanded_event: state.expanded_event.as_ref(),
+            expansion_progress: state.expansion_progress,
+            collapsing_event: state.collapsing_event.as_ref(),
+            collapse_progress: state.collapse_progress,
+        };
+        paint_background(canvas, width, height);
+        paint_grid(canvas, width, height, viewport);
+        paint_graph(
+            canvas,
+            width,
+            height,
+            viewport,
+            &self.graph,
+            &state.positions,
+            scene_state,
+        );
+        self.paint_foreground(
+            canvas,
+            width,
+            height,
+            scale_factor,
+            viewport,
+            state,
+            activity_progress,
+        );
+    }
+
+    fn paint_curation_surface(&self, canvas: &Canvas, width: f32, height: f32, scale_factor: f32) {
+        let Some(CurationFlow::Menu {
+            anchor,
+            subject,
+            stage,
+            page,
+            ..
+        }) = self.curation.as_ref()
+        else {
+            return;
+        };
+        let title = match stage {
+            CurationMenuStage::Actions => "CURATE",
+            CurationMenuStage::Detach => "DETACH EXACT RELATIONSHIP",
+        };
+        let items = self
+            .curation_choices(subject, *stage, *page)
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        paint_curation_menu(canvas, width, height, scale_factor, *anchor, title, &items);
     }
 }
 
@@ -1269,6 +2021,11 @@ impl PlatformApplication for CanvasApplication {
                 button: MouseButton::Left,
                 ..
             } => self.mouse_input(*state, now),
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Right,
+                ..
+            } => self.right_mouse_input(*state, now),
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.metadata_at_cursor() {
                     self.scroll_metadata(*delta)
@@ -1282,14 +2039,16 @@ impl PlatformApplication for CanvasApplication {
                 self.modifiers = modifiers.state();
                 false
             }
-            WindowEvent::KeyboardInput { event, .. } => self.keyboard_input(event),
+            WindowEvent::KeyboardInput { event, .. } => self.keyboard_input(event, now),
             WindowEvent::Ime(ime) => self.ime_input(ime),
             WindowEvent::DroppedFile(path) => self.import_legacy(path),
             WindowEvent::Focused(false) => {
                 self.pointer_owner = PointerOwner::None;
                 self.record_hold_deadline = None;
-                let changed = !self.research_preedit.is_empty();
+                let changed =
+                    !self.research_preedit.is_empty() || !self.curation_preedit.is_empty();
                 self.research_preedit.clear();
+                self.curation_preedit.clear();
                 self.interaction.cancel_pointer() || changed
             }
             _ => false,
@@ -1306,72 +2065,10 @@ impl PlatformApplication for CanvasApplication {
         self.physical_width = f64::from(frame.physical_width);
         self.physical_height = f64::from(frame.physical_height);
         self.scale_factor = frame.scale_factor;
-        let width = physical_scalar(frame.physical_width);
-        let height = physical_scalar(frame.physical_height);
         let state = self.interaction.frame(&self.graph, frame.now);
         self.sync_metadata_scroll(state.expanded_event.as_ref());
         let viewport = self.interaction.viewport();
-        paint_background(canvas, width, height);
-        paint_grid(canvas, width, height, viewport);
-        paint_graph(
-            canvas,
-            width,
-            height,
-            viewport,
-            &self.graph,
-            &state.positions,
-            SceneState {
-                animation: SceneAnimation {
-                    bridge_flow: state.bridge_flow,
-                },
-                bridge_event: state.bridge_event.as_ref(),
-                expanded_event: state.expanded_event.as_ref(),
-                expansion_progress: state.expansion_progress,
-                collapsing_event: state.collapsing_event.as_ref(),
-                collapse_progress: state.collapse_progress,
-            },
-        );
-        if let Some(active) = state.expanded_event.as_ref() {
-            paint_active_metadata(
-                canvas,
-                width,
-                height,
-                scale_scalar(frame.scale_factor),
-                &self.graph.events[active],
-                state.positions[active],
-                scale_scalar(self.metadata_scroll),
-            );
-        }
-        if let Some(status) = self.status.as_deref() {
-            paint_status(
-                canvas,
-                width,
-                height,
-                scale_scalar(frame.scale_factor),
-                status,
-                self.research.is_some(),
-            );
-        }
-        if self.activity_visible() {
-            paint_activity_drawer(
-                canvas,
-                width,
-                height,
-                scale_scalar(frame.scale_factor),
-                &self.research_messages,
-                self.research.is_some(),
-                scale_scalar(activity_progress),
-            );
-        }
-        self.paint_composer(canvas, width, height, scale_scalar(frame.scale_factor));
-        paint_fixed_chrome(
-            canvas,
-            width,
-            height,
-            scale_scalar(frame.scale_factor),
-            viewport.zoom,
-            self.record_orb_state(),
-        );
+        self.paint_frame_layers(canvas, frame, viewport, &state, activity_progress);
         let interaction_deadline = self.interaction.next_deadline(frame.now);
         let research_deadline = self
             .research
@@ -1393,6 +2090,10 @@ impl PlatformApplication for CanvasApplication {
 
     fn text_input_active(&self) -> bool {
         self.research_input.is_some()
+            || matches!(
+                self.curation,
+                Some(CurationFlow::RelatePredicate { .. } | CurationFlow::PromotePredicate { .. })
+            )
     }
 }
 
@@ -1499,6 +2200,51 @@ fn append_bounded_text(input: &mut String, text: &str) {
     }
 }
 
+fn append_bounded_predicate(input: &mut String, text: &str) {
+    let mut characters = input.chars().count();
+    for character in text.chars() {
+        let character = match character {
+            '\n' | '\r' | '\t' => ' ',
+            character if character.is_control() => continue,
+            character => character,
+        };
+        if characters >= MAX_PREDICATE_CHARS
+            || input.len() + character.len_utf8() > MAX_PREDICATE_BYTES
+        {
+            break;
+        }
+        input.push(character);
+        characters += 1;
+    }
+}
+
+fn menu_text(value: &str, maximum: usize) -> String {
+    if value.chars().count() <= maximum {
+        return value.to_owned();
+    }
+    let end = value
+        .char_indices()
+        .nth(maximum.saturating_sub(1))
+        .map_or(value.len(), |(index, _)| index);
+    format!("{}…", &value[..end])
+}
+
+fn menu_row_from_key(key: &str) -> Option<usize> {
+    let [digit] = key.as_bytes() else {
+        return None;
+    };
+    (b'1'..=b'9')
+        .contains(digit)
+        .then(|| usize::from(*digit - b'1'))
+}
+
+fn event_title(graph: &GraphSnapshot, event: &EventId) -> String {
+    graph.events.get(event).map_or_else(
+        || menu_text(&event.0, 22),
+        |event| menu_text(&event.title, 22),
+    )
+}
+
 fn remove_last_grapheme(input: &mut String) {
     if let Some((index, _)) = input.grapheme_indices(true).next_back() {
         input.truncate(index);
@@ -1548,7 +2294,7 @@ mod app_tests {
         assert!(fresh.graph.events.is_empty());
         assert!(
             fresh.status.as_deref().is_some_and(|status| {
-                status.contains("Ctrl+K") && status.contains("record orb")
+                status.contains("Ctrl+K") && status.contains("right-click")
             })
         );
 
@@ -1579,7 +2325,6 @@ mod app_tests {
             application.render(surface.canvas(), frame),
             FrameSchedule::Wait
         ));
-
         let deadline = now + Duration::from_millis(500);
         application.record_hold_deadline = Some(deadline);
         assert!(matches!(
@@ -1655,6 +2400,139 @@ mod app_tests {
         assert!(application.ime_input(&Ime::Commit("研究課題".into())));
         assert_eq!(application.research_input.as_deref(), Some("Ask 研究課題"));
         assert!(application.research_preedit.is_empty());
+    }
+
+    #[test]
+    fn explicit_curation_flow_reaches_canvas_and_sqlite_without_a_drag() {
+        let directory = TempDir::new().unwrap();
+        let database = directory.path().join("graph.sqlite");
+        let store = DurableGraphStore::open(&database).unwrap();
+        store.start_research_session("seed", "Seed").unwrap();
+        let finding = |id: &str, artifacts| not_news_domain::ResearchEvent {
+            id: EventId(id.into()),
+            title: format!("Finding {id}"),
+            date: "Jul 14, 2026".into(),
+            color: 0xff4c_9be8,
+            summary: "Durable finding.".into(),
+            source_label: "Primary".into(),
+            artifacts,
+            url: Some(format!("https://example.test/{id}")),
+        };
+        store
+            .accept_research_event(
+                "seed",
+                0,
+                &finding(
+                    "a",
+                    vec![not_news_domain::SourceArtifact {
+                        text: "Paper".into(),
+                        source: "Journal".into(),
+                        url: "https://example.test/paper".into(),
+                    }],
+                ),
+            )
+            .unwrap();
+        store
+            .accept_research_event("seed", 1, &finding("b", Vec::new()))
+            .unwrap();
+        drop(store);
+
+        let mut application = CanvasApplication::load(&database);
+        let before_placements = application.graph.placements.clone();
+        application.curation = Some(CurationFlow::RelatePredicate {
+            from: EventId("a".into()),
+            to: EventId("b".into()),
+            expected_revision: application.graph.revision,
+            input: "Supports with primary evidence".into(),
+        });
+        assert!(application.commit_relation_input(Instant::now()));
+        assert_eq!(application.graph.placements, before_placements);
+        assert!(application.graph.bridges.values().any(|bridge| {
+            bridge.provenance == Provenance::User
+                && bridge.label == "Supports with primary evidence"
+        }));
+
+        application.curation = Some(CurationFlow::PromotePredicate {
+            source: EventId("a".into()),
+            artifact_index: 0,
+            expected_revision: application.graph.revision,
+            input: String::new(),
+        });
+        assert!(application.commit_promotion_input(Instant::now()));
+        assert_eq!(application.graph.events.len(), 3);
+        assert_eq!(
+            application.store.as_ref().unwrap().load().unwrap(),
+            application.graph
+        );
+        assert!(application.undo());
+        assert_eq!(application.graph.events.len(), 2);
+    }
+
+    #[test]
+    fn dense_detachment_menu_pages_every_exact_relationship_and_owns_its_number_keys() {
+        let event = |id: EventId| not_news_domain::ResearchEvent {
+            id,
+            title: "Finding".into(),
+            date: "Jul 14, 2026".into(),
+            color: 0xff4c_9be8,
+            summary: "Finding".into(),
+            source_label: "Primary".into(),
+            artifacts: Vec::new(),
+            url: None,
+        };
+        let hub = EventId("hub".into());
+        let mut graph = GraphSnapshot::default();
+        graph.events.insert(hub.clone(), event(hub.clone()));
+        for index in 0..10 {
+            let peer = EventId(format!("peer-{index}"));
+            graph.events.insert(peer.clone(), event(peer.clone()));
+            let id = BridgeId(format!("bridge-{index}"));
+            graph.bridges.insert(
+                id.clone(),
+                not_news_domain::EventBridge {
+                    id,
+                    from: hub.clone(),
+                    to: peer,
+                    label: format!("relationship {index}"),
+                    provenance: Provenance::User,
+                },
+            );
+        }
+        let application = CanvasApplication::with_state(None, graph, None, None);
+        let subject = CanvasSubject {
+            event: hub,
+            artifact_index: None,
+        };
+        let first = application.curation_choices(&subject, CurationMenuStage::Detach, 0);
+        let second = application.curation_choices(&subject, CurationMenuStage::Detach, 1);
+        assert_eq!(
+            first
+                .iter()
+                .filter(|(choice, _)| matches!(choice, CurationChoice::Bridge(_)))
+                .count(),
+            7
+        );
+        assert!(matches!(first.last(), Some((CurationChoice::NextPage, _))));
+        assert!(matches!(
+            second.first(),
+            Some((CurationChoice::PreviousPage, _))
+        ));
+        assert_eq!(
+            second
+                .iter()
+                .filter(|(choice, _)| matches!(choice, CurationChoice::Bridge(_)))
+                .count(),
+            3
+        );
+        assert!(
+            !second
+                .iter()
+                .any(|(choice, _)| matches!(choice, CurationChoice::NextPage))
+        );
+        assert_eq!(menu_row_from_key("1"), Some(0));
+        assert_eq!(menu_row_from_key("9"), Some(8));
+        assert_eq!(menu_row_from_key("0"), None);
+        assert_eq!(menu_row_from_key("12"), None);
     }
 
     #[test]

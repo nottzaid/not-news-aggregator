@@ -654,7 +654,7 @@ fn event_urls(event: &Value) -> std::collections::HashSet<String> {
     urls
 }
 
-fn normalize_url(url: &str) -> String {
+pub(crate) fn normalize_url(url: &str) -> String {
     url.trim()
         .split('#')
         .next()
@@ -1059,7 +1059,7 @@ mod tests {
             current
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            3
+            4
         );
         assert!(table_exists(&current, "destructive_log").unwrap());
     }
