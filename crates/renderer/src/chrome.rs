@@ -14,8 +14,8 @@ use skia_safe::{
 use not_news_domain::{Point as WorldPoint, ResearchEvent};
 
 use crate::palette::{
-    DISPLAY_FONT, HAIRLINE, HAIRLINE_DIM, INK_0, MONO_FONT, PANEL, PANEL_RAISED, SIGNAL, TEXT,
-    TEXT_DIM, TEXT_FAINT, color, color4f_with_alpha,
+    DISPLAY_FONT, HAIRLINE, HAIRLINE_DIM, INK_0, MONO_FONT, PANEL, PANEL_RAISED, SIGNAL,
+    SIGNAL_HOT_DEEP, TEXT, TEXT_DIM, TEXT_FAINT, color, color4f_with_alpha,
 };
 
 const RECORD_DIAMETER: f32 = 72.0;
@@ -36,6 +36,13 @@ pub enum ChromeControl {
     ZoomIn,
     ResetZoom,
     Clear,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RecordOrbState {
+    #[default]
+    Idle,
+    Busy,
 }
 
 /// Resolves fixed-chrome hit regions in the same logical coordinate space used
@@ -370,6 +377,7 @@ pub fn paint_fixed_chrome(
     physical_height: f32,
     scale_factor: f32,
     zoom: f64,
+    record_state: RecordOrbState,
 ) {
     assert!(physical_width.is_finite() && physical_width > 0.0);
     assert!(physical_height.is_finite() && physical_height > 0.0);
@@ -379,7 +387,7 @@ pub fn paint_fixed_chrome(
     let height = physical_height / scale_factor;
     canvas.save();
     canvas.scale((scale_factor, scale_factor));
-    paint_record_orb(canvas, width, height);
+    paint_record_orb(canvas, width, height, record_state);
     paint_zoom_controls(canvas, width, height, zoom);
     canvas.restore();
 }
@@ -646,14 +654,18 @@ fn paint_metadata_text(canvas: &Canvas, bounds: Rect, event: &ResearchEvent) {
     });
 }
 
-fn paint_record_orb(canvas: &Canvas, width: f32, height: f32) {
+fn paint_record_orb(canvas: &Canvas, width: f32, height: f32, state: RecordOrbState) {
     let center = (width / 2.0, height - RECORD_BOTTOM - RECORD_DIAMETER / 2.0);
-    paint_blurred_circle(canvas, (center.0, center.1 + 18.0), 36.0, SIGNAL, 0.55);
-    paint_blurred_circle(canvas, (center.0, center.1 + 4.0), 12.0, SIGNAL, 0.30);
+    let orb_color = match state {
+        RecordOrbState::Idle => SIGNAL,
+        RecordOrbState::Busy => SIGNAL_HOT_DEEP,
+    };
+    paint_blurred_circle(canvas, (center.0, center.1 + 18.0), 36.0, orb_color, 0.55);
+    paint_blurred_circle(canvas, (center.0, center.1 + 4.0), 12.0, orb_color, 0.30);
 
     let mut orb = Paint::default();
     orb.set_anti_alias(true);
-    orb.set_color(color(SIGNAL));
+    orb.set_color(color(orb_color));
     canvas.draw_circle(center, RECORD_DIAMETER / 2.0, &orb);
     let mut border = Paint::default();
     border.set_anti_alias(true);
@@ -665,7 +677,17 @@ fn paint_record_orb(canvas: &Canvas, width: f32, height: f32) {
     let mut core = Paint::default();
     core.set_anti_alias(true);
     core.set_color(color(INK_0));
-    canvas.draw_circle(center, 8.5, &core);
+    match state {
+        RecordOrbState::Idle => canvas.draw_circle(center, 8.5, &core),
+        RecordOrbState::Busy => canvas.draw_rrect(
+            RRect::new_rect_xy(
+                Rect::from_xywh(center.0 - 9.0, center.1 - 9.0, 18.0, 18.0),
+                4.0,
+                4.0,
+            ),
+            &core,
+        ),
+    };
 }
 
 fn paint_zoom_controls(canvas: &Canvas, width: f32, height: f32, zoom: f64) {
@@ -1216,10 +1238,13 @@ mod tests {
             include_bytes!("../../../test/goldens/full-screen-closed-1280x800.png");
         const FLUTTER_BASE: &[u8] =
             include_bytes!("../../../test/goldens/full-screen-base-1280x800.png");
+        const FLUTTER_BUSY: &[u8] =
+            include_bytes!("../../../test/goldens/full-screen-record-busy-1280x800.png");
         let flutter_chrome = read_image(&Image::from_encoded(Data::new_copy(FLUTTER)).unwrap());
         let flutter_base = read_image(&Image::from_encoded(Data::new_copy(FLUTTER_BASE)).unwrap());
+        let flutter_busy = read_image(&Image::from_encoded(Data::new_copy(FLUTTER_BUSY)).unwrap());
         let rust_chrome = paint_over(&flutter_base, |canvas| {
-            paint_fixed_chrome(canvas, 1280.0, 800.0, 1.0, 1.0);
+            paint_fixed_chrome(canvas, 1280.0, 800.0, 1.0, 1.0, RecordOrbState::Idle);
         });
         let (_, mean, _) = residual_crop_metrics(
             &flutter_base,
@@ -1242,6 +1267,16 @@ mod tests {
             &rust_chrome,
             &[(1010, 690, 270, 110)],
         );
+        let rust_busy = paint_over(&flutter_base, |canvas| {
+            paint_fixed_chrome(canvas, 1280.0, 800.0, 1.0, 1.0, RecordOrbState::Busy);
+        });
+        let busy = residual_crop_metrics(
+            &flutter_base,
+            &flutter_busy,
+            &flutter_base,
+            &rust_busy,
+            &[(560, 660, 160, 140)],
+        );
         assert!(
             mean <= 0.60,
             "Flutter/Rust fixed chrome mean drift {mean:.6}"
@@ -1249,6 +1284,10 @@ mod tests {
         assert!(
             record.1 <= 0.60 && record.2 <= 5,
             "Flutter/Rust record-orb drift {record:?}"
+        );
+        assert!(
+            busy.1 <= 0.60 && busy.2 <= 5,
+            "Flutter/Rust busy record-orb drift {busy:?}"
         );
         assert!(
             controls.1 <= 0.60,

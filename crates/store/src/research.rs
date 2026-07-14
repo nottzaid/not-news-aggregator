@@ -1033,7 +1033,8 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE research_output_log; DROP TABLE research_sessions; \
+                "DROP TABLE destructive_log; DROP TABLE research_output_log; \
+                 DROP TABLE research_sessions; \
                  PRAGMA user_version=1;",
             )
             .unwrap();
@@ -1050,6 +1051,7 @@ mod tests {
             1
         );
         assert!(!table_exists(&backup_connection, "research_sessions").unwrap());
+        assert!(!table_exists(&backup_connection, "destructive_log").unwrap());
         assert!(table_exists(&backup_connection, "mutation_log").unwrap());
         let current = Connection::open(directory.path().join("graph.sqlite")).unwrap();
         assert!(table_exists(&current, "research_sessions").unwrap());
@@ -1057,7 +1059,8 @@ mod tests {
             current
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
+        assert!(table_exists(&current, "destructive_log").unwrap());
     }
 }

@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 not-news-agent = { path = "../agent" }
+not-news-audio = { path = "../audio" }
 not-news-domain = { path = "../domain" }
 not-news-platform = { path = "../platform" }
 not-news-renderer = { path = "../renderer" }

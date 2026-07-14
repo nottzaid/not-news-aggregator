@@ -70,7 +70,9 @@ pub enum ResearchLaunchError {
     InvalidBackend(String),
     #[error("research question must not be blank")]
     EmptyQuestion,
-    #[error("research backend {0:?} is not available on PATH")]
+    #[error(
+        "research backend {0:?} is not available on PATH; install OpenCode and run `opencode auth login`, or install and configure Hermes"
+    )]
     MissingBackend(String),
     #[error("research scratch directory could not be created: {0}")]
     Scratch(#[source] io::Error),

@@ -12,7 +12,7 @@ use rusqlite::{
 
 use crate::{StoreError, load_snapshot, table_exists};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone, Debug)]
 pub struct CommitOutcome {
@@ -135,6 +135,65 @@ impl DurableGraphStore {
         self.apply_history(operation_id, MutationKind::Redo)
     }
 
+    /// Atomically erases the canvas, placement history, and research trail.
+    /// The graph revision remains monotonic and the operation is retry-safe.
+    ///
+    /// # Errors
+    ///
+    /// Rejects blank or conflicting operation IDs, revision overflow, invalid
+    /// durable state, and any transaction failure without partially clearing.
+    pub fn clear(&self, operation_id: &str) -> Result<GraphSnapshot, StoreError> {
+        validate_operation_id(operation_id)?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(committed_revision) = transaction
+            .query_row(
+                "SELECT committed_revision FROM destructive_log \
+                 WHERE operation_id=?1 AND kind='clear'",
+                [operation_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            let graph = load_snapshot(&transaction)?;
+            if to_sql_counter(graph.revision)? != committed_revision {
+                return Err(StoreError::IdempotencyConflict(operation_id.to_owned()));
+            }
+            transaction.commit()?;
+            return Ok(graph);
+        }
+
+        let graph = load_snapshot(&transaction)?;
+        let revision = graph
+            .revision
+            .checked_add(1)
+            .ok_or(StoreError::RevisionOverflow)?;
+        transaction.execute_batch(
+            r"
+            DELETE FROM research_output_log;
+            DELETE FROM research_sessions;
+            DELETE FROM mutation_log;
+            DELETE FROM placements;
+            DELETE FROM placement_versions;
+            DELETE FROM bridges;
+            DELETE FROM event_aliases;
+            DELETE FROM events;
+            ",
+        )?;
+        transaction.execute(
+            "UPDATE graph_meta SET value=?1 WHERE key='revision'",
+            [revision.to_string()],
+        )?;
+        transaction.execute(
+            "INSERT INTO destructive_log \
+             (operation_id, kind, committed_revision) VALUES (?1, 'clear', ?2)",
+            params![operation_id, to_sql_counter(revision)?],
+        )?;
+        let cleared = load_snapshot(&transaction)?;
+        transaction.commit()?;
+        Ok(cleared)
+    }
+
     fn apply_history(
         &self,
         operation_id: &str,
@@ -234,7 +293,12 @@ fn migrate(connection: &mut Connection, path: &Path) -> Result<Option<PathBuf>, 
     if version == 0 {
         install_schema_v1(&transaction)?;
     }
-    install_schema_v2(&transaction)?;
+    if version <= 1 {
+        install_schema_v2(&transaction)?;
+    }
+    if version <= 2 {
+        install_schema_v3(&transaction)?;
+    }
     transaction.commit()?;
     Ok(backup)
 }
@@ -326,6 +390,21 @@ fn install_schema_v2(connection: &Connection) -> Result<(), StoreError> {
             FOREIGN KEY (session_id) REFERENCES research_sessions(id)
         );
         PRAGMA user_version = 2;
+        ",
+    )?;
+    Ok(())
+}
+
+fn install_schema_v3(connection: &Connection) -> Result<(), StoreError> {
+    connection.execute_batch(
+        r"
+        CREATE TABLE destructive_log (
+            operation_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK (kind = 'clear'),
+            committed_revision INTEGER NOT NULL CHECK (committed_revision >= 0),
+            committed_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        PRAGMA user_version = 3;
         ",
     )?;
     Ok(())
@@ -739,6 +818,102 @@ mod tests {
             SCHEMA_VERSION
         );
         assert!(table_exists(&connection, "mutation_log").unwrap());
+    }
+
+    #[test]
+    fn clear_erases_knowledge_history_and_research_in_one_retry_safe_revision() {
+        let (_directory, path) = legacy_graph();
+        let store = DurableGraphStore::open(&path).unwrap();
+        store
+            .commit_move("move-before-clear", &command(42.0, 0))
+            .unwrap();
+        store
+            .start_research_session("research-before-clear", "Find evidence")
+            .unwrap();
+        store
+            .record_research_output(
+                "research-before-clear",
+                0,
+                crate::ResearchOutputKind::Message,
+                "Searching",
+            )
+            .unwrap();
+        let before = store.load().unwrap();
+
+        let cleared = store.clear("clear-once").unwrap();
+        assert!(cleared.events.is_empty());
+        assert!(cleared.bridges.is_empty());
+        assert!(cleared.aliases.is_empty());
+        assert!(cleared.placements.is_empty());
+        assert!(cleared.placement_versions.is_empty());
+        assert_eq!(cleared.revision, before.revision + 1);
+        assert_eq!(store.clear("clear-once").unwrap(), cleared);
+
+        let connection = Connection::open(&path).unwrap();
+        for table in [
+            "events",
+            "bridges",
+            "event_aliases",
+            "placements",
+            "placement_versions",
+            "mutation_log",
+            "research_sessions",
+            "research_output_log",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} survived destructive clear");
+        }
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM destructive_log", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_late_clear_failure_restores_earlier_deletes_and_revision() {
+        let (_directory, path) = legacy_graph();
+        let store = DurableGraphStore::open(&path).unwrap();
+        store
+            .start_research_session("preserved-research", "Preserve this")
+            .unwrap();
+        store
+            .record_research_output(
+                "preserved-research",
+                0,
+                crate::ResearchOutputKind::Message,
+                "Accepted activity",
+            )
+            .unwrap();
+        let before = store.load().unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_event_clear BEFORE DELETE ON events \
+                 BEGIN SELECT RAISE(ABORT, 'injected late clear failure'); END;",
+            )
+            .unwrap();
+
+        assert!(store.clear("clear-must-rollback").is_err());
+        assert_eq!(store.load().unwrap(), before);
+        assert_eq!(
+            store.research_activity("preserved-research").unwrap(),
+            ["Accepted activity"]
+        );
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM destructive_log", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ use not_news_agent::{
     AgentEvent, BridgeUpsert, ResearchHandle, ResearchLaunch, ResearchProcessEvent,
     ResearchTermination, build_research_prompt,
 };
+use not_news_audio::{Recorder, TranscriptionConfig, TranscriptionHandle};
 use not_news_domain::{GraphSnapshot, Point};
 use not_news_platform::{
     FrameInfo, FrameSchedule, PlatformApplication, WindowOptions, application_data_directory,
@@ -25,10 +26,10 @@ use not_news_platform::{
     },
 };
 use not_news_renderer::{
-    ChromeControl, Motion, SceneAnimation, SceneState, hit_activity_surface, hit_activity_toggle,
-    hit_fixed_chrome, paint_active_metadata, paint_activity_drawer, paint_background,
-    paint_fixed_chrome, paint_graph, paint_grid, paint_research_prompt, paint_status,
-    resolved_positions,
+    ChromeControl, Motion, RecordOrbState, SceneAnimation, SceneState, hit_activity_surface,
+    hit_activity_toggle, hit_fixed_chrome, paint_active_metadata, paint_activity_drawer,
+    paint_background, paint_fixed_chrome, paint_graph, paint_grid, paint_research_prompt,
+    paint_status, resolved_positions,
 };
 use not_news_store::{
     CommitOutcome, DurableGraphStore, ResearchOutputKind, ResearchSessionStatus, StoreError,
@@ -41,6 +42,22 @@ struct ActiveResearch {
     deferred_bridges: VecDeque<BridgeUpsert>,
     closed: bool,
     scratch_directory: PathBuf,
+}
+
+enum VoiceState {
+    Idle,
+    Recording(Recorder),
+    Transcribing(TranscriptionHandle),
+}
+
+impl VoiceState {
+    fn is_idle(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    fn is_recording(&self) -> bool {
+        matches!(self, Self::Recording(_))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -58,6 +75,7 @@ enum PointerOwner {
     FixedChrome(ChromeControl),
     ActivityToggle,
     ActivitySurface,
+    ConsumedChrome,
 }
 
 struct CanvasApplication {
@@ -74,6 +92,8 @@ struct CanvasApplication {
     scale_factor: f64,
     pointer_owner: PointerOwner,
     research_directory: PathBuf,
+    voice_directory: PathBuf,
+    voice: VoiceState,
     research_input: Option<String>,
     research: Option<ActiveResearch>,
     research_messages: Vec<String>,
@@ -82,6 +102,7 @@ struct CanvasApplication {
     activity_open: bool,
     activity_openness: f64,
     activity_motion: Option<ActivityMotion>,
+    record_hold_deadline: Option<Instant>,
 }
 
 impl CanvasApplication {
@@ -125,6 +146,12 @@ impl CanvasApplication {
                     }
                     _ => {}
                 }
+                if status.is_none() && graph.events.is_empty() {
+                    status = Some(
+                        "Canvas ready. Press Ctrl+K to type a research question, or use the record orb."
+                            .into(),
+                    );
+                }
                 let mut application =
                     Self::with_state(Some(store), graph, status, database.parent());
                 application.research_messages = recovered_activity;
@@ -148,6 +175,7 @@ impl CanvasApplication {
         data_directory: Option<&Path>,
     ) -> Self {
         let interaction = CanvasInteraction::new(resolved_positions(&graph));
+        let data_directory = data_directory.unwrap_or_else(|| Path::new("."));
         Self {
             store,
             graph,
@@ -164,9 +192,9 @@ impl CanvasApplication {
             physical_height: 800.0,
             scale_factor: 1.0,
             pointer_owner: PointerOwner::None,
-            research_directory: data_directory
-                .unwrap_or_else(|| Path::new("."))
-                .join("research-scratch"),
+            research_directory: data_directory.join("research-scratch"),
+            voice_directory: data_directory.join("voice-scratch"),
+            voice: VoiceState::Idle,
             research_input: None,
             research: None,
             research_messages: Vec::new(),
@@ -175,6 +203,7 @@ impl CanvasApplication {
             activity_open: false,
             activity_openness: 0.0,
             activity_motion: None,
+            record_hold_deadline: None,
         }
     }
 
@@ -308,6 +337,9 @@ impl CanvasApplication {
             }
             return false;
         }
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) && self.cancel_voice() {
+            return true;
+        }
         if matches!(event.logical_key, Key::Named(NamedKey::Escape))
             && let Some(active) = self.research.as_ref()
             && !active.closed
@@ -357,15 +389,143 @@ impl CanvasApplication {
             ChromeControl::ZoomIn => self.interaction.zoom_by(1.18),
             ChromeControl::ResetZoom => self.interaction.reset_zoom(),
             ChromeControl::ZoomLabel => false,
-            ChromeControl::Record => {
-                self.status = Some("Voice research is not implemented in this Rust build.".into());
-                true
+            ChromeControl::Record => self.toggle_voice(),
+            ChromeControl::Clear => self.clear_canvas(),
+        }
+    }
+
+    fn clear_canvas(&mut self) -> bool {
+        if self.research.is_some() || !self.voice.is_idle() {
+            self.status = Some(
+                "Canvas cannot be cleared while recording, transcribing, or researching; press Escape to cancel first."
+                    .into(),
+            );
+            return true;
+        }
+        let operation_id = self.next_operation_id("clear");
+        let result = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "the graph store is unavailable".to_owned())
+            .and_then(|store| {
+                store
+                    .clear(&operation_id)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(graph) => {
+                self.graph = graph;
+                self.interaction = CanvasInteraction::new(resolved_positions(&self.graph));
+                self.interaction.resize(
+                    physical_dimension(self.physical_width),
+                    physical_dimension(self.physical_height),
+                );
+                self.research_input = None;
+                self.research_messages.clear();
+                self.generated_research_events.clear();
+                self.auto_follow_research = true;
+                self.activity_open = false;
+                self.activity_openness = 0.0;
+                self.activity_motion = None;
+                self.status = Some("Canvas cleared.".into());
             }
-            ChromeControl::Clear => {
-                self.status = Some("Canvas clearing is not implemented in this Rust build.".into());
+            Err(error) => self.status = Some(format!("Canvas was not cleared: {error}")),
+        }
+        true
+    }
+
+    fn toggle_voice(&mut self) -> bool {
+        if self.research.is_some() {
+            self.status = Some("Research is already running; press Escape to cancel it.".into());
+            return true;
+        }
+        match std::mem::replace(&mut self.voice, VoiceState::Idle) {
+            VoiceState::Idle => self.start_recording(),
+            VoiceState::Recording(recorder) => self.finish_recording(recorder),
+            transcribing @ VoiceState::Transcribing(_) => {
+                self.voice = transcribing;
+                self.status =
+                    Some("Transcription is already running; press Escape to cancel it.".into());
                 true
             }
         }
+    }
+
+    fn start_recording(&mut self) -> bool {
+        if let Err(error) = TranscriptionConfig::from_environment() {
+            self.status = Some(format!("Voice research unavailable: {error}"));
+            return true;
+        }
+        let recording_id = self.next_operation_id("voice");
+        let path = self.voice_directory.join(format!("{recording_id}.wav"));
+        match Recorder::start(path) {
+            Ok(recorder) => {
+                self.voice = VoiceState::Recording(recorder);
+                self.status = Some("Listening... tap again to research.".into());
+            }
+            Err(error) => {
+                self.status = Some(format!("Could not start recording: {error}"));
+            }
+        }
+        true
+    }
+
+    fn finish_recording(&mut self, recorder: Recorder) -> bool {
+        self.status = Some("Transcribing with Groq Whisper v3 Turbo...".into());
+        let result = recorder.stop().and_then(|recording| {
+            let config = TranscriptionConfig::from_environment()?;
+            TranscriptionHandle::start(recording, config)
+        });
+        match result {
+            Ok(handle) => self.voice = VoiceState::Transcribing(handle),
+            Err(error) => {
+                self.status = Some(format!("Recording failed: {error}"));
+            }
+        }
+        true
+    }
+
+    fn cancel_voice(&mut self) -> bool {
+        match std::mem::replace(&mut self.voice, VoiceState::Idle) {
+            VoiceState::Idle => false,
+            VoiceState::Recording(recorder) => {
+                recorder.cancel();
+                self.status = Some("Recording cancelled.".into());
+                true
+            }
+            VoiceState::Transcribing(handle) => {
+                handle.cancel();
+                self.status = Some("Transcription cancelled.".into());
+                true
+            }
+        }
+    }
+
+    fn drain_voice(&mut self) -> bool {
+        let outcome = match &self.voice {
+            VoiceState::Idle => return false,
+            VoiceState::Recording(recorder) => recorder.failure().map(Err),
+            VoiceState::Transcribing(handle) => match handle.try_recv() {
+                Ok(None) => None,
+                Ok(Some(transcript)) => Some(Ok(transcript)),
+                Err(error) => Some(Err(error)),
+            },
+        };
+        let Some(outcome) = outcome else {
+            return false;
+        };
+        let previous = std::mem::replace(&mut self.voice, VoiceState::Idle);
+        if let VoiceState::Recording(recorder) = previous {
+            recorder.cancel();
+        }
+        match outcome {
+            Ok(transcript) => {
+                self.status = Some(format!("Transcript: {transcript}"));
+                self.start_research(&transcript);
+            }
+            Err(error) => self.status = Some(format!("Recording failed: {error}")),
+        }
+        true
     }
 
     fn start_research(&mut self, question: &str) -> bool {
@@ -818,6 +978,11 @@ impl CanvasApplication {
 
     fn cursor_moved(&mut self, point: Point, now: Instant) -> bool {
         self.cursor = Some(point);
+        if self.record_hold_deadline.is_some()
+            && self.chrome_at_cursor() != Some(ChromeControl::Record)
+        {
+            self.record_hold_deadline = None;
+        }
         if matches!(self.pointer_owner, PointerOwner::Canvas) {
             let changed = self.interaction.cursor_moved(point, &self.graph, now);
             self.stop_auto_follow_if_panning();
@@ -841,12 +1006,16 @@ impl CanvasApplication {
             }
             if let Some(control) = self.chrome_at_cursor() {
                 self.pointer_owner = PointerOwner::FixedChrome(control);
+                if control == ChromeControl::Record && self.voice.is_recording() {
+                    self.record_hold_deadline = Some(now + Duration::from_millis(500));
+                }
                 return self.interaction.cursor_left(now);
             }
             self.pointer_owner = PointerOwner::Canvas;
             return self.interaction.pointer_down(&self.graph, now);
         }
 
+        self.record_hold_deadline = None;
         match std::mem::take(&mut self.pointer_owner) {
             PointerOwner::Canvas => {
                 let effect = self.interaction.pointer_up(&self.graph, now);
@@ -866,7 +1035,35 @@ impl CanvasApplication {
             PointerOwner::None
             | PointerOwner::ActivityToggle
             | PointerOwner::ActivitySurface
+            | PointerOwner::ConsumedChrome
             | PointerOwner::FixedChrome(_) => false,
+        }
+    }
+
+    fn resolve_record_hold(&mut self, now: Instant) -> bool {
+        if self
+            .record_hold_deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return false;
+        }
+        self.record_hold_deadline = None;
+        if matches!(
+            self.pointer_owner,
+            PointerOwner::FixedChrome(ChromeControl::Record)
+        ) && self.voice.is_recording()
+        {
+            self.pointer_owner = PointerOwner::ConsumedChrome;
+            return self.cancel_voice();
+        }
+        false
+    }
+
+    fn record_orb_state(&self) -> RecordOrbState {
+        if self.research.is_some() || !self.voice.is_idle() {
+            RecordOrbState::Busy
+        } else {
+            RecordOrbState::Idle
         }
     }
 }
@@ -894,6 +1091,7 @@ impl PlatformApplication for CanvasApplication {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cursor = None;
+                self.record_hold_deadline = None;
                 self.interaction.cursor_left(now)
             }
             WindowEvent::MouseInput {
@@ -915,6 +1113,7 @@ impl PlatformApplication for CanvasApplication {
             WindowEvent::KeyboardInput { event, .. } => self.keyboard_input(event),
             WindowEvent::Focused(false) => {
                 self.pointer_owner = PointerOwner::None;
+                self.record_hold_deadline = None;
                 self.interaction.cancel_pointer()
             }
             _ => false,
@@ -922,6 +1121,8 @@ impl PlatformApplication for CanvasApplication {
     }
 
     fn render(&mut self, canvas: &Canvas, frame: FrameInfo) -> FrameSchedule {
+        self.resolve_record_hold(frame.now);
+        self.drain_voice();
         self.drain_research();
         let activity_progress = self.activity_progress(frame.now);
         self.interaction
@@ -999,18 +1200,22 @@ impl PlatformApplication for CanvasApplication {
             height,
             scale_scalar(frame.scale_factor),
             viewport.zoom,
+            self.record_orb_state(),
         );
         let interaction_deadline = self.interaction.next_deadline(frame.now);
         let research_deadline = self
             .research
             .as_ref()
             .map(|_| frame.now + Duration::from_millis(33));
+        let voice_deadline = (!self.voice.is_idle()).then(|| frame.now + Duration::from_millis(33));
         let activity_deadline = self
             .activity_motion
             .map(|_| frame.now + Duration::from_millis(16));
         interaction_deadline
             .into_iter()
             .chain(research_deadline)
+            .chain(voice_deadline)
+            .chain(self.record_hold_deadline)
             .chain(activity_deadline)
             .min()
             .map_or(FrameSchedule::Wait, FrameSchedule::RedrawAt)
@@ -1043,6 +1248,11 @@ fn physical_scalar(value: u32) -> f32 {
 #[allow(clippy::cast_possible_truncation)]
 fn scale_scalar(value: f64) -> f32 {
     value as f32
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn physical_dimension(value: f64) -> u32 {
+    value.round().clamp(1.0, f64::from(u32::MAX)) as u32
 }
 
 fn scroll_pixels(delta: MouseScrollDelta) -> f64 {
@@ -1093,7 +1303,11 @@ mod app_tests {
         let fresh = CanvasApplication::load(&directory.path().join("fresh.sqlite"));
         assert!(fresh.store.is_some());
         assert!(fresh.graph.events.is_empty());
-        assert!(fresh.status.is_none());
+        assert!(
+            fresh.status.as_deref().is_some_and(|status| {
+                status.contains("Ctrl+K") && status.contains("record orb")
+            })
+        );
 
         let malformed = directory.path().join("malformed.sqlite");
         std::fs::write(&malformed, b"not a SQLite graph").unwrap();
@@ -1131,6 +1345,60 @@ mod app_tests {
             message.contains("interrupted research session")
                 && message.contains("accepted findings were preserved")
         }));
+    }
+
+    #[test]
+    fn clear_click_commits_the_empty_graph_before_resetting_the_view() {
+        let directory = TempDir::new().unwrap();
+        let database = directory.path().join("graph.sqlite");
+        let store = DurableGraphStore::open(&database).unwrap();
+        store.start_research_session("seed", "Seed event").unwrap();
+        store
+            .accept_research_event(
+                "seed",
+                0,
+                &not_news_domain::ResearchEvent {
+                    id: not_news_domain::EventId("seed-event".into()),
+                    title: "Seed".into(),
+                    date: "Jul 14, 2026".into(),
+                    color: 0xff4c_9be8,
+                    summary: "Durable seed.".into(),
+                    source_label: "Primary".into(),
+                    artifacts: Vec::new(),
+                    url: Some("https://example.test/seed".into()),
+                },
+            )
+            .unwrap();
+        store
+            .finish_research_session("seed", 1, ResearchSessionStatus::Done, "Done")
+            .unwrap();
+        drop(store);
+
+        let mut application = CanvasApplication::load(&database);
+        let before_revision = application.graph.revision;
+        assert_eq!(application.graph.events.len(), 1);
+        assert!(application.clear_canvas());
+        assert!(application.graph.events.is_empty());
+        assert_eq!(application.graph.revision, before_revision + 1);
+        assert_eq!(application.status.as_deref(), Some("Canvas cleared."));
+        assert!(
+            application
+                .store
+                .as_ref()
+                .unwrap()
+                .load()
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        assert!(matches!(
+            application
+                .store
+                .as_ref()
+                .unwrap()
+                .research_activity("seed"),
+            Err(StoreError::MissingResearchSession(_))
+        ));
     }
 
     #[cfg(unix)]

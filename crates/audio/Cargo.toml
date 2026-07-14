@@ -1,0 +1,25 @@
+[package]
+name = "not-news-audio"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cpal.workspace = true
+hound.workspace = true
+ringbuf.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+reqwest = { workspace = true, features = ["blocking", "json", "multipart", "rustls"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+reqwest = { workspace = true, features = ["blocking", "json", "multipart", "native-tls-no-alpn"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

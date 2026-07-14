@@ -1534,6 +1534,7 @@ Widget buildCanvasFullScreenOracle({
   List<String> activityMessages = const [],
   bool activityRunning = false,
   bool activityOpen = false,
+  bool recordBusy = false,
 }) {
   final viewport = _CanvasViewportController();
   final positions =
@@ -1598,7 +1599,7 @@ Widget buildCanvasFullScreenOracle({
                   ),
                 if (showChrome) ...[
                   _RecordButton(
-                    running: false,
+                    running: recordBusy,
                     recording: false,
                     transcribing: false,
                     onPressed: () {},

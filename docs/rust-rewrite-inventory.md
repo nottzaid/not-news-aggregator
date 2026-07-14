@@ -139,7 +139,10 @@ Rust schema version 1 adds per-event placement generations and immutable
 move/undo/redo rows without altering these legacy tables. Version 2 adds durable
 research sessions plus one causally ordered output log; a typed proposal, any
 event/alias/bridge change, revision, log row, and session cursor commit together.
-Both upgrades require a verified online backup when a prior graph exists.
+Version 3 adds retry identity for destructive clear. Clear deletes knowledge,
+placements, move history, session prompts, and research output in one transaction
+while advancing the graph revision. Every upgrade requires a verified online
+backup when a prior graph exists.
 
 ## Intentional incompatibilities
 
@@ -178,19 +181,20 @@ check output, or agent prompts except where the provider requires them.
 ## Evidence gaps to close before parity claims
 
 - Direct Skia has raster/temporal gates for the background, graph, expansion,
-  fixed desktop chrome, active metadata, and status panel; responsive/narrow
-  chrome, research activity, the new text composer, and voice states still need
-  comparable visual contracts.
+  fixed desktop chrome including its idle/busy record states, active metadata,
+  status panel, and research activity. Responsive/narrow chrome and the text
+  composer still need comparable visual contracts.
 - Native pointer tests cover unbounded pan, anchored zoom, hover grace,
   activation, artifact paths, placement-only drag, source opening, and durable
   undo/redo. Real-window latency, invalidation-area, high-node-count, device-loss,
   and driver/backend traces remain absent.
 - Research now crosses a process-group/Job-Object supervisor, typed parser,
-  sequenced SQLite acceptance, and direct in-memory canvas updates. Remaining
-  parity gaps are capability diagnosis/remediation, voice capture and
-  transcription, and explicit destructive clear. The activity drawer and
-  generated-cluster camera follow are now source-derived raster/temporal
-  contracts; manual pan cancels automatic camera ownership.
+  sequenced SQLite acceptance, and direct in-memory canvas updates. Voice uses
+  bounded ALSA/WASAPI capture, a lock-free callback boundary, disposable WAV,
+  and background Groq transcription; clear is transactional and retry-safe.
+  Remaining research parity is external-capability diagnosis/remediation. The
+  activity drawer and generated-cluster camera follow are source-derived
+  raster/temporal contracts; manual pan cancels automatic camera ownership.
 - Crash-injection proves transaction rollback and interrupted-session recovery;
   release evidence must still kill real application/backend processes at each
   boundary and exercise the shipped recovery UI.

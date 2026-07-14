@@ -67,6 +67,24 @@ void main() {
     );
   });
 
+  testWidgets('records the busy record orb used during capture and research',
+      (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    const oracle = Key('full-screen-record-busy');
+    await tester.pumpWidget(
+      buildCanvasFullScreenOracle(oracleKey: oracle, recordBusy: true),
+    );
+    await tester.pump();
+    await expectLater(
+      find.byKey(oracle),
+      matchesGoldenFile('goldens/full-screen-record-busy-1280x800.png'),
+    );
+  });
+
   testWidgets('records expanded-event metadata over desktop chrome',
       (tester) async {
     tester.view.devicePixelRatio = 1;
