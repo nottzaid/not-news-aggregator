@@ -66,6 +66,17 @@ appimage_software=$(NOT_NEWS_FORCE_SOFTWARE=1 APPIMAGE_EXTRACT_AND_RUN=1 present
   --release-self-check "$scratch/appimage-software-check")
 printf '%s\n' "$appimage_software"
 assert_self_check "$appimage_software" skia-raster
+appimage_capabilities=$(APPIMAGE_EXTRACT_AND_RUN=1 \
+  "$scratch/relocated-not-news.AppImage" \
+  --capability-check "$scratch/capabilities")
+printf '%s\n' "$appimage_capabilities"
+jq -e --arg commit "${expected_commit:0:12}" \
+  '.capability_check == "pass" and .commit == $commit and
+   (.research.selected_ready | type == "boolean") and
+   (.transcription.os_vault_probe | type == "string") and
+   (.microphone.state | type == "string") and
+   (.kokoro.state | type == "string")' \
+  <<<"$appimage_capabilities" >/dev/null
 
 mkdir "$scratch/deb"
 (
@@ -94,9 +105,10 @@ jq -n \
   --arg commit "$expected_commit" \
   --argjson appimage_auto "$appimage_auto" \
   --argjson appimage_software "$appimage_software" \
+  --argjson appimage_capabilities "$appimage_capabilities" \
   --argjson deb_auto "$deb_auto" \
   --argjson archive_auto "$archive_auto" \
-  '{schema: 1, commit: $commit, appimage_auto: $appimage_auto, appimage_software: $appimage_software, deb_auto: $deb_auto, archive_auto: $archive_auto}' \
+  '{schema: 1, commit: $commit, appimage_auto: $appimage_auto, appimage_software: $appimage_software, appimage_capabilities: $appimage_capabilities, deb_auto: $deb_auto, archive_auto: $archive_auto}' \
   > "$runtime"
 (
   cd dist

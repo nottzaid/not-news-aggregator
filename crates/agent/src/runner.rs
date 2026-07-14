@@ -111,6 +111,10 @@ pub fn hermes_is_available() -> bool {
     find_on_path("hermes").is_some()
 }
 
+pub fn opencode_is_available() -> bool {
+    find_on_path("opencode").is_some()
+}
+
 /// Starts Hermes's own provider/model/credential dashboard. Not News never
 /// reads, mirrors, or narrows the provider registry that Hermes owns.
 ///

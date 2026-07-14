@@ -95,6 +95,13 @@ enum Capability {
     Unavailable(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SpeechCapability {
+    Ready,
+    Disabled,
+    Unavailable(String),
+}
+
 struct SpeechRequest {
     generation: u64,
     queued_at: Instant,
@@ -135,6 +142,14 @@ impl SpeechWorker {
         config.enabled = false;
         config.api_key.clear();
         Self::start(config)
+    }
+
+    pub fn capability(&self) -> SpeechCapability {
+        match &self.capability {
+            Capability::Ready => SpeechCapability::Ready,
+            Capability::Disabled => SpeechCapability::Disabled,
+            Capability::Unavailable(reason) => SpeechCapability::Unavailable(reason.clone()),
+        }
     }
 
     fn start(config: SpeechConfig) -> Self {

@@ -44,6 +44,16 @@ $zip = Join-Path $root "dist/not-news_${version}_windows-x86_64.zip"
 Expand-Archive $zip (Join-Path $scratch "portable")
 $portable = Join-Path $scratch "portable/not-news_${version}_windows-x86_64/not-news-app.exe"
 $portableAuto = Invoke-ReleaseSelfCheck $portable (Join-Path $scratch "portable-check") "auto"
+$capabilityOutput = (& $portable --capability-check (Join-Path $scratch "capabilities") | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw "portable capability check failed" }
+Write-Host $capabilityOutput
+$portableCapabilities = $capabilityOutput | ConvertFrom-Json
+if ($portableCapabilities.capability_check -ne "pass") { throw "portable capability diagnosis did not pass" }
+if ($portableCapabilities.commit -ne $buildInfo.commit.Substring(0, 12)) { throw "portable capability diagnosis reported the wrong commit" }
+if ($null -eq $portableCapabilities.research.selected_ready) { throw "research capability readiness is absent" }
+if (-not $portableCapabilities.transcription.os_vault_probe) { throw "transcription remediation is absent" }
+if (-not $portableCapabilities.microphone.state) { throw "microphone capability is absent" }
+if (-not $portableCapabilities.kokoro.state) { throw "Kokoro capability is absent" }
 $previousForceSoftware = $env:NOT_NEWS_FORCE_SOFTWARE
 $env:NOT_NEWS_FORCE_SOFTWARE = "1"
 try {
@@ -56,6 +66,7 @@ $portableHash = (Get-FileHash $portable -Algorithm SHA256).Hash
 if ($sourceHash -ne $portableHash) { throw "portable archive changed the release executable" }
 
 $installedAuto = $null
+$reinstalledAuto = $null
 
 if ($InstallLifecycle) {
 
@@ -80,6 +91,17 @@ for ($attempt = 0; $attempt -lt 30 -and (Test-Path $installed); $attempt++) {
 }
 if (Test-Path $installed) { throw "NSIS left its executable installed" }
 if (-not (Test-Path $marker)) { throw "NSIS uninstaller deleted user research state" }
+$reinstall = Start-Process $installer -ArgumentList "/S" -PassThru -Wait
+if ($reinstall.ExitCode -ne 0) { throw "NSIS reinstallation exited $($reinstall.ExitCode)" }
+if (-not (Test-Path $marker)) { throw "NSIS reinstallation replaced user research state" }
+$reinstalledAuto = Invoke-ReleaseSelfCheck $installed (Join-Path $scratch "reinstalled-check") "auto"
+$finalUninstall = Start-Process $uninstaller -ArgumentList "/S" -PassThru -Wait
+if ($finalUninstall.ExitCode -ne 0) { throw "final NSIS uninstallation exited $($finalUninstall.ExitCode)" }
+for ($attempt = 0; $attempt -lt 30 -and (Test-Path $installed); $attempt++) {
+    Start-Sleep -Seconds 1
+}
+if (Test-Path $installed) { throw "final NSIS uninstallation left its executable installed" }
+if (-not (Test-Path $marker)) { throw "final NSIS uninstallation deleted user research state" }
 Remove-Item $marker
 }
 
@@ -88,7 +110,9 @@ $runtime = [ordered]@{
     commit = $buildInfo.commit
     portable_auto = $portableAuto
     portable_software = $portableSoftware
+    portable_capabilities = $portableCapabilities
     installed_auto = $installedAuto
+    reinstalled_auto = $reinstalledAuto
 }
 $utf8 = [Text.UTF8Encoding]::new($false)
 [IO.File]::WriteAllText($runtimeFile, ($runtime | ConvertTo-Json -Depth 5), $utf8)

@@ -54,9 +54,11 @@ machine-readable dependency/license inventory, and the renderer selected by
 each executed payload. The release workflow executes
 each portable payload, installs each native package, exercises import and
 durable mutation through the packaged executable, then uninstalls while proving
-that per-user research remains. Engineering previews are unsigned and may
-trigger Windows reputation warnings; signing is a stable-release gate, not a
-claim simulated with a self-signed certificate.
+that per-user research remains before reinstallation and after the final
+removal. A hashed runtime manifest records automatic/forced renderer selection
+and noninteractive degraded-capability diagnosis. Engineering previews are
+unsigned and may trigger Windows reputation warnings; signing is a
+stable-release gate, not a claim simulated with a self-signed certificate.
 
 ## Build from source
 
@@ -110,6 +112,7 @@ cargo run -p not-news-platform --example hidden_smoke
 NOT_NEWS_FORCE_SOFTWARE=1 cargo run -p not-news-platform --example hidden_smoke
 ./scripts/package-linux
 ./scripts/verify-linux-release
+target/release/not-news-app --capability-check /path/to/empty-data-directory
 target/release/not-news-app --performance-check /path/to/preserved-71-event-graph.sqlite
 ```
 

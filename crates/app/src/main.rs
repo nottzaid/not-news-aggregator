@@ -15,9 +15,11 @@ use interaction::{CanvasInteraction, CanvasSubject, InteractionEffect, Interacti
 use not_news_agent::{
     AgentEvent, BridgeUpsert, ResearchHandle, ResearchLaunch, ResearchProcessEvent,
     ResearchTermination, build_research_prompt, hermes_is_available, open_hermes_dashboard,
+    opencode_is_available,
 };
 use not_news_audio::{
-    Recorder, SpeechEvent, SpeechSubmit, SpeechWorker, TranscriptionConfig, TranscriptionHandle,
+    Recorder, SpeechCapability, SpeechEvent, SpeechSubmit, SpeechWorker, TranscriptionConfig,
+    TranscriptionHandle, default_input_capability,
 };
 use not_news_domain::{
     BridgeId, DetachRelationship, EventId, GraphSnapshot, Point, PromoteArtifact,
@@ -2603,6 +2605,9 @@ impl PlatformApplication for PerformanceApplication {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = startup_options(std::env::args_os().skip(1))?;
+    if let Some(root) = options.capability_root {
+        return run_capability_check(&root);
+    }
     if let Some(source) = options.performance_source {
         return run_reference_performance_check(&source);
     }
@@ -2647,6 +2652,7 @@ struct StartupOptions {
     import_legacy: Option<PathBuf>,
     release_smoke: Option<PathBuf>,
     performance_source: Option<PathBuf>,
+    capability_root: Option<PathBuf>,
 }
 
 fn startup_options(
@@ -2659,12 +2665,14 @@ fn startup_options(
             import_legacy: None,
             release_smoke: None,
             performance_source: None,
+            capability_root: None,
         });
     }
     let mut database = None;
     let mut import_legacy = None;
     let mut release_smoke = None;
     let mut performance_source = None;
+    let mut capability_root = None;
     let mut index = 0;
     while index < arguments.len() {
         let flag = &arguments[index];
@@ -2682,6 +2690,8 @@ fn startup_options(
             release_smoke = Some(PathBuf::from(value));
         } else if flag == "--performance-check" && performance_source.is_none() {
             performance_source = Some(PathBuf::from(value));
+        } else if flag == "--capability-check" && capability_root.is_none() {
+            capability_root = Some(PathBuf::from(value));
         } else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -2690,15 +2700,13 @@ fn startup_options(
         }
         index += 2;
     }
-    let exclusive_check = release_smoke.is_some() || performance_source.is_some();
-    if exclusive_check
-        && (database.is_some()
-            || import_legacy.is_some()
-            || release_smoke.is_some() && performance_source.is_some())
-    {
+    let check_count = usize::from(release_smoke.is_some())
+        + usize::from(performance_source.is_some())
+        + usize::from(capability_root.is_some());
+    if check_count > 1 || check_count == 1 && (database.is_some() || import_legacy.is_some()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "release and performance checks are exclusive",
+            "release, performance, and capability checks are exclusive",
         ));
     }
     Ok(StartupOptions {
@@ -2706,7 +2714,55 @@ fn startup_options(
         import_legacy,
         release_smoke,
         performance_source,
+        capability_root,
     })
+}
+
+fn run_capability_check(root: &Path) -> Result<(), Box<dyn Error>> {
+    let settings = SettingsStore::new(root).load()?;
+    let opencode = opencode_is_available();
+    let hermes = hermes_is_available();
+    let selected_ready = match settings.research_backend {
+        settings::StoredResearchBackend::Auto => opencode || hermes,
+        settings::StoredResearchBackend::OpenCode => opencode,
+        settings::StoredResearchBackend::Hermes => hermes,
+    };
+    let microphone = default_input_capability();
+    let speech = SpeechWorker::from_environment(root.join("voice-capability-scratch"));
+    let (kokoro_state, kokoro_detail) = match speech.capability() {
+        SpeechCapability::Ready => ("configured", None),
+        SpeechCapability::Disabled => ("disabled", None),
+        SpeechCapability::Unavailable(reason) => ("unavailable", Some(reason)),
+    };
+    let report = serde_json::json!({
+        "capability_check": "pass",
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": option_env!("NOT_NEWS_BUILD_COMMIT").unwrap_or("development"),
+        "research": {
+            "selected": settings.research_backend.label().to_ascii_lowercase(),
+            "selected_ready": selected_ready,
+            "opencode": if opencode { "available" } else { "missing" },
+            "hermes": if hermes { "available" } else { "missing" },
+            "remediation": "Install and authenticate OpenCode, or install Hermes and configure its provider dashboard."
+        },
+        "transcription": {
+            "environment_override": if std::env::var_os("GROQ_API_KEY").is_some_and(|value| !value.is_empty()) { "configured" } else { "missing" },
+            "os_vault_probe": "deferred-to-connections-to-avoid-an-unattended-unlock-prompt",
+            "remediation": "Open Connections (Ctrl+,) to store a Groq key in the operating-system vault."
+        },
+        "microphone": match microphone {
+            Ok(()) => serde_json::json!({"state": "available", "permission_probe": "deferred-until-recording"}),
+            Err(error) => serde_json::json!({"state": "unavailable", "detail": error.to_string()}),
+        },
+        "kokoro": {
+            "state": kokoro_state,
+            "detail": kokoro_detail,
+            "endpoint_probe": "deferred-until-a-bounded-voice-note-request",
+            "remediation": "Start the configured Kokoro endpoint and install a local WAV player, or disable voice notes explicitly."
+        }
+    });
+    println!("{}", serde_json::to_string(&report)?);
+    Ok(())
 }
 
 fn run_reference_performance_check(source: &Path) -> Result<(), Box<dyn Error>> {
@@ -3369,6 +3425,16 @@ mod app_tests {
                 std::ffi::OsString::from("destination.sqlite"),
             ])
             .is_err()
+        );
+
+        let capabilities = startup_options([
+            std::ffi::OsString::from("--capability-check"),
+            std::ffi::OsString::from("empty-data"),
+        ])
+        .unwrap();
+        assert_eq!(
+            capabilities.capability_root,
+            Some(PathBuf::from("empty-data"))
         );
     }
 

@@ -12,7 +12,7 @@ pub use prompt::build_research_prompt;
 pub use runner::{
     HermesDashboardError, OutputProtocol, ProcessLimits, ResearchBackend, ResearchBackendChoice,
     ResearchHandle, ResearchLaunch, ResearchProcessEvent, ResearchTermination, hermes_is_available,
-    open_hermes_dashboard,
+    open_hermes_dashboard, opencode_is_available,
 };
 
 pub const EVENT_PREFIX: &str = "AI_NEWS_EVENT:";

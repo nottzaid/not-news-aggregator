@@ -2,7 +2,7 @@
 
 mod speech;
 
-pub use speech::{SpeechEvent, SpeechSubmit, SpeechWorker};
+pub use speech::{SpeechCapability, SpeechEvent, SpeechSubmit, SpeechWorker};
 
 use std::{
     env, fs,
@@ -277,6 +277,41 @@ impl Recorder {
         if !self.path.as_os_str().is_empty() {
             let _ = fs::remove_file(&self.path);
         }
+    }
+}
+
+/// Checks whether the host exposes a usable default microphone configuration
+/// without opening a stream or requesting recording permission.
+///
+/// # Errors
+///
+/// Reports the same absent-device, configuration, channel, and sample-format
+/// failures that recording would reject before creating a scratch WAV.
+pub fn default_input_capability() -> Result<(), AudioError> {
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or(AudioError::NoInputDevice)?;
+    let supported = device
+        .default_input_config()
+        .map_err(|error| AudioError::DefaultConfiguration(error.to_string()))?;
+    if supported.channels() == 0 {
+        return Err(AudioError::DefaultConfiguration(
+            "the device reported zero channels".into(),
+        ));
+    }
+    match supported.sample_format() {
+        SampleFormat::I8
+        | SampleFormat::I16
+        | SampleFormat::I32
+        | SampleFormat::I64
+        | SampleFormat::U8
+        | SampleFormat::U16
+        | SampleFormat::U32
+        | SampleFormat::U64
+        | SampleFormat::F32
+        | SampleFormat::F64 => Ok(()),
+        format => Err(AudioError::UnsupportedSampleFormat(format.to_string())),
     }
 }
 

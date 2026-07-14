@@ -73,6 +73,14 @@ jobs:
           hash -r
           test ! -e /usr/bin/not-news-app
           test -f "$marker"
+          sudo dpkg -i dist/not-news_*_linux-x86_64.deb
+          test -x /usr/bin/not-news-app
+          test -f "$marker"
+          xvfb-run --auto-servernum not-news-app --release-self-check "$RUNNER_TEMP/reinstalled-check"
+          sudo dpkg -r not-news
+          hash -r
+          test ! -e /usr/bin/not-news-app
+          test -f "$marker"
           rm "$marker"
 
       - name: Upload verified Linux deliverables
