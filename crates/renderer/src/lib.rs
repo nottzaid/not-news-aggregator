@@ -11,9 +11,9 @@ pub mod viewport;
 pub use artifacts::{ArtifactLayout, ArtifactMetrics, layout_artifacts};
 pub use background::{BackgroundError, paint_background, render_background_png};
 pub use chrome::{
-    ChromeControl, RecordOrbState, hit_activity_surface, hit_activity_toggle, hit_fixed_chrome,
-    paint_active_metadata, paint_activity_drawer, paint_fixed_chrome, paint_research_prompt,
-    paint_status,
+    ChromeControl, RecordOrbState, active_metadata_scroll_max, hit_active_metadata,
+    hit_activity_surface, hit_activity_toggle, hit_fixed_chrome, paint_active_metadata,
+    paint_activity_drawer, paint_fixed_chrome, paint_research_prompt, paint_status,
 };
 pub use grid::paint_grid;
 pub use layout::{

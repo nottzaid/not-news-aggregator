@@ -194,6 +194,94 @@ impl DurableGraphStore {
         Ok(cleared)
     }
 
+    /// Imports one validated legacy graph into a pristine Rust database while
+    /// opening the source read-only.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed sources and any destination containing graph,
+    /// research, history, or destructive state; failed insertion is atomic.
+    pub fn import_legacy(&self, source: &Path) -> Result<GraphSnapshot, StoreError> {
+        let mut imported = crate::LegacyGraphReader::new(source).load()?;
+        for event in imported.placements.keys() {
+            imported
+                .placement_versions
+                .entry(event.clone())
+                .or_insert(0);
+        }
+        imported.validate()?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = load_snapshot(&transaction)?;
+        let hidden_rows: i64 = transaction.query_row(
+            "SELECT \
+                (SELECT count(*) FROM mutation_log) + \
+                (SELECT count(*) FROM research_sessions) + \
+                (SELECT count(*) FROM research_output_log) + \
+                (SELECT count(*) FROM destructive_log)",
+            [],
+            |row| row.get(0),
+        )?;
+        if current != GraphSnapshot::default() || hidden_rows != 0 {
+            return Err(StoreError::ImportDestinationNotEmpty);
+        }
+
+        for (id, event) in &imported.events {
+            transaction.execute(
+                "INSERT INTO events (id, payload) VALUES (?1, ?2)",
+                params![id.0, serde_json::to_string(event)?],
+            )?;
+        }
+        for (id, bridge) in &imported.bridges {
+            let payload = serde_json::to_string(&serde_json::json!({
+                "from": bridge.from,
+                "to": bridge.to,
+                "label": bridge.label,
+                "provenance": bridge.provenance,
+            }))?;
+            transaction.execute(
+                "INSERT INTO bridges (id, payload) VALUES (?1, ?2)",
+                params![id.0, payload],
+            )?;
+        }
+        for (alias, canonical) in &imported.aliases {
+            transaction.execute(
+                "INSERT INTO event_aliases (alias, canonical_id) VALUES (?1, ?2)",
+                params![alias.0, canonical.0],
+            )?;
+        }
+        for (event, placement) in &imported.placements {
+            transaction.execute(
+                "INSERT INTO placements (event_id, x, y, pinned) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    event.0,
+                    placement.point.x,
+                    placement.point.y,
+                    i64::from(placement.pinned)
+                ],
+            )?;
+            let version = imported
+                .placement_versions
+                .get(event)
+                .copied()
+                .unwrap_or_default();
+            transaction.execute(
+                "INSERT INTO placement_versions (event_id, version) VALUES (?1, ?2)",
+                params![event.0, to_sql_counter(version)?],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE graph_meta SET value=?1 WHERE key='revision'",
+            [imported.revision.to_string()],
+        )?;
+        let snapshot = load_snapshot(&transaction)?;
+        if snapshot != imported {
+            return Err(StoreError::HistoryConflict);
+        }
+        transaction.commit()?;
+        Ok(snapshot)
+    }
+
     fn apply_history(
         &self,
         operation_id: &str,
@@ -917,6 +1005,52 @@ mod tests {
     }
 
     #[test]
+    fn legacy_import_is_read_only_at_source_atomic_and_pristine_only() {
+        let (_source_directory, source) = legacy_graph();
+        Connection::open(&source)
+            .unwrap()
+            .execute("INSERT INTO placements VALUES ('a', 7.25, -8.5, 1)", [])
+            .unwrap();
+        let source_bytes = fs::read(&source).unwrap();
+        let mut expected = crate::LegacyGraphReader::new(&source).load().unwrap();
+        for event in expected.placements.keys() {
+            expected
+                .placement_versions
+                .entry(event.clone())
+                .or_insert(0);
+        }
+        let destination_directory = TempDir::new().unwrap();
+        let destination = destination_directory.path().join("graph.sqlite");
+        let store = DurableGraphStore::open(&destination).unwrap();
+
+        assert_eq!(store.import_legacy(&source).unwrap(), expected);
+        assert_eq!(store.load().unwrap(), expected);
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
+        assert!(matches!(
+            store.import_legacy(&source),
+            Err(StoreError::ImportDestinationNotEmpty)
+        ));
+    }
+
+    #[test]
+    fn failed_legacy_import_leaves_no_partial_destination() {
+        let (_source_directory, source) = legacy_graph();
+        let destination_directory = TempDir::new().unwrap();
+        let destination = destination_directory.path().join("graph.sqlite");
+        let store = DurableGraphStore::open(&destination).unwrap();
+        Connection::open(&destination)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_import BEFORE INSERT ON events \
+                 WHEN NEW.id='b' BEGIN SELECT RAISE(ABORT, 'injected import failure'); END;",
+            )
+            .unwrap();
+
+        assert!(store.import_legacy(&source).is_err());
+        assert_eq!(store.load().unwrap(), GraphSnapshot::default());
+    }
+
+    #[test]
     fn move_is_idempotent_and_a_stale_writer_cannot_overwrite_it() {
         let (_directory, path) = legacy_graph();
         let first = DurableGraphStore::open(&path).unwrap();
@@ -1041,6 +1175,11 @@ mod tests {
             let copy = directory.path().join("graph.sqlite");
             fs::copy(&source, &copy).unwrap();
             let before = crate::LegacyGraphReader::new(&copy).load().unwrap();
+            let imported_path = directory.path().join("imported.sqlite");
+            let imported_store = DurableGraphStore::open(&imported_path).unwrap();
+            let imported = imported_store.import_legacy(&copy).unwrap();
+            assert_knowledge_and_placement_equal(&before, &imported);
+            drop(imported_store);
             let store = DurableGraphStore::open(&copy).unwrap();
             let migrated = store.load().unwrap();
             assert_knowledge_and_placement_equal(&before, &migrated);

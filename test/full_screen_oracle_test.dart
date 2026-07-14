@@ -171,4 +171,52 @@ void main() {
       matchesGoldenFile('goldens/full-screen-activity-1280x800.png'),
     );
   });
+
+  testWidgets('records the narrow active sheet and compact chrome',
+      (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(640, 720);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    const base = Key('narrow-active-base');
+    await tester.pumpWidget(
+      buildCanvasFullScreenOracle(
+        oracleKey: base,
+        activeId: 'spacex',
+        showMetadata: false,
+        showChrome: false,
+      ),
+    );
+    await tester.pump();
+    await expectLater(
+      find.byKey(base),
+      matchesGoldenFile('goldens/narrow-active-base-640x720.png'),
+    );
+
+    const active = Key('narrow-active');
+    await tester.pumpWidget(
+      buildCanvasFullScreenOracle(oracleKey: active, activeId: 'spacex'),
+    );
+    await tester.pump();
+    await expectLater(
+      find.byKey(active),
+      matchesGoldenFile('goldens/narrow-active-640x720.png'),
+    );
+
+    const status = Key('narrow-status');
+    await tester.pumpWidget(
+      buildCanvasFullScreenOracle(
+        oracleKey: status,
+        activeId: 'spacex',
+        showMetadata: false,
+        statusMessage: 'Graph unavailable; no research is shown or writable.',
+      ),
+    );
+    await tester.pump();
+    await expectLater(
+      find.byKey(status),
+      matchesGoldenFile('goldens/narrow-status-640x720.png'),
+    );
+  });
 }

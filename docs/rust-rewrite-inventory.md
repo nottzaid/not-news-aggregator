@@ -182,8 +182,10 @@ check output, or agent prompts except where the provider requires them.
 
 - Direct Skia has raster/temporal gates for the background, graph, expansion,
   fixed desktop chrome including its idle/busy record states, active metadata,
-  status panel, and research activity. Responsive/narrow chrome and the text
-  composer still need comparable visual contracts.
+  status panel, research activity, and narrow 640×720 bottom-sheet/control
+  topology. The keyboard text composer is a rewrite-only affordance—Flutter has
+  no visible counterpart—so it needs a coherent Rust visual/input contract, not
+  a fabricated claim of source parity.
 - Native pointer tests cover unbounded pan, anchored zoom, hover grace,
   activation, artifact paths, placement-only drag, source opening, and durable
   undo/redo. Real-window latency, invalidation-area, high-node-count, device-loss,
@@ -198,6 +200,10 @@ check output, or agent prompts except where the provider requires them.
 - Crash-injection proves transaction rollback and interrupted-session recovery;
   release evidence must still kill real application/backend processes at each
   boundary and exercise the shipped recovery UI.
+- A dropped legacy database or `--import-legacy` performs read-only-source,
+  pristine-destination atomic import. Both preserved graphs import in temporary
+  experiments; packaged Windows/Linux file-drop and path-handling remain release
+  evidence.
 - Windows has no current executable reference or packaging check. The rewrite
   cross-compiles the renderer/platform boundary and compiles the full workspace
   on a native Windows CI runner, but must still verify native window/input

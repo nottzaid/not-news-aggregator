@@ -102,6 +102,13 @@ impl CanvasInteraction {
         self.viewport
     }
 
+    pub fn active_event_position(&self) -> Option<(&EventId, Point)> {
+        let event = self.active.as_ref()?;
+        self.base_positions
+            .get(event)
+            .map(|position| (event, *position))
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
             self.width = f64::from(width);

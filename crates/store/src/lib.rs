@@ -288,6 +288,8 @@ pub enum StoreError {
     InvalidPlacementVersion(EventId),
     #[error("operation ID must not be blank")]
     EmptyOperationId,
+    #[error("legacy import requires a pristine empty destination")]
+    ImportDestinationNotEmpty,
     #[error("operation ID {0:?} was already used for a different command")]
     IdempotencyConflict(String),
     #[error("mutation history no longer matches durable placement state")]

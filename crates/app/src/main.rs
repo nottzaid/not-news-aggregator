@@ -14,7 +14,7 @@ use not_news_agent::{
     ResearchTermination, build_research_prompt,
 };
 use not_news_audio::{Recorder, TranscriptionConfig, TranscriptionHandle};
-use not_news_domain::{GraphSnapshot, Point};
+use not_news_domain::{EventId, GraphSnapshot, Point};
 use not_news_platform::{
     FrameInfo, FrameSchedule, PlatformApplication, WindowOptions, application_data_directory,
     open_external_url, run,
@@ -26,10 +26,10 @@ use not_news_platform::{
     },
 };
 use not_news_renderer::{
-    ChromeControl, Motion, RecordOrbState, SceneAnimation, SceneState, hit_activity_surface,
-    hit_activity_toggle, hit_fixed_chrome, paint_active_metadata, paint_activity_drawer,
-    paint_background, paint_fixed_chrome, paint_graph, paint_grid, paint_research_prompt,
-    paint_status, resolved_positions,
+    ChromeControl, Motion, RecordOrbState, SceneAnimation, SceneState, active_metadata_scroll_max,
+    hit_active_metadata, hit_activity_surface, hit_activity_toggle, hit_fixed_chrome,
+    paint_active_metadata, paint_activity_drawer, paint_background, paint_fixed_chrome,
+    paint_graph, paint_grid, paint_research_prompt, paint_status, resolved_positions,
 };
 use not_news_store::{
     CommitOutcome, DurableGraphStore, ResearchOutputKind, ResearchSessionStatus, StoreError,
@@ -75,6 +75,7 @@ enum PointerOwner {
     FixedChrome(ChromeControl),
     ActivityToggle,
     ActivitySurface,
+    MetadataSurface,
     ConsumedChrome,
 }
 
@@ -103,6 +104,8 @@ struct CanvasApplication {
     activity_openness: f64,
     activity_motion: Option<ActivityMotion>,
     record_hold_deadline: Option<Instant>,
+    metadata_scroll_event: Option<EventId>,
+    metadata_scroll: f64,
 }
 
 impl CanvasApplication {
@@ -148,7 +151,7 @@ impl CanvasApplication {
                 }
                 if status.is_none() && graph.events.is_empty() {
                     status = Some(
-                        "Canvas ready. Press Ctrl+K to type a research question, or use the record orb."
+                        "Canvas ready. Press Ctrl+K, use the record orb, or drop a legacy graph.sqlite here to import it."
                             .into(),
                     );
                 }
@@ -204,6 +207,8 @@ impl CanvasApplication {
             activity_openness: 0.0,
             activity_motion: None,
             record_hold_deadline: None,
+            metadata_scroll_event: None,
+            metadata_scroll: 0.0,
         }
     }
 
@@ -430,6 +435,42 @@ impl CanvasApplication {
                 self.status = Some("Canvas cleared.".into());
             }
             Err(error) => self.status = Some(format!("Canvas was not cleared: {error}")),
+        }
+        true
+    }
+
+    fn import_legacy(&mut self, source: &Path) -> bool {
+        if self.research.is_some() || !self.voice.is_idle() {
+            self.status = Some(
+                "Legacy import is unavailable while recording, transcribing, or researching."
+                    .into(),
+            );
+            return true;
+        }
+        let result = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "the graph store is unavailable".to_owned())
+            .and_then(|store| {
+                store
+                    .import_legacy(source)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(graph) => {
+                let events = graph.events.len();
+                let bridges = graph.bridges.len();
+                self.graph = graph;
+                self.interaction = CanvasInteraction::new(resolved_positions(&self.graph));
+                self.interaction.resize(
+                    physical_dimension(self.physical_width),
+                    physical_dimension(self.physical_height),
+                );
+                self.status = Some(format!(
+                    "Imported {events} events and {bridges} relationships; the source database was not changed."
+                ));
+            }
+            Err(error) => self.status = Some(format!("Legacy graph was not imported: {error}")),
         }
         true
     }
@@ -987,7 +1028,10 @@ impl CanvasApplication {
             let changed = self.interaction.cursor_moved(point, &self.graph, now);
             self.stop_auto_follow_if_panning();
             changed
-        } else if self.activity_surface_at_cursor(now) || self.chrome_at_cursor().is_some() {
+        } else if self.activity_surface_at_cursor(now)
+            || self.chrome_at_cursor().is_some()
+            || self.metadata_at_cursor()
+        {
             self.interaction.cursor_left(now)
         } else {
             self.interaction.cursor_moved(point, &self.graph, now)
@@ -1009,6 +1053,10 @@ impl CanvasApplication {
                 if control == ChromeControl::Record && self.voice.is_recording() {
                     self.record_hold_deadline = Some(now + Duration::from_millis(500));
                 }
+                return self.interaction.cursor_left(now);
+            }
+            if self.metadata_at_cursor() {
+                self.pointer_owner = PointerOwner::MetadataSurface;
                 return self.interaction.cursor_left(now);
             }
             self.pointer_owner = PointerOwner::Canvas;
@@ -1035,6 +1083,7 @@ impl CanvasApplication {
             PointerOwner::None
             | PointerOwner::ActivityToggle
             | PointerOwner::ActivitySurface
+            | PointerOwner::MetadataSurface
             | PointerOwner::ConsumedChrome
             | PointerOwner::FixedChrome(_) => false,
         }
@@ -1057,6 +1106,51 @@ impl CanvasApplication {
             return self.cancel_voice();
         }
         false
+    }
+
+    fn metadata_at_cursor(&self) -> bool {
+        let Some(cursor) = self.cursor else {
+            return false;
+        };
+        let Some((active, position)) = self.interaction.active_event_position() else {
+            return false;
+        };
+        hit_active_metadata(
+            cursor,
+            self.physical_width,
+            self.physical_height,
+            self.scale_factor,
+            &self.graph.events[active],
+            position,
+        )
+    }
+
+    fn scroll_metadata(&mut self, delta: MouseScrollDelta) -> bool {
+        let Some((active, _)) = self.interaction.active_event_position() else {
+            return false;
+        };
+        let active = active.clone();
+        self.sync_metadata_scroll(Some(&active));
+        let event = &self.graph.events[&active];
+        let maximum = active_metadata_scroll_max(
+            self.physical_width,
+            self.physical_height,
+            self.scale_factor,
+            event,
+        );
+        let next = (self.metadata_scroll + scroll_pixels(delta)).clamp(0.0, maximum);
+        let changed = (next - self.metadata_scroll).abs() > f64::EPSILON;
+        self.metadata_scroll = next;
+        changed
+    }
+
+    fn sync_metadata_scroll(&mut self, active: Option<&EventId>) {
+        if self.metadata_scroll_event.as_ref() == active {
+            return;
+        }
+        let active = active.cloned();
+        self.metadata_scroll_event.clone_from(&active);
+        self.metadata_scroll = 0.0;
     }
 
     fn record_orb_state(&self) -> RecordOrbState {
@@ -1100,7 +1194,9 @@ impl PlatformApplication for CanvasApplication {
                 ..
             } => self.mouse_input(*state, now),
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.activity_surface_at_cursor(now) {
+                if self.metadata_at_cursor() {
+                    self.scroll_metadata(*delta)
+                } else if self.activity_surface_at_cursor(now) {
                     false
                 } else {
                     self.interaction.scroll(scroll_pixels(*delta))
@@ -1111,6 +1207,7 @@ impl PlatformApplication for CanvasApplication {
                 false
             }
             WindowEvent::KeyboardInput { event, .. } => self.keyboard_input(event),
+            WindowEvent::DroppedFile(path) => self.import_legacy(path),
             WindowEvent::Focused(false) => {
                 self.pointer_owner = PointerOwner::None;
                 self.record_hold_deadline = None;
@@ -1133,6 +1230,7 @@ impl PlatformApplication for CanvasApplication {
         let width = physical_scalar(frame.physical_width);
         let height = physical_scalar(frame.physical_height);
         let state = self.interaction.frame(&self.graph, frame.now);
+        self.sync_metadata_scroll(state.expanded_event.as_ref());
         let viewport = self.interaction.viewport();
         paint_background(canvas, width, height);
         paint_grid(canvas, width, height, viewport);
@@ -1162,6 +1260,7 @@ impl PlatformApplication for CanvasApplication {
                 scale_scalar(frame.scale_factor),
                 &self.graph.events[active],
                 state.positions[active],
+                scale_scalar(self.metadata_scroll),
             );
         }
         if let Some(status) = self.status.as_deref() {
@@ -1223,17 +1322,62 @@ impl PlatformApplication for CanvasApplication {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let database = std::env::args_os()
-        .nth(1)
-        .map_or_else(default_database_path, |path| Ok(PathBuf::from(path)));
-    let application = match database {
+    let options = startup_options(std::env::args_os().skip(1))?;
+    let mut application = match options.database {
         Ok(database) => CanvasApplication::load(&database),
         Err(error) => CanvasApplication::unavailable(format!(
             "Data directory unavailable; no graph is open: {error}"
         )),
     };
+    if let Some(source) = options.import_legacy {
+        application.import_legacy(&source);
+    }
     run(application, WindowOptions::default())?;
     Ok(())
+}
+
+struct StartupOptions {
+    database: Result<PathBuf, std::io::Error>,
+    import_legacy: Option<PathBuf>,
+}
+
+fn startup_options(
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<StartupOptions, std::io::Error> {
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    if arguments.len() == 1 && !arguments[0].to_string_lossy().starts_with('-') {
+        return Ok(StartupOptions {
+            database: Ok(PathBuf::from(&arguments[0])),
+            import_legacy: None,
+        });
+    }
+    let mut database = None;
+    let mut import_legacy = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        let flag = &arguments[index];
+        let value = arguments.get(index + 1).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} requires a path", flag.to_string_lossy()),
+            )
+        })?;
+        if flag == "--database" && database.is_none() {
+            database = Some(PathBuf::from(value));
+        } else if flag == "--import-legacy" && import_legacy.is_none() {
+            import_legacy = Some(PathBuf::from(value));
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unknown or repeated option {}", flag.to_string_lossy()),
+            ));
+        }
+        index += 2;
+    }
+    Ok(StartupOptions {
+        database: database.map_or_else(default_database_path, Ok),
+        import_legacy,
+    })
 }
 
 fn default_database_path() -> Result<PathBuf, std::io::Error> {
@@ -1399,6 +1543,63 @@ mod app_tests {
                 .research_activity("seed"),
             Err(StoreError::MissingResearchSession(_))
         ));
+    }
+
+    #[test]
+    fn dropped_legacy_graph_imports_into_pristine_state_without_touching_source() {
+        let directory = TempDir::new().unwrap();
+        let source = directory.path().join("legacy.sqlite");
+        let source_store = DurableGraphStore::open(&source).unwrap();
+        source_store.start_research_session("seed", "Seed").unwrap();
+        source_store
+            .accept_research_event(
+                "seed",
+                0,
+                &not_news_domain::ResearchEvent {
+                    id: not_news_domain::EventId("legacy-event".into()),
+                    title: "Legacy".into(),
+                    date: "Jul 14, 2026".into(),
+                    color: 0xff4c_9be8,
+                    summary: "Imported without source mutation.".into(),
+                    source_label: "Primary".into(),
+                    artifacts: Vec::new(),
+                    url: None,
+                },
+            )
+            .unwrap();
+        drop(source_store);
+        let source_before = std::fs::read(&source).unwrap();
+        let mut application = CanvasApplication::load(&directory.path().join("destination.sqlite"));
+
+        assert!(application.import_legacy(&source));
+        assert!(
+            application
+                .graph
+                .events
+                .contains_key(&not_news_domain::EventId("legacy-event".into()))
+        );
+        assert!(application.status.as_deref().is_some_and(|status| {
+            status.contains("Imported 1 event")
+                && status.contains("source database was not changed")
+        }));
+        assert_eq!(std::fs::read(&source).unwrap(), source_before);
+    }
+
+    #[test]
+    fn startup_arguments_separate_import_source_from_destination() {
+        let options = startup_options([
+            std::ffi::OsString::from("--database"),
+            std::ffi::OsString::from("destination.sqlite"),
+            std::ffi::OsString::from("--import-legacy"),
+            std::ffi::OsString::from("legacy.sqlite"),
+        ])
+        .unwrap();
+        assert_eq!(
+            options.database.unwrap(),
+            PathBuf::from("destination.sqlite")
+        );
+        assert_eq!(options.import_legacy, Some(PathBuf::from("legacy.sqlite")));
+        assert!(startup_options([std::ffi::OsString::from("--import-legacy")]).is_err());
     }
 
     #[cfg(unix)]

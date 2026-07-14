@@ -69,9 +69,10 @@ pub fn hit_fixed_chrome(
     };
     let width = physical_width / scale_factor;
     let height = physical_height / scale_factor;
+    let (record_left, record_bottom, record_diameter) = record_geometry_f64(width);
     let record_center = WorldPoint {
-        x: width / 2.0,
-        y: height - f64::from(RECORD_BOTTOM + RECORD_DIAMETER / 2.0),
+        x: record_left + record_diameter / 2.0,
+        y: height - record_bottom - record_diameter / 2.0,
     };
     let record_delta = WorldPoint {
         x: point.x - record_center.x,
@@ -80,13 +81,18 @@ pub fn hit_fixed_chrome(
     if record_delta
         .x
         .mul_add(record_delta.x, record_delta.y * record_delta.y)
-        <= f64::from(RECORD_DIAMETER * RECORD_DIAMETER / 4.0)
+        <= record_diameter * record_diameter / 4.0
     {
         return Some(ChromeControl::Record);
     }
 
     let left = width - f64::from(CONTROL_RIGHT + CONTROL_WIDTH);
-    let top = height - f64::from(CONTROL_BOTTOM + CONTROL_HEIGHT);
+    let control_bottom = if width > 720.0 {
+        f64::from(CONTROL_BOTTOM)
+    } else {
+        18.0
+    };
+    let top = height - control_bottom - f64::from(CONTROL_HEIGHT);
     if point.x < left
         || point.x > left + f64::from(CONTROL_WIDTH)
         || point.y < top
@@ -164,6 +170,102 @@ pub fn hit_activity_surface(
         && point.x <= width - f64::from(ACTIVITY_RIGHT)
         && point.y >= top
         && point.y <= height - bottom
+}
+
+/// Resolves the fixed metadata overlay so canvas gestures cannot pass through it.
+pub fn hit_active_metadata(
+    physical_point: WorldPoint,
+    physical_width: f64,
+    physical_height: f64,
+    scale_factor: f64,
+    event: &ResearchEvent,
+    world_position: WorldPoint,
+) -> bool {
+    if !physical_width.is_finite()
+        || !physical_height.is_finite()
+        || !scale_factor.is_finite()
+        || scale_factor <= 0.0
+    {
+        return false;
+    }
+    let point = WorldPoint {
+        x: physical_point.x / scale_factor,
+        y: physical_point.y / scale_factor,
+    };
+    let width = physical_width / scale_factor;
+    let height = physical_height / scale_factor;
+    let mobile = width < 720.0;
+    let sheet_width = if mobile {
+        width - 28.0
+    } else {
+        f64::from(desktop_metadata_width(&event.summary))
+    };
+    let sheet_height = if mobile {
+        260.0_f64.min(height - 150.0)
+    } else {
+        260.0
+    };
+    if sheet_width <= 80.0 || sheet_height <= 40.0 {
+        return false;
+    }
+    let left = if mobile {
+        14.0
+    } else if world_position.x >= 700.0 {
+        22.0
+    } else {
+        width - 22.0 - sheet_width
+    };
+    let top = if mobile {
+        height - 92.0 - sheet_height
+    } else if world_position.y > 468.0 {
+        78.0
+    } else {
+        height - 22.0 - sheet_height
+    };
+    point.x >= left
+        && point.x <= left + sheet_width
+        && point.y >= top
+        && point.y <= top + sheet_height
+}
+
+/// Returns the logical scroll extent of Flutter's metadata content viewport.
+pub fn active_metadata_scroll_max(
+    physical_width: f64,
+    physical_height: f64,
+    scale_factor: f64,
+    event: &ResearchEvent,
+) -> f64 {
+    if !physical_width.is_finite()
+        || !physical_height.is_finite()
+        || !scale_factor.is_finite()
+        || scale_factor <= 0.0
+    {
+        return 0.0;
+    }
+    let width = physical_width / scale_factor;
+    let height = physical_height / scale_factor;
+    let sheet_width = if width < 720.0 {
+        width - 28.0
+    } else {
+        f64::from(desktop_metadata_width(&event.summary))
+    };
+    let sheet_height = if width < 720.0 {
+        260.0_f64.min(height - 150.0)
+    } else {
+        260.0
+    };
+    if sheet_width <= 80.0 || sheet_height <= 40.0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let content_width = (sheet_width - 32.0) as f32;
+    let summary_height = METADATA_TEXT.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        let summary = resources.paragraph(&event.summary, MetadataStyle::Summary, content_width);
+        summary.layout(content_width);
+        summary.height()
+    });
+    (f64::from(33.0 + summary_height + 13.0) - sheet_height).max(0.0)
 }
 
 pub fn paint_activity_drawer(
@@ -392,7 +494,7 @@ pub fn paint_fixed_chrome(
     canvas.restore();
 }
 
-/// Paints Flutter's desktop active-event metadata sheet in screen space.
+/// Paints Flutter's responsive active-event metadata sheet in screen space.
 pub fn paint_active_metadata(
     canvas: &Canvas,
     physical_width: f32,
@@ -400,24 +502,42 @@ pub fn paint_active_metadata(
     scale_factor: f32,
     event: &ResearchEvent,
     world_position: WorldPoint,
+    scroll_offset: f32,
 ) {
     let width = physical_width / scale_factor;
     let height = physical_height / scale_factor;
-    if width < 720.0 {
+    let mobile = width < 720.0;
+    let sheet_width = if mobile {
+        width - 28.0
+    } else {
+        desktop_metadata_width(&event.summary)
+    };
+    if sheet_width <= 80.0 {
         return;
     }
-    let sheet_width = desktop_metadata_width(&event.summary);
-    let left = if world_position.x >= 700.0 {
+    let sheet_height = if mobile {
+        260.0_f32.min(height - 150.0)
+    } else {
+        260.0
+    };
+    if sheet_height <= 40.0 {
+        return;
+    }
+    let left = if mobile {
+        14.0
+    } else if world_position.x >= 700.0 {
         22.0
     } else {
         width - 22.0 - sheet_width
     };
-    let top = if world_position.y > 468.0 {
+    let top = if mobile {
+        height - 92.0 - sheet_height
+    } else if world_position.y > 468.0 {
         78.0
     } else {
-        height - 22.0 - 260.0
+        height - 22.0 - sheet_height
     };
-    let bounds = Rect::from_xywh(left, top, sheet_width, 260.0);
+    let bounds = Rect::from_xywh(left, top, sheet_width, sheet_height);
     canvas.save();
     canvas.scale((scale_factor, scale_factor));
     paint_metadata_shadow(canvas, bounds, INK_0, 0.62, 36.0, 18.0);
@@ -437,7 +557,7 @@ pub fn paint_active_metadata(
 
     canvas.save();
     canvas.clip_rrect(rounded, skia_safe::ClipOp::Intersect, true);
-    let stripe = Rect::from_xywh(left, top, 4.0, 260.0);
+    let stripe = Rect::from_xywh(left, top, 4.0, sheet_height);
     let mut stripe_glow = Paint::default();
     stripe_glow.set_anti_alias(true);
     stripe_glow.set_color4f(color4f_with_alpha(event.color, 0.50), None);
@@ -452,7 +572,11 @@ pub fn paint_active_metadata(
     canvas.draw_rect(stripe, &stripe_paint);
     canvas.restore();
 
+    canvas.save();
+    canvas.clip_rrect(rounded, skia_safe::ClipOp::Intersect, true);
+    canvas.translate((0.0, -scroll_offset.max(0.0)));
     paint_metadata_text(canvas, bounds, event);
+    canvas.restore();
     canvas.restore();
 }
 
@@ -481,7 +605,7 @@ pub fn paint_status(
     let panel_height = (message_height + 22.0).max(38.0);
     let bounds = Rect::from_xywh(
         22.0,
-        height - 28.0 - panel_height,
+        height - if width > 720.0 { 28.0 } else { 90.0 } - panel_height,
         panel_width,
         panel_height,
     );
@@ -655,24 +779,39 @@ fn paint_metadata_text(canvas: &Canvas, bounds: Rect, event: &ResearchEvent) {
 }
 
 fn paint_record_orb(canvas: &Canvas, width: f32, height: f32, state: RecordOrbState) {
-    let center = (width / 2.0, height - RECORD_BOTTOM - RECORD_DIAMETER / 2.0);
+    let (left, bottom, diameter) = record_geometry(width);
+    let center = (left + diameter / 2.0, height - bottom - diameter / 2.0);
     let orb_color = match state {
         RecordOrbState::Idle => SIGNAL,
         RecordOrbState::Busy => SIGNAL_HOT_DEEP,
     };
-    paint_blurred_circle(canvas, (center.0, center.1 + 18.0), 36.0, orb_color, 0.55);
-    paint_blurred_circle(canvas, (center.0, center.1 + 4.0), 12.0, orb_color, 0.30);
+    paint_blurred_circle(
+        canvas,
+        (center.0, center.1 + 18.0),
+        36.0,
+        diameter / 2.0,
+        orb_color,
+        0.55,
+    );
+    paint_blurred_circle(
+        canvas,
+        (center.0, center.1 + 4.0),
+        12.0,
+        diameter / 2.0,
+        orb_color,
+        0.30,
+    );
 
     let mut orb = Paint::default();
     orb.set_anti_alias(true);
     orb.set_color(color(orb_color));
-    canvas.draw_circle(center, RECORD_DIAMETER / 2.0, &orb);
+    canvas.draw_circle(center, diameter / 2.0, &orb);
     let mut border = Paint::default();
     border.set_anti_alias(true);
     border.set_style(PaintStyle::Stroke);
     border.set_stroke_width(2.0);
     border.set_color4f(color4f_with_alpha(INK_0, 0.28), None);
-    canvas.draw_circle(center, RECORD_DIAMETER / 2.0 - 1.0, &border);
+    canvas.draw_circle(center, diameter / 2.0 - 1.0, &border);
 
     let mut core = Paint::default();
     core.set_anti_alias(true);
@@ -691,9 +830,10 @@ fn paint_record_orb(canvas: &Canvas, width: f32, height: f32, state: RecordOrbSt
 }
 
 fn paint_zoom_controls(canvas: &Canvas, width: f32, height: f32, zoom: f64) {
+    let bottom = if width > 720.0 { CONTROL_BOTTOM } else { 18.0 };
     let bounds = Rect::from_xywh(
         width - CONTROL_RIGHT - CONTROL_WIDTH,
-        height - CONTROL_BOTTOM - CONTROL_HEIGHT,
+        height - bottom - CONTROL_HEIGHT,
         CONTROL_WIDTH,
         CONTROL_HEIGHT,
     );
@@ -766,6 +906,7 @@ fn paint_blurred_circle(
     canvas: &Canvas,
     center: (f32, f32),
     blur_radius: f32,
+    circle_radius: f32,
     argb: u32,
     alpha: f32,
 ) {
@@ -777,7 +918,27 @@ fn paint_blurred_circle(
         flutter_blur_sigma(blur_radius),
         None,
     ));
-    canvas.draw_circle(center, RECORD_DIAMETER / 2.0, &paint);
+    canvas.draw_circle(center, circle_radius, &paint);
+}
+
+fn record_geometry(width: f32) -> (f32, f32, f32) {
+    let diameter = if width > 720.0 { RECORD_DIAMETER } else { 64.0 };
+    let bottom = if width > 720.0 { RECORD_BOTTOM } else { 18.0 };
+    (width / 2.0 - 36.0, bottom, diameter)
+}
+
+fn record_geometry_f64(width: f64) -> (f64, f64, f64) {
+    let diameter = if width > 720.0 {
+        f64::from(RECORD_DIAMETER)
+    } else {
+        64.0
+    };
+    let bottom = if width > 720.0 {
+        f64::from(RECORD_BOTTOM)
+    } else {
+        18.0
+    };
+    (width / 2.0 - 36.0, bottom, diameter)
 }
 
 fn flutter_blur_sigma(radius: f32) -> f32 {
@@ -1296,6 +1457,158 @@ mod tests {
     }
 
     #[test]
+    fn narrow_chrome_metadata_and_status_follow_flutter_breakpoints() {
+        const FLUTTER_BASE: &[u8] =
+            include_bytes!("../../../test/goldens/narrow-active-base-640x720.png");
+        const FLUTTER_ACTIVE: &[u8] =
+            include_bytes!("../../../test/goldens/narrow-active-640x720.png");
+        const FLUTTER_STATUS: &[u8] =
+            include_bytes!("../../../test/goldens/narrow-status-640x720.png");
+        let flutter_base = read_image_size(
+            &Image::from_encoded(Data::new_copy(FLUTTER_BASE)).unwrap(),
+            (640, 720),
+        );
+        let flutter_active = read_image_size(
+            &Image::from_encoded(Data::new_copy(FLUTTER_ACTIVE)).unwrap(),
+            (640, 720),
+        );
+        let flutter_status = read_image_size(
+            &Image::from_encoded(Data::new_copy(FLUTTER_STATUS)).unwrap(),
+            (640, 720),
+        );
+        let event = ResearchEvent {
+            id: EventId("spacex".into()),
+            title: "SpaceX compute partnership".into(),
+            date: "May 6, 2026".into(),
+            color: 0xffb8_5534,
+            summary: "Anthropic announces access to SpaceX's Colossus 1 capacity. Claude usage-limit changes and orbital compute interest live inside this event graph as claims, not separate Canvas points.".into(),
+            source_label: "Anthropic".into(),
+            artifacts: vec![SourceArtifact {
+                text: "unused".into(),
+                source: "official".into(),
+                url: "https://example.com".into(),
+            }],
+            url: None,
+        };
+        let rust_active = paint_over_size(&flutter_base, (640, 720), |canvas| {
+            paint_active_metadata(
+                canvas,
+                640.0,
+                720.0,
+                1.0,
+                &event,
+                WorldPoint { x: 800.0, y: 500.0 },
+                0.0,
+            );
+            paint_fixed_chrome(canvas, 640.0, 720.0, 1.0, 1.0, RecordOrbState::Idle);
+        });
+        let rust_status = paint_over_size(&flutter_base, (640, 720), |canvas| {
+            paint_status(
+                canvas,
+                640.0,
+                720.0,
+                1.0,
+                "Graph unavailable; no research is shown or writable.",
+                false,
+            );
+            paint_fixed_chrome(canvas, 640.0, 720.0, 1.0, 1.0, RecordOrbState::Idle);
+        });
+        let metadata = residual_crop_metrics_width(
+            &flutter_base,
+            &flutter_active,
+            &flutter_base,
+            &rust_active,
+            &[(0, 330, 640, 310)],
+            640,
+        );
+        let chrome = residual_crop_metrics_width(
+            &flutter_base,
+            &flutter_status,
+            &flutter_base,
+            &rust_status,
+            &[(260, 680, 120, 40), (400, 680, 240, 40)],
+            640,
+        );
+        let status = residual_crop_metrics_width(
+            &flutter_base,
+            &flutter_status,
+            &flutter_base,
+            &rust_status,
+            &[(0, 540, 480, 95)],
+            640,
+        );
+        assert!(
+            metadata.1 <= 4.3 && metadata.2 <= 230,
+            "Flutter/Rust narrow metadata drift {metadata:?}"
+        );
+        assert!(
+            chrome.1 <= 0.8 && chrome.2 <= 130,
+            "Flutter/Rust narrow chrome drift {chrome:?}"
+        );
+        assert!(
+            status.1 <= 4.0 && status.2 <= 230,
+            "Flutter/Rust narrow status drift {status:?}"
+        );
+    }
+
+    #[test]
+    fn narrow_fixed_surfaces_own_their_source_derived_hit_regions() {
+        let event = ResearchEvent {
+            id: EventId("active".into()),
+            title: "Active".into(),
+            date: "Jul 14, 2026".into(),
+            color: 0xffb8_5534,
+            summary: "Visible mobile metadata".into(),
+            source_label: "Primary".into(),
+            artifacts: Vec::new(),
+            url: None,
+        };
+        assert_eq!(
+            hit_fixed_chrome(WorldPoint { x: 316.0, y: 670.0 }, 640.0, 720.0, 1.0),
+            Some(ChromeControl::Record)
+        );
+        assert_eq!(
+            hit_fixed_chrome(WorldPoint { x: 602.0, y: 682.0 }, 640.0, 720.0, 1.0),
+            Some(ChromeControl::Clear)
+        );
+        assert!(hit_active_metadata(
+            WorldPoint { x: 20.0, y: 400.0 },
+            640.0,
+            720.0,
+            1.0,
+            &event,
+            WorldPoint { x: 800.0, y: 500.0 },
+        ));
+        assert!(!hit_active_metadata(
+            WorldPoint { x: 10.0, y: 400.0 },
+            640.0,
+            720.0,
+            1.0,
+            &event,
+            WorldPoint { x: 800.0, y: 500.0 },
+        ));
+    }
+
+    #[test]
+    fn narrow_metadata_scroll_extent_tracks_real_laid_out_content() {
+        let mut event = ResearchEvent {
+            id: EventId("active".into()),
+            title: "Active".into(),
+            date: "Jul 14, 2026".into(),
+            color: 0xffb8_5534,
+            summary: "Short metadata remains stationary.".into(),
+            source_label: "Primary".into(),
+            artifacts: Vec::new(),
+            url: None,
+        };
+        assert!(active_metadata_scroll_max(640.0, 720.0, 1.0, &event).abs() < f64::EPSILON);
+        event.summary = "A bounded metadata viewport must derive its scroll extent from the same shaped paragraph that is painted. ".repeat(40);
+        let extent = active_metadata_scroll_max(640.0, 360.0, 1.0, &event);
+        assert!(extent > 700.0, "unexpected long-content extent {extent}");
+        assert!(active_metadata_scroll_max(f64::NAN, 360.0, 1.0, &event).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn active_metadata_stays_within_flutter_crop_budget() {
         const FLUTTER: &[u8] =
             include_bytes!("../../../test/goldens/full-screen-active-1280x800.png");
@@ -1325,6 +1638,7 @@ mod tests {
                 1.0,
                 &event,
                 WorldPoint { x: 600.0, y: 500.0 },
+                0.0,
             );
         });
         let metrics = residual_crop_metrics(
@@ -1380,7 +1694,11 @@ mod tests {
     }
 
     fn paint_over(base: &[u8], paint: impl FnOnce(&Canvas)) -> Vec<u8> {
-        let info = ImageInfo::new_n32_premul((1280, 800), None);
+        paint_over_size(base, (1280, 800), paint)
+    }
+
+    fn paint_over_size(base: &[u8], size: (i32, i32), paint: impl FnOnce(&Canvas)) -> Vec<u8> {
+        let info = ImageInfo::new_n32_premul(size, None);
         let row_bytes = info.min_row_bytes();
         let mut pixels = base.to_vec();
         {
@@ -1621,6 +1939,24 @@ mod tests {
         actual_chrome: &[u8],
         regions: &[(usize, usize, usize, usize)],
     ) -> (usize, f64, u16) {
+        residual_crop_metrics_width(
+            expected_base,
+            expected_chrome,
+            actual_base,
+            actual_chrome,
+            regions,
+            1280,
+        )
+    }
+
+    fn residual_crop_metrics_width(
+        expected_base: &[u8],
+        expected_chrome: &[u8],
+        actual_base: &[u8],
+        actual_chrome: &[u8],
+        regions: &[(usize, usize, usize, usize)],
+        image_width: usize,
+    ) -> (usize, f64, u16) {
         let mut changed = 0usize;
         let mut delta = 0u64;
         let mut maximum = 0u16;
@@ -1628,7 +1964,7 @@ mod tests {
         for &(left, top, width, height) in regions {
             for y in top..top + height {
                 for x in left..left + width {
-                    let offset = (y * 1280 + x) * 4;
+                    let offset = (y * image_width + x) * 4;
                     let mut pixel_changed = false;
                     for channel in 0..4 {
                         let expected = i16::from(expected_chrome[offset + channel])
@@ -1654,8 +1990,12 @@ mod tests {
     }
 
     fn read_image(image: &Image) -> Vec<u8> {
-        assert_eq!((image.width(), image.height()), (1280, 800));
-        let info = ImageInfo::new_n32_premul((1280, 800), None);
+        read_image_size(image, (1280, 800))
+    }
+
+    fn read_image_size(image: &Image, size: (i32, i32)) -> Vec<u8> {
+        assert_eq!((image.width(), image.height()), size);
+        let info = ImageInfo::new_n32_premul(size, None);
         let row_bytes = info.min_row_bytes();
         let mut pixels = vec![0; info.compute_byte_size(row_bytes)];
         assert!(image.read_pixels(&info, &mut pixels, row_bytes, (0, 0), CachingHint::Disallow,));
