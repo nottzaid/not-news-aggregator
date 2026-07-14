@@ -5,7 +5,8 @@ use glutin::{
     config::{Config, ConfigTemplateBuilder, GlConfig},
     context::{ContextApi, ContextAttributesBuilder, PossiblyCurrentContext},
     display::{GetGlDisplay, GlDisplay},
-    prelude::{GlSurface, NotCurrentGlContext},
+    error::ErrorKind,
+    prelude::{GlSurface, NotCurrentGlContext, PossiblyCurrentGlContext},
     surface::{Surface as GlutinSurface, SurfaceAttributesBuilder, WindowSurface},
 };
 use glutin_winit::DisplayBuilder;
@@ -103,7 +104,7 @@ pub fn run<A: PlatformApplication>(
         .build(&event_loop, template, choose_config)
         .map_err(|error| PlatformError::Display(error.to_string()))?;
     let window = window.ok_or(PlatformError::MissingWindow)?;
-    let native = NativeSurface::new(window, &config)?;
+    let native = NativeSurface::new(window, config)?;
     native.window.request_redraw();
 
     let mut runner = Runner {
@@ -111,6 +112,7 @@ pub fn run<A: PlatformApplication>(
         native,
         deferred_error: None,
         render_on_resume,
+        recovery: RecoveryBudget::default(),
     };
     event_loop
         .run_app(&mut runner)
@@ -136,6 +138,12 @@ fn choose_config(configs: Box<dyn Iterator<Item = Config> + '_>) -> Config {
 }
 
 struct NativeSurface {
+    gpu: Option<GpuSurface>,
+    config: Config,
+    window: Window,
+}
+
+struct GpuSurface {
     skia_surface: Surface,
     gl_surface: GlutinSurface<WindowSurface>,
     skia_context: skia_safe::gpu::DirectContext,
@@ -143,11 +151,44 @@ struct NativeSurface {
     framebuffer: FramebufferInfo,
     samples: usize,
     stencil_bits: usize,
-    window: Window,
 }
 
 impl NativeSurface {
-    fn new(window: Window, config: &Config) -> Result<Self, PlatformError> {
+    fn new(window: Window, config: Config) -> Result<Self, PlatformError> {
+        let gpu = GpuSurface::new(&window, &config)?;
+        Ok(Self {
+            gpu: Some(gpu),
+            config,
+            window,
+        })
+    }
+
+    fn gpu(&mut self) -> &mut GpuSurface {
+        self.gpu
+            .as_mut()
+            .expect("a native surface is never used between teardown and replacement")
+    }
+
+    fn resize(&mut self, width: u32, height: u32) -> Result<(), PlatformError> {
+        let Self { gpu, window, .. } = self;
+        gpu.as_mut()
+            .expect("a native surface is never used between teardown and replacement")
+            .resize(window, width, height)
+    }
+
+    fn present(&mut self) -> Result<(), glutin::error::Error> {
+        self.gpu().present()
+    }
+
+    fn rebuild(&mut self) -> Result<(), PlatformError> {
+        drop(self.gpu.take());
+        self.gpu = Some(GpuSurface::new(&self.window, &self.config)?);
+        Ok(())
+    }
+}
+
+impl GpuSurface {
+    fn new(window: &Window, config: &Config) -> Result<Self, PlatformError> {
         let raw_window_handle = window
             .window_handle()
             .map_err(|error| PlatformError::WindowHandle(error.to_string()))?
@@ -183,7 +224,7 @@ impl NativeSurface {
         let samples = usize::from(config.num_samples());
         let stencil_bits = usize::from(config.stencil_size());
         let skia_surface = wrap_surface(
-            &window,
+            window,
             framebuffer,
             &mut skia_context,
             samples,
@@ -198,11 +239,10 @@ impl NativeSurface {
             framebuffer,
             samples,
             stencil_bits,
-            window,
         })
     }
 
-    fn resize(&mut self, width: u32, height: u32) -> Result<(), PlatformError> {
+    fn resize(&mut self, window: &Window, width: u32, height: u32) -> Result<(), PlatformError> {
         self.gl_surface.resize(
             &self.gl_context,
             nonzero_extent(width),
@@ -210,7 +250,7 @@ impl NativeSurface {
         );
         if width > 0 && height > 0 {
             self.skia_surface = wrap_surface(
-                &self.window,
+                window,
                 self.framebuffer,
                 &mut self.skia_context,
                 self.samples,
@@ -220,18 +260,49 @@ impl NativeSurface {
         Ok(())
     }
 
-    fn present(&mut self) -> Result<(), PlatformError> {
+    fn present(&mut self) -> Result<(), glutin::error::Error> {
         self.skia_context.flush_and_submit();
-        self.gl_surface
-            .swap_buffers(&self.gl_context)
-            .map_err(|error| PlatformError::Present(error.to_string()))
+        self.gl_surface.swap_buffers(&self.gl_context)
     }
 }
 
-impl Drop for NativeSurface {
+impl Drop for GpuSurface {
     fn drop(&mut self) {
         self.skia_context.release_resources_and_abandon();
+        let _ = self.gl_context.make_not_current_in_place();
     }
+}
+
+#[derive(Default)]
+struct RecoveryBudget {
+    consecutive: u8,
+}
+
+impl RecoveryBudget {
+    const LIMIT: u8 = 2;
+
+    fn presented(&mut self) {
+        self.consecutive = 0;
+    }
+
+    fn permits(&mut self, kind: ErrorKind) -> bool {
+        if !is_recoverable_surface_error(kind) || self.consecutive >= Self::LIMIT {
+            return false;
+        }
+        self.consecutive += 1;
+        true
+    }
+}
+
+fn is_recoverable_surface_error(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::BadContext
+            | ErrorKind::BadContextState
+            | ErrorKind::BadCurrentSurface
+            | ErrorKind::BadSurface
+            | ErrorKind::ContextLost
+    )
 }
 
 struct Runner<A> {
@@ -239,6 +310,7 @@ struct Runner<A> {
     native: NativeSurface,
     deferred_error: Option<PlatformError>,
     render_on_resume: bool,
+    recovery: RecoveryBudget,
 }
 
 impl<A: PlatformApplication> ApplicationHandler for Runner<A> {
@@ -311,8 +383,17 @@ impl<A: PlatformApplication> Runner<A> {
         };
         let schedule = self
             .application
-            .render(self.native.skia_surface.canvas(), frame);
-        self.native.present()?;
+            .render(self.native.gpu().skia_surface.canvas(), frame);
+        match self.native.present() {
+            Ok(()) => self.recovery.presented(),
+            Err(error) if self.recovery.permits(error.error_kind()) => {
+                self.native.rebuild()?;
+                self.native.window.request_redraw();
+                event_loop.set_control_flow(ControlFlow::Wait);
+                return Ok(());
+            }
+            Err(error) => return Err(PlatformError::Present(error.to_string())),
+        }
         match schedule {
             FrameSchedule::Wait => event_loop.set_control_flow(ControlFlow::Wait),
             FrameSchedule::RedrawAt(deadline) => {
@@ -396,4 +477,21 @@ fn wrap_surface(
         None,
     )
     .ok_or(PlatformError::SkiaSurface)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_and_surface_loss_rebuild_twice_without_masking_fatal_errors() {
+        let mut budget = RecoveryBudget::default();
+        assert!(budget.permits(ErrorKind::ContextLost));
+        assert!(budget.permits(ErrorKind::BadSurface));
+        assert!(!budget.permits(ErrorKind::BadCurrentSurface));
+        budget.presented();
+        assert!(budget.permits(ErrorKind::BadContextState));
+        assert!(!budget.permits(ErrorKind::OutOfMemory));
+        assert!(!budget.permits(ErrorKind::BadDisplay));
+    }
 }

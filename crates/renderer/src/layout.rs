@@ -588,6 +588,46 @@ mod tests {
     }
 
     #[test]
+    fn dense_two_hundred_event_research_cluster_is_finite_and_collision_free() {
+        let events: Vec<_> = (0..200)
+            .map(|index| {
+                event(
+                    &format!("dense-{index}"),
+                    &format!("Research finding {index} with a substantial identifying label"),
+                )
+            })
+            .collect();
+        let edges: Vec<_> = (0..199)
+            .map(|index| (format!("dense-{index}"), format!("dense-{}", index + 1)))
+            .collect();
+        let edge_refs: Vec<_> = edges
+            .iter()
+            .map(|(from, to)| (from.as_str(), to.as_str()))
+            .collect();
+        let graph = graph(events, &edge_refs);
+        let positions = generate_positions(&graph);
+        assert_eq!(positions.len(), 200);
+        assert!(
+            positions
+                .values()
+                .all(|point| point.x.is_finite() && point.y.is_finite())
+        );
+        let events: Vec<_> = graph.events.values().collect();
+        for left in 0..events.len() {
+            for right in left + 1..events.len() {
+                let minimum =
+                    event_footprint_radius(events[left]) + event_footprint_radius(events[right]);
+                assert!(
+                    distance(positions[&events[left].id], positions[&events[right].id]) >= minimum,
+                    "{} overlaps {}",
+                    events[left].id.0,
+                    events[right].id.0
+                );
+            }
+        }
+    }
+
+    #[test]
     fn disconnected_components_are_separated_while_saved_placements_win() {
         let events = vec![
             event("cosmos-a", "Cosmos A"),

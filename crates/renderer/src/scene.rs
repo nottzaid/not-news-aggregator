@@ -755,6 +755,67 @@ mod tests {
     }
 
     #[test]
+    fn four_thousand_event_frame_shapes_only_visible_labels_and_reuses_them() {
+        let mut graph = GraphSnapshot::default();
+        let mut positions = HashMap::new();
+        for index in 0..4_096 {
+            let id = EventId(format!("event-{index}"));
+            graph.events.insert(
+                id.clone(),
+                ResearchEvent {
+                    id: id.clone(),
+                    title: format!("Distinct research finding {index}"),
+                    date: "Jul 14, 2026".into(),
+                    color: 0xff4c_9be8,
+                    summary: "Performance evidence.".into(),
+                    source_label: "Primary".into(),
+                    artifacts: Vec::new(),
+                    url: None,
+                },
+            );
+            let point = if index < 8 {
+                WorldPoint {
+                    x: 220.0 + usize_to_scalar(index) * 130.0,
+                    y: 450.0,
+                }
+            } else {
+                WorldPoint {
+                    x: 100_000.0 + usize_to_scalar(index) * 300.0,
+                    y: 100_000.0,
+                }
+            };
+            positions.insert(id, point);
+        }
+        TEXT_RESOURCES.with(|resources| resources.borrow_mut().paragraphs.clear());
+        let mut surface = surfaces::raster_n32_premul((1_280, 800)).unwrap();
+        paint_graph(
+            surface.canvas(),
+            1_280.0,
+            800.0,
+            Viewport::default(),
+            &graph,
+            &positions,
+            SceneState::default(),
+        );
+        let after_first = TEXT_RESOURCES.with(|resources| resources.borrow().paragraphs.len());
+        paint_graph(
+            surface.canvas(),
+            1_280.0,
+            800.0,
+            Viewport::default(),
+            &graph,
+            &positions,
+            SceneState::default(),
+        );
+        let after_second = TEXT_RESOURCES.with(|resources| resources.borrow().paragraphs.len());
+        assert_eq!(
+            after_first, 9,
+            "eight visible titles share one identical date paragraph"
+        );
+        assert_eq!(after_second, after_first, "the next frame reshaped labels");
+    }
+
+    #[test]
     fn artifact_paragraph_preserves_flutter_layout_metrics() {
         TEXT_RESOURCES.with(|resources| {
             let mut resources = resources.borrow_mut();
@@ -1164,6 +1225,11 @@ mod tests {
         }
         let mean = ratio_u64(absolute_delta, expected.len());
         (changed_pixels, mean, maximum_delta)
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn usize_to_scalar(value: usize) -> f64 {
+        value as f64
     }
 
     #[allow(clippy::cast_precision_loss)]

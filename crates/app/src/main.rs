@@ -1465,6 +1465,76 @@ mod app_tests {
     }
 
     #[test]
+    fn settled_canvas_waits_without_polling_and_arms_only_real_deadlines() {
+        let now = Instant::now();
+        let mut application = CanvasApplication::unavailable("Visible failure".into());
+        let mut surface =
+            not_news_platform::skia_safe::surfaces::raster_n32_premul((640, 360)).unwrap();
+        let frame = FrameInfo {
+            physical_width: 640,
+            physical_height: 360,
+            scale_factor: 1.0,
+            now,
+        };
+        assert!(matches!(
+            application.render(surface.canvas(), frame),
+            FrameSchedule::Wait
+        ));
+
+        let deadline = now + Duration::from_millis(500);
+        application.record_hold_deadline = Some(deadline);
+        assert!(matches!(
+            application.render(surface.canvas(), frame),
+            FrameSchedule::RedrawAt(scheduled) if scheduled == deadline
+        ));
+        assert!(matches!(
+            application.render(
+                surface.canvas(),
+                FrameInfo {
+                    now: deadline,
+                    ..frame
+                },
+            ),
+            FrameSchedule::Wait
+        ));
+    }
+
+    #[test]
+    fn resize_and_dpr_churn_preserve_camera_and_idle_schedule() {
+        let now = Instant::now();
+        let mut application = CanvasApplication::unavailable("Visible failure".into());
+        let initial_viewport = application.interaction.viewport();
+        let mut surface =
+            not_news_platform::skia_safe::surfaces::raster_n32_premul((1_920, 1_200)).unwrap();
+        for (width, height, scale_factor) in [
+            (640, 360, 1.0),
+            (1_536, 864, 1.25),
+            (1_920, 1_080, 2.0),
+            (800, 1_200, 1.5),
+            (1_280, 800, 1.0),
+        ] {
+            assert!(matches!(
+                application.render(
+                    surface.canvas(),
+                    FrameInfo {
+                        physical_width: width,
+                        physical_height: height,
+                        scale_factor,
+                        now,
+                    },
+                ),
+                FrameSchedule::Wait
+            ));
+        }
+        assert_eq!(application.interaction.viewport(), initial_viewport);
+        assert_eq!(
+            (application.physical_width, application.physical_height),
+            (1_280.0, 800.0)
+        );
+        assert!((application.scale_factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn interrupted_research_reopens_with_accepted_activity_not_a_blank_failure() {
         let directory = TempDir::new().unwrap();
         let database = directory.path().join("graph.sqlite");
