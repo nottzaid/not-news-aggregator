@@ -605,7 +605,7 @@ fn player_from_environment() -> Option<PlayerCommand> {
                     "-NoProfile".into(),
                     "-NonInteractive".into(),
                     "-Command".into(),
-                    "$player = New-Object System.Media.SoundPlayer $args[0]; $player.PlaySync()"
+                    "& { param([string]$AudioPath) $player = New-Object System.Media.SoundPlayer $AudioPath; $player.PlaySync() }"
                         .into(),
                 ],
             })
@@ -1123,7 +1123,7 @@ mod tests {
                 "-NoProfile".into(),
                 "-NonInteractive".into(),
                 "-Command".into(),
-                command.into(),
+                format!("& {{ param([string]$AudioPath) {command} }}").into(),
             ],
         }
     }
