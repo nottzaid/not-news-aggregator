@@ -1696,6 +1696,70 @@ mod tests {
     }
 
     #[test]
+    fn migration_failure_after_verified_backup_rolls_back_every_schema_step() {
+        let (directory, path) = legacy_graph();
+        let connection = Connection::open(&path).unwrap();
+        install_schema_v1(&connection).unwrap();
+        install_schema_v2(&connection).unwrap();
+        install_schema_v3(&connection).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints=ON;
+                 INSERT INTO mutation_log (
+                    operation_id, kind, event_id, next_x, next_y, next_pinned,
+                    expected_version, committed_version, revision
+                 ) VALUES ('invalid-for-v4', 'move', 'a', 1, 2, 1, 0, 0, 1);
+                 PRAGMA ignore_check_constraints=OFF;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(DurableGraphStore::open(&path).is_err());
+        let source = Connection::open(&path).unwrap();
+        assert_eq!(
+            source
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert!(table_exists(&source, "mutation_log").unwrap());
+        assert!(!table_exists(&source, "mutation_log_v3").unwrap());
+        assert_eq!(
+            source
+                .query_row(
+                    "SELECT COUNT(*) FROM mutation_log WHERE operation_id='invalid-for-v4'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        drop(source);
+
+        let backups = fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains("pre-rust-v4-"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1, "expected one verified v3 backup");
+        verify_backup(&backups[0]).unwrap();
+        let backup = Connection::open(&backups[0]).unwrap();
+        assert_eq!(
+            backup
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert!(table_exists(&backup, "mutation_log").unwrap());
+        assert!(!table_exists(&backup, "mutation_log_v3").unwrap());
+    }
+
+    #[test]
     fn first_launch_creates_an_empty_graph_without_a_fake_migration_backup() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("graph.sqlite");
