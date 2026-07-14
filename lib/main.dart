@@ -1531,6 +1531,9 @@ Widget buildCanvasFullScreenOracle({
   bool showMetadata = true,
   String? activeId,
   String? statusMessage,
+  List<String> activityMessages = const [],
+  bool activityRunning = false,
+  bool activityOpen = false,
 }) {
   final viewport = _CanvasViewportController();
   final positions =
@@ -1585,6 +1588,13 @@ Widget buildCanvasFullScreenOracle({
                   _SessionStatus(
                     message: statusMessage,
                     running: false,
+                  ),
+                if (activityMessages.isNotEmpty || activityRunning)
+                  _HermesActivityDrawer(
+                    messages: activityMessages,
+                    running: activityRunning,
+                    open: activityOpen,
+                    onToggle: () {},
                   ),
                 if (showChrome) ...[
                   _RecordButton(

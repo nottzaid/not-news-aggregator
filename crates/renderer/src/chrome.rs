@@ -14,8 +14,8 @@ use skia_safe::{
 use not_news_domain::{Point as WorldPoint, ResearchEvent};
 
 use crate::palette::{
-    DISPLAY_FONT, HAIRLINE, INK_0, MONO_FONT, PANEL, SIGNAL, TEXT, TEXT_DIM, TEXT_FAINT, color,
-    color4f_with_alpha,
+    DISPLAY_FONT, HAIRLINE, HAIRLINE_DIM, INK_0, MONO_FONT, PANEL, PANEL_RAISED, SIGNAL, TEXT,
+    TEXT_DIM, TEXT_FAINT, color, color4f_with_alpha,
 };
 
 const RECORD_DIAMETER: f32 = 72.0;
@@ -24,6 +24,9 @@ const CONTROL_RIGHT: f32 = 18.0;
 const CONTROL_BOTTOM: f32 = 28.0;
 const CONTROL_HEIGHT: f32 = 40.0;
 const CONTROL_WIDTH: f32 = 215.0;
+const ACTIVITY_RIGHT: f32 = 14.0;
+const ACTIVITY_BUTTON: f32 = 48.0;
+const ACTIVITY_GAP: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChromeControl {
@@ -98,6 +101,261 @@ pub fn hit_fixed_chrome(
     } else {
         ChromeControl::Clear
     })
+}
+
+pub fn hit_activity_toggle(
+    physical_point: WorldPoint,
+    physical_width: f64,
+    scale_factor: f64,
+    open_progress: f64,
+) -> bool {
+    if !physical_width.is_finite()
+        || !scale_factor.is_finite()
+        || scale_factor <= 0.0
+        || !(0.0..=1.0).contains(&open_progress)
+    {
+        return false;
+    }
+    let width = physical_width / scale_factor;
+    let point = WorldPoint {
+        x: physical_point.x / scale_factor,
+        y: physical_point.y / scale_factor,
+    };
+    let panel_width = activity_panel_width(width) * open_progress;
+    let top = activity_top_f64(width);
+    let left = width - f64::from(ACTIVITY_RIGHT + ACTIVITY_BUTTON) - panel_width;
+    point.x >= left
+        && point.x <= left + f64::from(ACTIVITY_BUTTON)
+        && point.y >= top
+        && point.y <= top + f64::from(ACTIVITY_BUTTON)
+}
+
+pub fn hit_activity_surface(
+    physical_point: WorldPoint,
+    physical_width: f64,
+    physical_height: f64,
+    scale_factor: f64,
+    open_progress: f64,
+) -> bool {
+    if hit_activity_toggle(physical_point, physical_width, scale_factor, open_progress) {
+        return true;
+    }
+    if !physical_height.is_finite() || physical_height <= 0.0 || open_progress <= 0.0 {
+        return false;
+    }
+    let width = physical_width / scale_factor;
+    let height = physical_height / scale_factor;
+    let point = WorldPoint {
+        x: physical_point.x / scale_factor,
+        y: physical_point.y / scale_factor,
+    };
+    let open_width = activity_panel_width(width) * open_progress;
+    let top = activity_top_f64(width);
+    let bottom = if width > 960.0 { 116.0 } else { 164.0 };
+    let left = width - f64::from(ACTIVITY_RIGHT) - open_width + f64::from(ACTIVITY_GAP);
+    point.x >= left
+        && point.x <= width - f64::from(ACTIVITY_RIGHT)
+        && point.y >= top
+        && point.y <= height - bottom
+}
+
+pub fn paint_activity_drawer(
+    canvas: &Canvas,
+    physical_width: f32,
+    physical_height: f32,
+    scale_factor: f32,
+    messages: &[String],
+    running: bool,
+    open_progress: f32,
+) {
+    let width = physical_width / scale_factor;
+    let height = physical_height / scale_factor;
+    let progress = open_progress.clamp(0.0, 1.0);
+    let open_width = activity_panel_width_f32(width) * progress;
+    let top = activity_top(width);
+    let bottom = if width > 960.0 { 116.0 } else { 164.0 };
+    let button = Rect::from_xywh(
+        width - ACTIVITY_RIGHT - open_width - ACTIVITY_BUTTON,
+        top,
+        ACTIVITY_BUTTON,
+        ACTIVITY_BUTTON,
+    );
+    canvas.save();
+    canvas.scale((scale_factor, scale_factor));
+    paint_activity_button(canvas, button, progress > 0.5);
+    if open_width > ACTIVITY_GAP {
+        let panel = Rect::from_xywh(
+            button.right + ACTIVITY_GAP,
+            top,
+            open_width - ACTIVITY_GAP,
+            (height - top - bottom).max(80.0),
+        );
+        canvas.save();
+        canvas.clip_rect(panel, skia_safe::ClipOp::Intersect, true);
+        paint_activity_panel(canvas, panel, messages, running);
+        canvas.restore();
+    }
+    canvas.restore();
+}
+
+fn paint_activity_button(canvas: &Canvas, bounds: Rect, open: bool) {
+    paint_metadata_shadow(canvas, bounds, INK_0, 0.45, 18.0, 6.0);
+    let rounded = RRect::new_rect_xy(bounds, 24.0, 24.0);
+    let mut fill = Paint::default();
+    fill.set_anti_alias(true);
+    fill.set_color(color(PANEL));
+    canvas.draw_rrect(rounded, &fill);
+    let mut outline = Paint::default();
+    outline.set_anti_alias(true);
+    outline.set_style(PaintStyle::Stroke);
+    outline.set_stroke_width(1.0);
+    outline.set_color(color(HAIRLINE));
+    canvas.draw_rrect(rounded, &outline);
+
+    let direction = if open { 1.0 } else { -1.0 };
+    let center = bounds.center();
+    let mut chevron = PathBuilder::new();
+    chevron.move_to((center.x - 3.0 * direction, center.y - 6.0));
+    chevron.line_to((center.x + 3.0 * direction, center.y));
+    chevron.line_to((center.x - 3.0 * direction, center.y + 6.0));
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_style(PaintStyle::Stroke);
+    paint.set_stroke_width(2.0);
+    paint.set_stroke_cap(skia_safe::paint::Cap::Round);
+    paint.set_stroke_join(skia_safe::paint::Join::Round);
+    paint.set_color(color(TEXT_DIM));
+    canvas.draw_path(&chevron.detach(), &paint);
+}
+
+fn paint_activity_panel(canvas: &Canvas, bounds: Rect, messages: &[String], running: bool) {
+    paint_metadata_shadow(canvas, bounds, INK_0, 0.50, 24.0, 10.0);
+    let rounded = RRect::new_rect_xy(bounds, 10.0, 10.0);
+    let mut fill = Paint::default();
+    fill.set_anti_alias(true);
+    fill.set_color(color(PANEL));
+    canvas.draw_rrect(rounded, &fill);
+    let mut outline = Paint::default();
+    outline.set_anti_alias(true);
+    outline.set_style(PaintStyle::Stroke);
+    outline.set_stroke_width(1.0);
+    outline.set_color(color(HAIRLINE));
+    canvas.draw_rrect(rounded, &outline);
+
+    let dot_color = if running {
+        crate::palette::SIGNAL_HOT
+    } else {
+        crate::palette::DATA
+    };
+    let dot_center = (bounds.left + 16.5, bounds.top + 18.0);
+    let mut glow = Paint::default();
+    glow.set_anti_alias(true);
+    glow.set_color4f(color4f_with_alpha(dot_color, 0.6), None);
+    glow.set_mask_filter(MaskFilter::blur(
+        BlurStyle::Normal,
+        flutter_blur_sigma(8.0),
+        None,
+    ));
+    canvas.draw_circle(dot_center, 4.5, &glow);
+    let mut dot = Paint::default();
+    dot.set_anti_alias(true);
+    dot.set_color(color(dot_color));
+    canvas.draw_circle(dot_center, 4.5, &dot);
+
+    STATUS_TEXT.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        resources
+            .activity_header("HERMES")
+            .paint(canvas, (bounds.left + 30.0, bounds.top + 10.0));
+        let state = resources.activity_state(if running { "ACTIVE" } else { "IDLE" });
+        let state_x = bounds.right - 12.0 - state.max_intrinsic_width();
+        state.paint(canvas, (state_x, bounds.top + 11.0));
+    });
+    paint_activity_messages(canvas, bounds, messages);
+}
+
+fn paint_activity_messages(canvas: &Canvas, bounds: Rect, messages: &[String]) {
+    let content = Rect::from_ltrb(
+        bounds.left + 12.0,
+        bounds.top + 34.0,
+        bounds.right - 12.0,
+        bounds.bottom - 12.0,
+    );
+    if messages.is_empty() {
+        STATUS_TEXT.with(|resources| {
+            resources
+                .borrow_mut()
+                .activity_state("Awaiting research activity…")
+                .paint(canvas, (content.left, content.top));
+        });
+        return;
+    }
+    let mut cards = Vec::new();
+    let mut used = 0.0;
+    STATUS_TEXT.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        for (reverse_index, message) in messages.iter().rev().enumerate() {
+            let paragraph = resources.activity_message(message, content.width() - 20.0);
+            let height = paragraph.height() + 16.0;
+            if used + height > content.height() && !cards.is_empty() {
+                break;
+            }
+            cards.push((messages.len() - 1 - reverse_index, message.clone(), height));
+            used += height + 8.0;
+        }
+    });
+    cards.reverse();
+    let latest = messages.len() - 1;
+    let mut y = content.top;
+    for (index, message, height) in cards {
+        let bounds = Rect::from_xywh(content.left, y, content.width(), height);
+        let mut fill = Paint::default();
+        fill.set_color4f(
+            color4f_with_alpha(
+                if index == latest {
+                    SIGNAL
+                } else {
+                    PANEL_RAISED
+                },
+                if index == latest { 0.12 } else { 0.5 },
+            ),
+            None,
+        );
+        canvas.draw_rrect(RRect::new_rect_xy(bounds, 6.0, 6.0), &fill);
+        let mut outline = Paint::default();
+        outline.set_anti_alias(true);
+        outline.set_style(PaintStyle::Stroke);
+        outline.set_stroke_width(1.0);
+        if index == latest {
+            outline.set_color4f(color4f_with_alpha(SIGNAL, 0.5), None);
+        } else {
+            outline.set_color(color(HAIRLINE_DIM));
+        }
+        canvas.draw_rrect(RRect::new_rect_xy(bounds, 6.0, 6.0), &outline);
+        STATUS_TEXT.with(|resources| {
+            resources
+                .borrow_mut()
+                .activity_message(&message, bounds.width() - 20.0)
+                .paint(canvas, (bounds.left + 10.0, bounds.top + 8.0));
+        });
+        y += height + 8.0;
+    }
+}
+
+fn activity_panel_width(width: f64) -> f64 {
+    (if width > 960.0 { 380.0 } else { width - 92.0 }).clamp(280.0, 380.0)
+}
+
+fn activity_panel_width_f32(width: f32) -> f32 {
+    (if width > 960.0 { 380.0 } else { width - 92.0 }).clamp(280.0, 380.0)
+}
+
+fn activity_top(width: f32) -> f32 {
+    if width > 960.0 { 72.0 } else { 84.0 }
+}
+
+fn activity_top_f64(width: f64) -> f64 {
+    if width > 960.0 { 72.0 } else { 84.0 }
 }
 
 /// Paints Flutter's persistent record orb and zoom/reset/clear control strip.
@@ -827,6 +1085,9 @@ enum StatusStyle {
     Idle,
     Live,
     Message,
+    ActivityHeader,
+    ActivityState,
+    ActivityMessage,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -865,6 +1126,18 @@ impl StatusText {
         self.text(text, StatusStyle::Message, width)
     }
 
+    fn activity_header(&mut self, text: &str) -> &skia_safe::textlayout::Paragraph {
+        self.text(text, StatusStyle::ActivityHeader, 90.0)
+    }
+
+    fn activity_state(&mut self, text: &str) -> &skia_safe::textlayout::Paragraph {
+        self.text(text, StatusStyle::ActivityState, 220.0)
+    }
+
+    fn activity_message(&mut self, text: &str, width: f32) -> &skia_safe::textlayout::Paragraph {
+        self.text(text, StatusStyle::ActivityMessage, width)
+    }
+
     fn text(
         &mut self,
         text: &str,
@@ -885,6 +1158,9 @@ impl StatusText {
                 StatusStyle::Idle => (crate::palette::DATA, 9.5, 700.0, 1.4, None),
                 StatusStyle::Live => (crate::palette::SIGNAL_HOT, 9.5, 700.0, 1.4, None),
                 StatusStyle::Message => (TEXT, 11.0, 600.0, 0.0, Some(1.3)),
+                StatusStyle::ActivityHeader => (TEXT, 11.0, 700.0, 1.6, None),
+                StatusStyle::ActivityState => (TEXT_FAINT, 9.5, 700.0, 1.4, None),
+                StatusStyle::ActivityMessage => (TEXT, 11.0, 600.0, 0.0, Some(1.35)),
             };
             let mut style = TextStyle::new();
             let mut foreground = Paint::default();
@@ -1231,6 +1507,72 @@ mod tests {
                 .collect();
             assert_eq!(ranges, [(0, 42), (43, 52)]);
         });
+    }
+
+    #[test]
+    fn activity_drawer_matches_flutter_geometry_and_raster_budget() {
+        const FLUTTER: &[u8] =
+            include_bytes!("../../../test/goldens/full-screen-activity-1280x800.png");
+        const FLUTTER_BASE: &[u8] =
+            include_bytes!("../../../test/goldens/full-screen-closed-1280x800.png");
+        let flutter = read_image(&Image::from_encoded(Data::new_copy(FLUTTER)).unwrap());
+        let base = read_image(&Image::from_encoded(Data::new_copy(FLUTTER_BASE)).unwrap());
+        let messages = vec![
+            "OpenCode research started.".to_owned(),
+            "Searching official primary sources.".to_owned(),
+            "Accepted finding: Rust language release".to_owned(),
+        ];
+        let rust = paint_over(&base, |canvas| {
+            paint_activity_drawer(canvas, 1280.0, 800.0, 1.0, &messages, true, 1.0);
+        });
+        let metrics = residual_crop_metrics(&base, &flutter, &base, &rust, &[(810, 50, 470, 650)]);
+        assert!(
+            metrics.0 <= 26_000 && metrics.1 <= 1.60 && metrics.2 <= 230,
+            "Flutter/Rust activity-drawer drift {metrics:?}"
+        );
+    }
+
+    #[test]
+    fn activity_hit_regions_follow_the_animated_button_at_fractional_dpr() {
+        let dpr = 1.5;
+        assert!(hit_activity_toggle(
+            WorldPoint {
+                x: 1242.0 * dpr,
+                y: 96.0 * dpr,
+            },
+            1280.0 * dpr,
+            dpr,
+            0.0,
+        ));
+        assert!(hit_activity_toggle(
+            WorldPoint {
+                x: 862.0 * dpr,
+                y: 96.0 * dpr,
+            },
+            1280.0 * dpr,
+            dpr,
+            1.0,
+        ));
+        assert!(hit_activity_surface(
+            WorldPoint {
+                x: 1100.0 * dpr,
+                y: 300.0 * dpr,
+            },
+            1280.0 * dpr,
+            800.0 * dpr,
+            dpr,
+            1.0,
+        ));
+        assert!(!hit_activity_surface(
+            WorldPoint {
+                x: 600.0 * dpr,
+                y: 300.0 * dpr,
+            },
+            1280.0 * dpr,
+            800.0 * dpr,
+            dpr,
+            1.0,
+        ));
     }
 
     fn residual_crop_metrics(

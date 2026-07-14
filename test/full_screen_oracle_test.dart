@@ -126,4 +126,31 @@ void main() {
       matchesGoldenFile('goldens/full-screen-status-1280x800.png'),
     );
   });
+
+  testWidgets('records open live Hermes activity over desktop canvas',
+      (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    const oracle = Key('full-screen-activity');
+    await tester.pumpWidget(
+      buildCanvasFullScreenOracle(
+        oracleKey: oracle,
+        activityMessages: const [
+          'OpenCode research started.',
+          'Searching official primary sources.',
+          'Accepted finding: Rust language release',
+        ],
+        activityRunning: true,
+        activityOpen: true,
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 180));
+    await expectLater(
+      find.byKey(oracle),
+      matchesGoldenFile('goldens/full-screen-activity-1280x800.png'),
+    );
+  });
 }

@@ -187,9 +187,10 @@ check output, or agent prompts except where the provider requires them.
   and driver/backend traces remain absent.
 - Research now crosses a process-group/Job-Object supervisor, typed parser,
   sequenced SQLite acceptance, and direct in-memory canvas updates. Remaining
-  parity gaps are durable activity history presentation, generated-cluster focus
-  until manual camera input, capability diagnosis/remediation, voice capture and
-  transcription, and explicit destructive clear.
+  parity gaps are capability diagnosis/remediation, voice capture and
+  transcription, and explicit destructive clear. The activity drawer and
+  generated-cluster camera follow are now source-derived raster/temporal
+  contracts; manual pan cancels automatic camera ownership.
 - Crash-injection proves transaction rollback and interrupted-session recovery;
   release evidence must still kill real application/backend processes at each
   boundary and exercise the shipped recovery UI.

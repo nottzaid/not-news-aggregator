@@ -1,7 +1,7 @@
 mod interaction;
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     error::Error,
     path::{Path, PathBuf},
     time::Duration,
@@ -25,9 +25,10 @@ use not_news_platform::{
     },
 };
 use not_news_renderer::{
-    ChromeControl, SceneAnimation, SceneState, hit_fixed_chrome, paint_active_metadata,
-    paint_background, paint_fixed_chrome, paint_graph, paint_grid, paint_research_prompt,
-    paint_status, resolved_positions,
+    ChromeControl, Motion, SceneAnimation, SceneState, hit_activity_surface, hit_activity_toggle,
+    hit_fixed_chrome, paint_active_metadata, paint_activity_drawer, paint_background,
+    paint_fixed_chrome, paint_graph, paint_grid, paint_research_prompt, paint_status,
+    resolved_positions,
 };
 use not_news_store::{
     CommitOutcome, DurableGraphStore, ResearchOutputKind, ResearchSessionStatus, StoreError,
@@ -42,6 +43,23 @@ struct ActiveResearch {
     scratch_directory: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+struct ActivityMotion {
+    from: f64,
+    to: f64,
+    started: Instant,
+}
+
+#[derive(Clone, Copy, Default)]
+enum PointerOwner {
+    #[default]
+    None,
+    Canvas,
+    FixedChrome(ChromeControl),
+    ActivityToggle,
+    ActivitySurface,
+}
+
 struct CanvasApplication {
     store: Option<DurableGraphStore>,
     graph: GraphSnapshot,
@@ -54,11 +72,16 @@ struct CanvasApplication {
     physical_width: f64,
     physical_height: f64,
     scale_factor: f64,
-    chrome_press: Option<ChromeControl>,
-    canvas_pointer_active: bool,
+    pointer_owner: PointerOwner,
     research_directory: PathBuf,
     research_input: Option<String>,
     research: Option<ActiveResearch>,
+    research_messages: Vec<String>,
+    generated_research_events: HashSet<not_news_domain::EventId>,
+    auto_follow_research: bool,
+    activity_open: bool,
+    activity_openness: f64,
+    activity_motion: Option<ActivityMotion>,
 }
 
 impl CanvasApplication {
@@ -81,7 +104,13 @@ impl CanvasApplication {
                         backup.display()
                     )
                 });
-                match recovery {
+                let recovered_activity = recovery
+                    .as_ref()
+                    .ok()
+                    .and_then(|sessions| sessions.last())
+                    .and_then(|session| store.research_activity(&session.id).ok())
+                    .unwrap_or_default();
+                match &recovery {
                     Ok(recovered) if !recovered.is_empty() => {
                         status = Some(format!(
                             "Recovered {} interrupted research session{}; accepted findings were preserved.",
@@ -96,7 +125,10 @@ impl CanvasApplication {
                     }
                     _ => {}
                 }
-                Self::with_state(Some(store), graph, status, database.parent())
+                let mut application =
+                    Self::with_state(Some(store), graph, status, database.parent());
+                application.research_messages = recovered_activity;
+                application
             }
             Err(error) => Self::unavailable(format!(
                 "Graph unavailable; no research is shown or writable. {}: {error}",
@@ -131,13 +163,18 @@ impl CanvasApplication {
             physical_width: 1_280.0,
             physical_height: 800.0,
             scale_factor: 1.0,
-            chrome_press: None,
-            canvas_pointer_active: false,
+            pointer_owner: PointerOwner::None,
             research_directory: data_directory
                 .unwrap_or_else(|| Path::new("."))
                 .join("research-scratch"),
             research_input: None,
             research: None,
+            research_messages: Vec::new(),
+            generated_research_events: HashSet::new(),
+            auto_follow_research: true,
+            activity_open: false,
+            activity_openness: 0.0,
+            activity_motion: None,
         }
     }
 
@@ -384,6 +421,10 @@ impl CanvasApplication {
                     closed: false,
                     scratch_directory,
                 });
+                self.research_messages.clear();
+                self.generated_research_events.clear();
+                self.auto_follow_research = true;
+                self.set_activity_open(true, Instant::now());
                 self.status = Some("Starting research…".into());
             }
             Err(error) => {
@@ -469,9 +510,20 @@ impl CanvasApplication {
                     });
                 match result {
                     Ok(outcome) => {
+                        let canonical = not_news_domain::EventId(outcome.canonical_key.clone());
+                        let generated = !self.graph.events.contains_key(&canonical)
+                            && outcome.snapshot.events.contains_key(&canonical);
+                        self.interaction.graph_committed(
+                            &self.graph,
+                            &outcome.snapshot,
+                            Instant::now(),
+                        );
                         self.advance_research_cursor();
                         self.graph = outcome.snapshot;
-                        self.interaction.placement_committed(&self.graph);
+                        if generated {
+                            self.generated_research_events.insert(canonical);
+                        }
+                        self.focus_generated_research();
                         self.status = Some(format!("Accepted finding: {}", event.title));
                         self.retry_deferred_bridges();
                     }
@@ -509,9 +561,11 @@ impl CanvasApplication {
         );
         match result {
             Ok(outcome) => {
+                self.interaction
+                    .graph_committed(&self.graph, &outcome.snapshot, Instant::now());
                 self.advance_research_cursor();
                 self.graph = outcome.snapshot;
-                self.interaction.placement_committed(&self.graph);
+                self.focus_generated_research();
                 self.status = Some(format!("Accepted relationship: {}", bridge.label));
             }
             Err(StoreError::MissingResearchEndpoint(_)) => {
@@ -587,6 +641,16 @@ impl CanvasApplication {
             Ok(_) => {
                 self.advance_research_cursor();
                 self.status = Some(message.to_owned());
+                if self
+                    .research_messages
+                    .last()
+                    .is_none_or(|previous| previous != message)
+                {
+                    if self.research_messages.len() >= 80 {
+                        self.research_messages.remove(0);
+                    }
+                    self.research_messages.push(message.to_owned());
+                }
                 true
             }
             Err(error) => {
@@ -675,6 +739,135 @@ impl CanvasApplication {
         if let Some(active) = self.research.take() {
             let _ = std::fs::remove_dir_all(active.scratch_directory);
         }
+        self.generated_research_events.clear();
+    }
+
+    fn focus_generated_research(&mut self) {
+        if self.auto_follow_research && !self.generated_research_events.is_empty() {
+            self.interaction
+                .focus_events(&self.generated_research_events, Instant::now());
+        }
+    }
+
+    fn stop_auto_follow_if_panning(&mut self) {
+        if self.interaction.manual_pan_active() {
+            self.auto_follow_research = false;
+            self.generated_research_events.clear();
+        }
+    }
+
+    fn activity_visible(&self) -> bool {
+        self.research.is_some() || !self.research_messages.is_empty()
+    }
+
+    fn activity_progress(&mut self, now: Instant) -> f64 {
+        let Some(motion) = self.activity_motion else {
+            return self.activity_openness;
+        };
+        let linear = (now.saturating_duration_since(motion.started).as_secs_f64()
+            / Motion::PANEL.as_secs_f64())
+        .clamp(0.0, 1.0);
+        self.activity_openness =
+            motion.from + (motion.to - motion.from) * Motion::ease_out_cubic(linear);
+        if linear >= 1.0 {
+            self.activity_openness = motion.to;
+            self.activity_motion = None;
+        }
+        self.activity_openness
+    }
+
+    fn set_activity_open(&mut self, open: bool, now: Instant) {
+        let current = self.activity_progress(now);
+        let target = if open { 1.0 } else { 0.0 };
+        self.activity_open = open;
+        if (current - target).abs() < f64::EPSILON {
+            self.activity_openness = target;
+            self.activity_motion = None;
+        } else {
+            self.activity_motion = Some(ActivityMotion {
+                from: current,
+                to: target,
+                started: now,
+            });
+        }
+    }
+
+    fn activity_toggle_at_cursor(&mut self, now: Instant) -> bool {
+        let Some(cursor) = self.cursor else {
+            return false;
+        };
+        let progress = self.activity_progress(now);
+        self.activity_visible()
+            && hit_activity_toggle(cursor, self.physical_width, self.scale_factor, progress)
+    }
+
+    fn activity_surface_at_cursor(&mut self, now: Instant) -> bool {
+        let Some(cursor) = self.cursor else {
+            return false;
+        };
+        let progress = self.activity_progress(now);
+        self.activity_visible()
+            && hit_activity_surface(
+                cursor,
+                self.physical_width,
+                self.physical_height,
+                self.scale_factor,
+                progress,
+            )
+    }
+
+    fn cursor_moved(&mut self, point: Point, now: Instant) -> bool {
+        self.cursor = Some(point);
+        if matches!(self.pointer_owner, PointerOwner::Canvas) {
+            let changed = self.interaction.cursor_moved(point, &self.graph, now);
+            self.stop_auto_follow_if_panning();
+            changed
+        } else if self.activity_surface_at_cursor(now) || self.chrome_at_cursor().is_some() {
+            self.interaction.cursor_left(now)
+        } else {
+            self.interaction.cursor_moved(point, &self.graph, now)
+        }
+    }
+
+    fn mouse_input(&mut self, state: ElementState, now: Instant) -> bool {
+        if state == ElementState::Pressed {
+            if self.activity_toggle_at_cursor(now) {
+                self.pointer_owner = PointerOwner::ActivityToggle;
+                return self.interaction.cursor_left(now);
+            }
+            if self.activity_surface_at_cursor(now) {
+                self.pointer_owner = PointerOwner::ActivitySurface;
+                return self.interaction.cursor_left(now);
+            }
+            if let Some(control) = self.chrome_at_cursor() {
+                self.pointer_owner = PointerOwner::FixedChrome(control);
+                return self.interaction.cursor_left(now);
+            }
+            self.pointer_owner = PointerOwner::Canvas;
+            return self.interaction.pointer_down(&self.graph, now);
+        }
+
+        match std::mem::take(&mut self.pointer_owner) {
+            PointerOwner::Canvas => {
+                let effect = self.interaction.pointer_up(&self.graph, now);
+                self.commit_effect(effect)
+            }
+            PointerOwner::ActivityToggle if self.activity_toggle_at_cursor(now) => {
+                self.set_activity_open(!self.activity_open, now);
+                true
+            }
+            PointerOwner::FixedChrome(pressed)
+                if self
+                    .chrome_at_cursor()
+                    .is_some_and(|released| pressed == released) =>
+            {
+                self.activate_chrome(pressed)
+            }
+            PointerOwner::None
+            | PointerOwner::ActivityToggle
+            | PointerOwner::ActivitySurface
+            | PointerOwner::FixedChrome(_) => false,
+        }
     }
 }
 
@@ -697,14 +890,7 @@ impl PlatformApplication for CanvasApplication {
                     x: position.x,
                     y: position.y,
                 };
-                self.cursor = Some(point);
-                if self.canvas_pointer_active {
-                    self.interaction.cursor_moved(point, &self.graph, now)
-                } else if self.chrome_at_cursor().is_some() {
-                    self.interaction.cursor_left(now)
-                } else {
-                    self.interaction.cursor_moved(point, &self.graph, now)
-                }
+                self.cursor_moved(point, now)
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cursor = None;
@@ -714,41 +900,21 @@ impl PlatformApplication for CanvasApplication {
                 state,
                 button: MouseButton::Left,
                 ..
-            } => match state {
-                ElementState::Pressed => {
-                    if let Some(control) = self.chrome_at_cursor() {
-                        self.chrome_press = Some(control);
-                        self.interaction.cursor_left(now)
-                    } else {
-                        self.canvas_pointer_active = true;
-                        self.interaction.pointer_down(&self.graph, now)
-                    }
+            } => self.mouse_input(*state, now),
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.activity_surface_at_cursor(now) {
+                    false
+                } else {
+                    self.interaction.scroll(scroll_pixels(*delta))
                 }
-                ElementState::Released => {
-                    if self.canvas_pointer_active {
-                        self.canvas_pointer_active = false;
-                        let effect = self.interaction.pointer_up(&self.graph, now);
-                        self.commit_effect(effect)
-                    } else {
-                        let pressed = self.chrome_press.take();
-                        match (pressed, self.chrome_at_cursor()) {
-                            (Some(pressed), Some(released)) if pressed == released => {
-                                self.activate_chrome(released)
-                            }
-                            _ => false,
-                        }
-                    }
-                }
-            },
-            WindowEvent::MouseWheel { delta, .. } => self.interaction.scroll(scroll_pixels(*delta)),
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
                 false
             }
             WindowEvent::KeyboardInput { event, .. } => self.keyboard_input(event),
             WindowEvent::Focused(false) => {
-                self.chrome_press = None;
-                self.canvas_pointer_active = false;
+                self.pointer_owner = PointerOwner::None;
                 self.interaction.cancel_pointer()
             }
             _ => false,
@@ -757,6 +923,7 @@ impl PlatformApplication for CanvasApplication {
 
     fn render(&mut self, canvas: &Canvas, frame: FrameInfo) -> FrameSchedule {
         self.drain_research();
+        let activity_progress = self.activity_progress(frame.now);
         self.interaction
             .resize(frame.physical_width, frame.physical_height);
         self.physical_width = f64::from(frame.physical_width);
@@ -806,6 +973,17 @@ impl PlatformApplication for CanvasApplication {
                 self.research.is_some(),
             );
         }
+        if self.activity_visible() {
+            paint_activity_drawer(
+                canvas,
+                width,
+                height,
+                scale_scalar(frame.scale_factor),
+                &self.research_messages,
+                self.research.is_some(),
+                scale_scalar(activity_progress),
+            );
+        }
         if let Some(prompt) = self.research_input.as_deref() {
             paint_research_prompt(
                 canvas,
@@ -827,9 +1005,13 @@ impl PlatformApplication for CanvasApplication {
             .research
             .as_ref()
             .map(|_| frame.now + Duration::from_millis(33));
+        let activity_deadline = self
+            .activity_motion
+            .map(|_| frame.now + Duration::from_millis(16));
         interaction_deadline
             .into_iter()
             .chain(research_deadline)
+            .chain(activity_deadline)
             .min()
             .map_or(FrameSchedule::Wait, FrameSchedule::RedrawAt)
     }
@@ -921,6 +1103,33 @@ mod app_tests {
         assert!(failed.status.as_deref().is_some_and(|status| {
             status.contains("Graph unavailable")
                 && status.contains("no research is shown or writable")
+        }));
+    }
+
+    #[test]
+    fn interrupted_research_reopens_with_accepted_activity_not_a_blank_failure() {
+        let directory = TempDir::new().unwrap();
+        let database = directory.path().join("graph.sqlite");
+        let first = CanvasApplication::load(&database);
+        let store = first.store.as_ref().unwrap();
+        store
+            .start_research_session("interrupted", "Investigate")
+            .unwrap();
+        store
+            .record_research_output(
+                "interrupted",
+                0,
+                ResearchOutputKind::Message,
+                "Searching primary sources",
+            )
+            .unwrap();
+        drop(first);
+
+        let reopened = CanvasApplication::load(&database);
+        assert_eq!(reopened.research_messages, ["Searching primary sources"]);
+        assert!(reopened.status.as_deref().is_some_and(|message| {
+            message.contains("interrupted research session")
+                && message.contains("accepted findings were preserved")
         }));
     }
 

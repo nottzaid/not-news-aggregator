@@ -141,6 +141,31 @@ impl DurableGraphStore {
         Ok(sessions)
     }
 
+    /// Reads the bounded human-facing activity trail for one durable session.
+    /// Graph proposal payloads remain in the audit log but are not duplicated as
+    /// progress prose.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unavailable database, missing session, malformed
+    /// stored message JSON, or invalid output state.
+    pub fn research_activity(&self, session_id: &str) -> Result<Vec<String>, StoreError> {
+        validate_session_id(session_id)?;
+        let connection = open_connection(&self.path)?;
+        require_session(&connection, session_id)?;
+        let mut statement = connection.prepare(
+            "SELECT payload FROM research_output_log \
+             WHERE session_id=?1 AND kind IN ('message', 'voice_note', 'protocol_error') \
+             ORDER BY output_sequence DESC LIMIT 80",
+        )?;
+        let rows = statement.query_map([session_id], |row| row.get::<_, String>(0))?;
+        let mut messages = rows
+            .map(|row| Ok(serde_json::from_str::<String>(&row?)?))
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        messages.reverse();
+        Ok(messages)
+    }
+
     /// Records non-mutating typed output in the same ordered stream used for
     /// accepted graph proposals.
     ///
@@ -977,6 +1002,14 @@ mod tests {
     fn reopening_marks_only_abandoned_running_sessions_interrupted() {
         let (_directory, store) = store();
         store.start_research_session("running", "One").unwrap();
+        store
+            .record_research_output(
+                "running",
+                0,
+                ResearchOutputKind::Message,
+                "Searching primary sources",
+            )
+            .unwrap();
         store.start_research_session("done", "Two").unwrap();
         store
             .finish_research_session("done", 0, ResearchSessionStatus::Done, "Complete")
@@ -986,6 +1019,10 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].id, "running");
         assert_eq!(recovered[0].status, ResearchSessionStatus::Interrupted);
+        assert_eq!(
+            store.research_activity("running").unwrap(),
+            ["Searching primary sources"]
+        );
         assert!(store.recover_interrupted_research().unwrap().is_empty());
     }
 

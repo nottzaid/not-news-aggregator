@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -22,6 +22,13 @@ struct ActiveMotion {
     to_positions: HashMap<EventId, Point>,
     from_active: Option<EventId>,
     to_active: Option<EventId>,
+    started: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CameraMotion {
+    from: Point,
+    to: Point,
     started: Instant,
 }
 
@@ -68,6 +75,7 @@ pub struct CanvasInteraction {
     cursor: Option<Point>,
     active: Option<EventId>,
     motion: Option<ActiveMotion>,
+    camera_motion: Option<CameraMotion>,
     collapse_at: Option<Instant>,
     bridge_epoch: Option<Instant>,
     pointer: Option<PointerGesture>,
@@ -83,6 +91,7 @@ impl CanvasInteraction {
             cursor: None,
             active: None,
             motion: None,
+            camera_motion: None,
             collapse_at: None,
             bridge_epoch: None,
             pointer: None,
@@ -130,6 +139,7 @@ impl CanvasInteraction {
                 } => {
                     let delta = subtract(screen, *screen_start);
                     *moved |= length(delta) > PAN_THRESHOLD;
+                    self.camera_motion = None;
                     let next = subtract(*camera_start, scale_point(delta, 1.0 / scale));
                     if self.viewport.camera == next {
                         return false;
@@ -210,6 +220,77 @@ impl CanvasInteraction {
         self.motion = None;
     }
 
+    pub fn graph_committed(
+        &mut self,
+        previous: &GraphSnapshot,
+        next: &GraphSnapshot,
+        now: Instant,
+    ) {
+        let mut from_positions = self.current_positions(previous, now);
+        let next_base = resolved_positions(next);
+        let previous_active = self.active.clone();
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| !next.events.contains_key(active))
+        {
+            self.active = None;
+        }
+        let to_positions = expanded_positions(next, &next_base, self.active.as_ref());
+        for (event, point) in &to_positions {
+            from_positions.entry(event.clone()).or_insert(*point);
+        }
+        let changed = next.events.keys().any(|event| {
+            from_positions
+                .get(event)
+                .zip(to_positions.get(event))
+                .is_some_and(|(from, to)| distance(*from, *to) > f64::EPSILON)
+        });
+        self.base_positions = next_base;
+        self.motion = changed.then(|| ActiveMotion {
+            from_positions,
+            to_positions,
+            from_active: previous_active,
+            to_active: self.active.clone(),
+            started: now,
+        });
+    }
+
+    pub fn focus_events(&mut self, events: &HashSet<EventId>, now: Instant) -> bool {
+        let points = events
+            .iter()
+            .filter_map(|event| self.base_positions.get(event))
+            .copied()
+            .collect::<Vec<_>>();
+        if points.is_empty() {
+            return false;
+        }
+        let center = points
+            .iter()
+            .fold(Point { x: 0.0, y: 0.0 }, |sum, point| add(sum, *point));
+        let count = f64::from(
+            u32::try_from(points.len()).expect("a rendered graph cannot contain 2^32 events"),
+        );
+        let transform = self.transform();
+        let target = Point {
+            x: center.x / count - self.width / transform.scale() / 2.0,
+            y: center.y / count - self.height / transform.scale() / 2.0,
+        };
+        if distance(self.viewport.camera, target) < 2.0 {
+            return false;
+        }
+        self.camera_motion = Some(CameraMotion {
+            from: self.viewport.camera,
+            to: target,
+            started: now,
+        });
+        true
+    }
+
+    pub fn manual_pan_active(&self) -> bool {
+        matches!(self.pointer, Some(PointerGesture::Pan { moved: true, .. }))
+    }
+
     pub fn cancel_pointer(&mut self) -> bool {
         self.pointer.take().is_some()
     }
@@ -249,6 +330,7 @@ impl CanvasInteraction {
     }
 
     pub fn frame(&mut self, graph: &GraphSnapshot, now: Instant) -> InteractionFrame {
+        self.update_camera_motion(now);
         if self.collapse_at.is_some_and(|deadline| now >= deadline) {
             self.collapse_at = None;
             self.set_active(None, graph, now);
@@ -290,6 +372,12 @@ impl CanvasInteraction {
         let mut deadline = self.collapse_at;
         if let Some(motion) = &self.motion {
             let end = motion.started + ACTIVE_MOTION;
+            if now < end {
+                deadline = Some(earlier(deadline, (now + FRAME_INTERVAL).min(end)));
+            }
+        }
+        if let Some(motion) = self.camera_motion {
+            let end = motion.started + Motion::CAMERA;
             if now < end {
                 deadline = Some(earlier(deadline, (now + FRAME_INTERVAL).min(end)));
             }
@@ -468,6 +556,7 @@ impl CanvasInteraction {
         if (next_zoom - self.viewport.zoom).abs() < 0.002 {
             return false;
         }
+        self.camera_motion = None;
         let world_anchor = self.transform().screen_to_world(anchor);
         let next = Viewport {
             camera: self.viewport.camera,
@@ -488,6 +577,20 @@ impl CanvasInteraction {
 
     fn transform(&self) -> ViewportTransform {
         ViewportTransform::new(self.width, self.height, self.viewport)
+    }
+
+    fn update_camera_motion(&mut self, now: Instant) {
+        let Some(motion) = self.camera_motion else {
+            return;
+        };
+        let linear = (now.saturating_duration_since(motion.started).as_secs_f64()
+            / Motion::CAMERA.as_secs_f64())
+        .clamp(0.0, 1.0);
+        self.viewport.camera =
+            lerp_point(motion.from, motion.to, Motion::ease_in_out_cubic(linear));
+        if linear >= 1.0 {
+            self.camera_motion = None;
+        }
     }
 }
 
@@ -790,5 +893,45 @@ mod tests {
         assert!(interaction.reset_zoom());
         assert!((interaction.viewport.zoom - 1.0).abs() < f64::EPSILON);
         assert_eq!(interaction.transform().screen_to_world(center), before);
+    }
+
+    #[test]
+    fn generated_cluster_focus_matches_flutter_target_and_camera_curve() {
+        let positions = HashMap::from([
+            (
+                EventId("a".into()),
+                Point {
+                    x: 1_600.0,
+                    y: 900.0,
+                },
+            ),
+            (
+                EventId("b".into()),
+                Point {
+                    x: 1_800.0,
+                    y: 700.0,
+                },
+            ),
+        ]);
+        let mut interaction = CanvasInteraction::new(positions);
+        interaction.resize(1_400, 900);
+        let now = Instant::now();
+        assert!(interaction.focus_events(
+            &HashSet::from([EventId("a".into()), EventId("b".into())]),
+            now
+        ));
+        interaction.frame(&GraphSnapshot::default(), now + Motion::CAMERA / 2);
+        let midpoint = interaction.viewport().camera;
+        assert!((midpoint.x - 516.875).abs() < 0.001);
+        assert!((midpoint.y - 180.906_25).abs() < 0.001);
+
+        interaction.frame(&GraphSnapshot::default(), now + Motion::CAMERA);
+        assert_eq!(
+            interaction.viewport().camera,
+            Point {
+                x: 1_000.0,
+                y: 350.0
+            }
+        );
     }
 }
