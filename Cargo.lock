@@ -920,6 +920,7 @@ dependencies = [
  "not-news-platform",
  "not-news-renderer",
  "not-news-store",
+ "tempfile",
 ]
 
 [[package]]

@@ -2,14 +2,15 @@ mod interaction;
 
 use std::{
     error::Error,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use interaction::{CanvasInteraction, InteractionEffect};
 use not_news_domain::{GraphSnapshot, Point};
 use not_news_platform::{
-    FrameInfo, FrameSchedule, PlatformApplication, WindowOptions, open_external_url, run,
+    FrameInfo, FrameSchedule, PlatformApplication, WindowOptions, application_data_directory,
+    open_external_url, run,
     skia_safe::Canvas,
     winit::{
         dpi::PhysicalPosition,
@@ -19,14 +20,16 @@ use not_news_platform::{
 };
 use not_news_renderer::{
     ChromeControl, SceneAnimation, SceneState, hit_fixed_chrome, paint_active_metadata,
-    paint_background, paint_fixed_chrome, paint_graph, paint_grid, resolved_positions,
+    paint_background, paint_fixed_chrome, paint_graph, paint_grid, paint_status,
+    resolved_positions,
 };
 use not_news_store::{CommitOutcome, DurableGraphStore};
 
 struct CanvasApplication {
-    store: DurableGraphStore,
+    store: Option<DurableGraphStore>,
     graph: GraphSnapshot,
     interaction: CanvasInteraction,
+    status: Option<String>,
     modifiers: ModifiersState,
     operation_epoch: u128,
     operation_sequence: u64,
@@ -39,14 +42,48 @@ struct CanvasApplication {
 }
 
 impl CanvasApplication {
-    fn load(database: PathBuf) -> Result<Self, Box<dyn Error>> {
-        let store = DurableGraphStore::open(database)?;
-        let graph = store.load()?;
+    fn load(database: &Path) -> Self {
+        match DurableGraphStore::open(database) {
+            Ok(store) => {
+                let graph = match store.load() {
+                    Ok(graph) => graph,
+                    Err(error) => {
+                        return Self::unavailable(format!(
+                            "Graph became unreadable during startup; writes are disabled. {}: {error}",
+                            database.display()
+                        ));
+                    }
+                };
+                let status = store.migration_backup().map(|backup| {
+                    format!(
+                        "Legacy graph migrated after verified backup: {}",
+                        backup.display()
+                    )
+                });
+                Self::with_state(Some(store), graph, status)
+            }
+            Err(error) => Self::unavailable(format!(
+                "Graph unavailable; no research is shown or writable. {}: {error}",
+                database.display()
+            )),
+        }
+    }
+
+    fn unavailable(status: String) -> Self {
+        Self::with_state(None, GraphSnapshot::default(), Some(status))
+    }
+
+    fn with_state(
+        store: Option<DurableGraphStore>,
+        graph: GraphSnapshot,
+        status: Option<String>,
+    ) -> Self {
         let interaction = CanvasInteraction::new(resolved_positions(&graph));
-        Ok(Self {
+        Self {
             store,
             graph,
             interaction,
+            status,
             modifiers: ModifiersState::default(),
             operation_epoch: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -59,7 +96,7 @@ impl CanvasApplication {
             scale_factor: 1.0,
             chrome_press: None,
             canvas_pointer_active: false,
-        })
+        }
     }
 
     fn apply_outcome(&mut self, outcome: CommitOutcome) {
@@ -86,15 +123,28 @@ impl CanvasApplication {
             InteractionEffect::PixelsChanged => true,
             InteractionEffect::Move(command) => {
                 let operation = self.next_operation_id("move");
-                match self.store.commit_move(&operation, &command) {
-                    Ok(outcome) => self.apply_outcome(outcome),
-                    Err(error) => eprintln!("move was not committed: {error}"),
+                let result = self
+                    .store
+                    .as_ref()
+                    .ok_or("the graph store is unavailable".to_owned())
+                    .and_then(|store| {
+                        store
+                            .commit_move(&operation, &command)
+                            .map_err(|error| error.to_string())
+                    });
+                match result {
+                    Ok(outcome) => {
+                        self.apply_outcome(outcome);
+                        self.status = None;
+                    }
+                    Err(error) => self.status = Some(format!("Move was not committed: {error}")),
                 }
                 true
             }
             InteractionEffect::OpenUrl(url) => {
                 if let Err(error) = open_external_url(&url) {
-                    eprintln!("source could not be opened: {error}");
+                    self.status = Some(format!("Source could not be opened: {error}"));
+                    return true;
                 }
                 false
             }
@@ -103,30 +153,40 @@ impl CanvasApplication {
 
     fn undo(&mut self) -> bool {
         let operation = self.next_operation_id("undo");
-        match self.store.undo(&operation) {
+        let Some(store) = self.store.as_ref() else {
+            self.status = Some("Undo is unavailable because the graph did not open.".into());
+            return true;
+        };
+        match store.undo(&operation) {
             Ok(Some(outcome)) => {
                 self.apply_outcome(outcome);
+                self.status = None;
                 true
             }
             Ok(None) => false,
             Err(error) => {
-                eprintln!("undo was not committed: {error}");
-                false
+                self.status = Some(format!("Undo was not committed: {error}"));
+                true
             }
         }
     }
 
     fn redo(&mut self) -> bool {
         let operation = self.next_operation_id("redo");
-        match self.store.redo(&operation) {
+        let Some(store) = self.store.as_ref() else {
+            self.status = Some("Redo is unavailable because the graph did not open.".into());
+            return true;
+        };
+        match store.redo(&operation) {
             Ok(Some(outcome)) => {
                 self.apply_outcome(outcome);
+                self.status = None;
                 true
             }
             Ok(None) => false,
             Err(error) => {
-                eprintln!("redo was not committed: {error}");
-                false
+                self.status = Some(format!("Redo was not committed: {error}"));
+                true
             }
         }
     }
@@ -173,12 +233,12 @@ impl CanvasApplication {
             ChromeControl::ResetZoom => self.interaction.reset_zoom(),
             ChromeControl::ZoomLabel => false,
             ChromeControl::Record => {
-                eprintln!("voice research is not implemented in the Rust build yet");
-                false
+                self.status = Some("Voice research is not implemented in this Rust build.".into());
+                true
             }
             ChromeControl::Clear => {
-                eprintln!("canvas clearing is not implemented in the Rust build yet");
-                false
+                self.status = Some("Canvas clearing is not implemented in this Rust build.".into());
+                true
             }
         }
     }
@@ -301,6 +361,16 @@ impl PlatformApplication for CanvasApplication {
                 state.positions[active],
             );
         }
+        if let Some(status) = self.status.as_deref() {
+            paint_status(
+                canvas,
+                width,
+                height,
+                scale_scalar(frame.scale_factor),
+                status,
+                false,
+            );
+        }
         paint_fixed_chrome(
             canvas,
             width,
@@ -317,14 +387,19 @@ impl PlatformApplication for CanvasApplication {
 fn main() -> Result<(), Box<dyn Error>> {
     let database = std::env::args_os()
         .nth(1)
-        .map_or_else(default_database_path, PathBuf::from);
-    let application = CanvasApplication::load(database)?;
+        .map_or_else(default_database_path, |path| Ok(PathBuf::from(path)));
+    let application = match database {
+        Ok(database) => CanvasApplication::load(&database),
+        Err(error) => CanvasApplication::unavailable(format!(
+            "Data directory unavailable; no graph is open: {error}"
+        )),
+    };
     run(application, WindowOptions::default())?;
     Ok(())
 }
 
-fn default_database_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../backend/data/graph.sqlite")
+fn default_database_path() -> Result<PathBuf, std::io::Error> {
+    Ok(application_data_directory("not-news-canvas")?.join("graph.sqlite"))
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -341,5 +416,31 @@ fn scroll_pixels(delta: MouseScrollDelta) -> f64 {
     match delta {
         MouseScrollDelta::LineDelta(_, vertical) => f64::from(vertical) * 40.0,
         MouseScrollDelta::PixelDelta(PhysicalPosition { y, .. }) => y,
+    }
+}
+
+#[cfg(test)]
+mod app_tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn first_launch_is_empty_while_malformed_data_is_visibly_disabled() {
+        let directory = TempDir::new().unwrap();
+        let fresh = CanvasApplication::load(&directory.path().join("fresh.sqlite"));
+        assert!(fresh.store.is_some());
+        assert!(fresh.graph.events.is_empty());
+        assert!(fresh.status.is_none());
+
+        let malformed = directory.path().join("malformed.sqlite");
+        std::fs::write(&malformed, b"not a SQLite graph").unwrap();
+        let failed = CanvasApplication::load(&malformed);
+        assert!(failed.store.is_none());
+        assert!(failed.graph.events.is_empty());
+        assert!(failed.status.as_deref().is_some_and(|status| {
+            status.contains("Graph unavailable")
+                && status.contains("no research is shown or writable")
+        }));
     }
 }

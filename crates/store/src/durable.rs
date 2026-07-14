@@ -680,6 +680,23 @@ mod tests {
     }
 
     #[test]
+    fn first_launch_creates_an_empty_graph_without_a_fake_migration_backup() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("graph.sqlite");
+        let store = DurableGraphStore::open(&path).unwrap();
+        assert!(store.migration_backup().is_none());
+        assert_eq!(store.load().unwrap(), GraphSnapshot::default());
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        assert!(table_exists(&connection, "mutation_log").unwrap());
+    }
+
+    #[test]
     fn move_is_idempotent_and_a_stale_writer_cannot_overwrite_it() {
         let (_directory, path) = legacy_graph();
         let first = DurableGraphStore::open(&path).unwrap();

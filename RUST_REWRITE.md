@@ -341,6 +341,20 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   whole-workspace compilation. The local 2026-07-14 checkpoint passes
   warning-denied Clippy, all 44 active Rust checks, Flutter analysis, and all 30
   Flutter tests.
+- Hosted evidence for `69a583a` passed Linux contracts and native Windows
+  whole-workspace compilation. Default startup now creates per-user data under
+  absolute `$XDG_DATA_HOME/not-news-canvas` (or
+  `~/.local/share/not-news-canvas`) on Linux and
+  `%LOCALAPPDATA%\not-news-canvas` on Windows; it never derives writable state
+  from source/executable location. An explicit database argument remains for
+  migration and recovery. First launch creates a valid empty v1 graph without
+  manufacturing a migration backup. Malformed/inaccessible data produces no
+  store handle and an in-window “nothing shown or writable” state; it cannot
+  masquerade as a healthy empty canvas. Mutation, history, immediate source,
+  and inactive record/clear failures now use the visible status surface. A
+  paired Flutter/Rust oracle fixes its 420×50 placement, opaque fill, shadow,
+  dot/label order, two-line wrap, and chrome layering; crop mean is 3.018246,
+  with geometry and text budgets separated.
 
 ## Open decisions
 - Exact Linux/Windows Skia backend selection and fallback after on-window,
@@ -394,13 +408,12 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   `Ctrl+Z`, `Ctrl+Shift+Z`, and `Ctrl+Y` commit through guarded durable history;
   no move can alter an edge. Source clicks, desktop metadata, record orb, and
   zoom/reset/clear strip match Flutter paint order; fixed chrome owns its input
-  regions. Record and clear are deliberately captured but inert: voice/research
-  and destructive-clear semantics are not implemented, and stderr is not an
-  acceptable final status surface. Narrow-window/mobile-style chrome, visible
-  failures, research/voice flows, platform data-path bootstrapping, and
-  packaging remain absent. The binary has not been presented as a product
-  candidate.
-- Next safe action: add visible status/error surfaces and an empty/platform-data
-  startup contract, then port text research ingestion and progress before
-  activating record or clear. Never write the preserved live graph during
-  tests.
+  regions. Platform-native data startup distinguishes healthy empty, migrated,
+  and disabled failure states; runtime failures are visible in a bounded status
+  panel. Record and clear remain captured but inert: voice/research and
+  destructive-clear semantics are not implemented. Narrow-window/mobile-style
+  chrome, research/voice flows, legacy-data discovery/import UX, and packaging
+  remain absent. The binary has not been presented as a product candidate. The
+  local checkpoint passes warning-denied lint and 49 active Rust checks.
+- Next safe action: port text research ingestion and progress before activating
+  record or clear. Never write the preserved live graph during tests.

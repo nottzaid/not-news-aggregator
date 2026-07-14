@@ -1530,6 +1530,7 @@ Widget buildCanvasFullScreenOracle({
   bool showChrome = true,
   bool showMetadata = true,
   String? activeId,
+  String? statusMessage,
 }) {
   final viewport = _CanvasViewportController();
   final positions =
@@ -1579,6 +1580,11 @@ Widget buildCanvasFullScreenOracle({
                       constraints.maxWidth,
                       constraints.maxHeight,
                     ),
+                  ),
+                if (statusMessage != null)
+                  _SessionStatus(
+                    message: statusMessage,
+                    running: false,
                   ),
                 if (showChrome) ...[
                   _RecordButton(

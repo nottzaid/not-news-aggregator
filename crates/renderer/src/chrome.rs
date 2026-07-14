@@ -190,6 +190,88 @@ pub fn paint_active_metadata(
     canvas.restore();
 }
 
+/// Paints a non-interactive Flutter-style status panel in screen space.
+pub fn paint_status(
+    canvas: &Canvas,
+    physical_width: f32,
+    physical_height: f32,
+    scale_factor: f32,
+    message: &str,
+    running: bool,
+) {
+    let width = physical_width / scale_factor;
+    let height = physical_height / scale_factor;
+    let panel_width = 420.0_f32.min(width - 44.0);
+    if panel_width <= 80.0 {
+        return;
+    }
+    let message_width = panel_width - 82.0;
+    canvas.save();
+    canvas.scale((scale_factor, scale_factor));
+    let message_height = STATUS_TEXT.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        resources.paragraph(message, message_width).height()
+    });
+    let panel_height = (message_height + 22.0).max(38.0);
+    let bounds = Rect::from_xywh(
+        22.0,
+        height - 28.0 - panel_height,
+        panel_width,
+        panel_height,
+    );
+    paint_metadata_shadow(canvas, bounds, INK_0, 0.50, 18.0, 8.0);
+
+    let rounded = RRect::new_rect_xy(bounds, 10.0, 10.0);
+    let mut panel = Paint::default();
+    panel.set_anti_alias(true);
+    panel.set_color(color(PANEL));
+    canvas.draw_rrect(rounded, &panel);
+    let mut border = Paint::default();
+    border.set_anti_alias(true);
+    border.set_style(PaintStyle::Stroke);
+    border.set_stroke_width(1.0);
+    border.set_color(color(HAIRLINE));
+    canvas.draw_rrect(rounded, &border);
+
+    let accent = if running {
+        crate::palette::SIGNAL_HOT
+    } else {
+        crate::palette::DATA
+    };
+    let center_y = bounds.center_y();
+    let mut glow = Paint::default();
+    glow.set_anti_alias(true);
+    glow.set_color4f(color4f_with_alpha(accent, 0.60), None);
+    glow.set_mask_filter(MaskFilter::blur(
+        BlurStyle::Normal,
+        flutter_blur_sigma(8.0),
+        None,
+    ));
+    canvas.draw_circle((39.5, center_y), 4.5, &glow);
+    let mut dot = Paint::default();
+    dot.set_anti_alias(true);
+    dot.set_color(color(accent));
+    canvas.draw_circle((39.5, center_y), 4.5, &dot);
+
+    STATUS_TEXT.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        let label = resources.label(if running { "LIVE" } else { "IDLE" }, running);
+        label.paint(canvas, (53.0, center_y - label.height() / 2.0));
+    });
+    STATUS_TEXT.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        let message_paragraph = resources.paragraph(message, message_width);
+        message_paragraph.paint(
+            canvas,
+            (
+                bounds.left + 69.0,
+                center_y - message_paragraph.height() / 2.0,
+            ),
+        );
+    });
+    canvas.restore();
+}
+
 fn desktop_metadata_width(summary: &str) -> f32 {
     match summary.encode_utf16().count() {
         0..145 => 268.0,
@@ -683,6 +765,111 @@ thread_local! {
     static METADATA_TEXT: RefCell<MetadataText> = RefCell::new(MetadataText::new());
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum StatusStyle {
+    Idle,
+    Live,
+    Message,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct StatusKey {
+    text: String,
+    style: StatusStyle,
+    width: u32,
+}
+
+struct StatusText {
+    fonts: FontCollection,
+    paragraphs: HashMap<StatusKey, skia_safe::textlayout::Paragraph>,
+}
+
+impl StatusText {
+    fn new() -> Self {
+        Self {
+            fonts: ui_fonts(),
+            paragraphs: HashMap::new(),
+        }
+    }
+
+    fn label(&mut self, text: &str, running: bool) -> &skia_safe::textlayout::Paragraph {
+        self.text(
+            text,
+            if running {
+                StatusStyle::Live
+            } else {
+                StatusStyle::Idle
+            },
+            38.0,
+        )
+    }
+
+    fn paragraph(&mut self, text: &str, width: f32) -> &skia_safe::textlayout::Paragraph {
+        self.text(text, StatusStyle::Message, width)
+    }
+
+    fn text(
+        &mut self,
+        text: &str,
+        status_style: StatusStyle,
+        width: f32,
+    ) -> &skia_safe::textlayout::Paragraph {
+        let key = StatusKey {
+            text: text.to_owned(),
+            style: status_style,
+            width: width.to_bits(),
+        };
+        if !self.paragraphs.contains_key(&key) && self.paragraphs.len() >= 128 {
+            self.paragraphs.clear();
+        }
+        let fonts = self.fonts.clone();
+        self.paragraphs.entry(key).or_insert_with(|| {
+            let (color_value, size, weight, spacing, height) = match status_style {
+                StatusStyle::Idle => (crate::palette::DATA, 9.5, 700.0, 1.4, None),
+                StatusStyle::Live => (crate::palette::SIGNAL_HOT, 9.5, 700.0, 1.4, None),
+                StatusStyle::Message => (TEXT, 11.0, 600.0, 0.0, Some(1.3)),
+            };
+            let mut style = TextStyle::new();
+            let mut foreground = Paint::default();
+            foreground.set_color(color(color_value));
+            style.set_foreground_paint(&foreground);
+            style.set_font_families(&[MONO_FONT]);
+            style.set_font_arguments(&FontArguments::new().set_variation_design_position(
+                VariationPosition {
+                    coordinates: &[Coordinate {
+                        axis: Coordinate::wght,
+                        value: weight,
+                    }],
+                },
+            ));
+            style.set_font_size(size);
+            style.set_letter_spacing(spacing);
+            if let Some(height) = height {
+                style.set_height(height);
+                style.set_height_override(true);
+            }
+            let mut paragraph_style = ParagraphStyle::new();
+            paragraph_style.set_text_align(TextAlign::Left);
+            paragraph_style.set_text_direction(TextDirection::LTR);
+            paragraph_style.set_text_style(&style);
+            if status_style == StatusStyle::Message {
+                paragraph_style.set_max_lines(3);
+                paragraph_style.set_ellipsis("…");
+            }
+            let mut builder = ParagraphBuilder::new(&paragraph_style, fonts);
+            builder.push_style(&style);
+            builder.add_text(text);
+            let mut paragraph = builder.build();
+            paragraph.layout(width);
+            paragraph
+        })
+    }
+}
+
+thread_local! {
+    static STATUS_TEXT: RefCell<StatusText> = RefCell::new(StatusText::new());
+}
+
 #[cfg(test)]
 mod tests {
     use not_news_domain::{EventId, SourceArtifact};
@@ -884,6 +1071,109 @@ mod tests {
         let summary = format!("{}🧪", "a".repeat(142));
         assert_eq!(summary.encode_utf16().count(), 144);
         assert!((desktop_metadata_width(&summary) - 268.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn status_failure_is_visible_but_bounded_to_the_lower_left() {
+        let mut surface = surfaces::raster_n32_premul((1280, 800)).unwrap();
+        surface.canvas().clear(color(INK_0));
+        paint_status(
+            surface.canvas(),
+            1280.0,
+            800.0,
+            1.0,
+            "Graph unavailable; no research is shown or writable.",
+            false,
+        );
+        let pixels = read_image(&surface.image_snapshot());
+        let background = &pixels[0..4];
+        let changed = pixels
+            .chunks_exact(4)
+            .filter(|pixel| *pixel != background)
+            .count();
+        assert!((1_000..60_000).contains(&changed));
+        assert!(
+            pixels[..1280 * 500 * 4]
+                .chunks_exact(4)
+                .all(|pixel| pixel == background)
+        );
+    }
+
+    #[test]
+    fn status_panel_stays_within_flutter_crop_budget() {
+        const FLUTTER: &[u8] =
+            include_bytes!("../../../test/goldens/full-screen-status-1280x800.png");
+        const FLUTTER_BASE: &[u8] =
+            include_bytes!("../../../test/goldens/full-screen-closed-1280x800.png");
+        let flutter_status = read_image(&Image::from_encoded(Data::new_copy(FLUTTER)).unwrap());
+        let flutter_base = read_image(&Image::from_encoded(Data::new_copy(FLUTTER_BASE)).unwrap());
+        let rust_status = paint_over(&flutter_base, |canvas| {
+            paint_status(
+                canvas,
+                1280.0,
+                800.0,
+                1.0,
+                "Graph unavailable; no research is shown or writable.",
+                false,
+            );
+        });
+        let metrics = residual_crop_metrics(
+            &flutter_base,
+            &flutter_status,
+            &flutter_base,
+            &rust_status,
+            &[(0, 680, 500, 120)],
+        );
+        let fill = residual_crop_metrics(
+            &flutter_base,
+            &flutter_status,
+            &flutter_base,
+            &rust_status,
+            &[(200, 760, 230, 8)],
+        );
+        let shadow = residual_crop_metrics(
+            &flutter_base,
+            &flutter_status,
+            &flutter_base,
+            &rust_status,
+            &[
+                (0, 690, 22, 110),
+                (442, 690, 58, 110),
+                (22, 690, 420, 32),
+                (22, 772, 420, 28),
+            ],
+        );
+        let text = residual_crop_metrics(
+            &flutter_base,
+            &flutter_status,
+            &flutter_base,
+            &rust_status,
+            &[(30, 730, 390, 35)],
+        );
+        assert!(metrics.1 <= 3.20, "Flutter/Rust status drift {metrics:?}");
+        assert_eq!((fill.0, fill.2), (0, 0));
+        assert!(fill.1.abs() < f64::EPSILON);
+        assert!(
+            shadow.1 <= 1.05 && shadow.2 <= 30,
+            "Flutter/Rust status geometry/shadow drift {shadow:?}"
+        );
+        assert!(
+            text.1 <= 10.5,
+            "Flutter/Rust localized status text drift {text:?}"
+        );
+        STATUS_TEXT.with(|resources| {
+            let mut resources = resources.borrow_mut();
+            let paragraph = resources.paragraph(
+                "Graph unavailable; no research is shown or writable.",
+                338.0,
+            );
+            let ranges: Vec<_> = paragraph
+                .get_line_metrics()
+                .iter()
+                .map(|line| (line.start_index, line.end_excluding_whitespaces))
+                .collect();
+            assert_eq!(ranges, [(0, 42), (43, 52)]);
+        });
     }
 
     fn residual_crop_metrics(

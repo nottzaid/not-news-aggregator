@@ -12,6 +12,7 @@ not-news-store = { path = "../store" }
 
 [dev-dependencies]
 indexmap.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

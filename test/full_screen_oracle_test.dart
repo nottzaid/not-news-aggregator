@@ -106,4 +106,24 @@ void main() {
       matchesGoldenFile('goldens/full-screen-active-base-1280x800.png'),
     );
   });
+
+  testWidgets('records visible graph-unavailable status', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    const oracle = Key('full-screen-status');
+    await tester.pumpWidget(
+      buildCanvasFullScreenOracle(
+        oracleKey: oracle,
+        statusMessage: 'Graph unavailable; no research is shown or writable.',
+      ),
+    );
+    await tester.pump();
+    await expectLater(
+      find.byKey(oracle),
+      matchesGoldenFile('goldens/full-screen-status-1280x800.png'),
+    );
+  });
 }

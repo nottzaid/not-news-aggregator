@@ -5,7 +5,7 @@ compile_error!("not-news-platform supports Windows and Linux only");
 
 mod open_gl;
 
-use std::{io, process::Command, thread, time::Instant};
+use std::{env, fs, io, path::PathBuf, process::Command, thread, time::Instant};
 
 use skia_safe::Canvas;
 use winit::event::WindowEvent;
@@ -13,6 +13,67 @@ use winit::event::WindowEvent;
 pub use open_gl::{PlatformError, WindowOptions, run};
 pub use skia_safe;
 pub use winit;
+
+/// Creates and returns the platform-native per-user data directory.
+///
+/// # Errors
+///
+/// Rejects unsafe application identifiers, missing platform home data, and
+/// filesystem failures.
+pub fn application_data_directory(application_id: &str) -> Result<PathBuf, io::Error> {
+    if application_id.is_empty()
+        || !application_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "application ID must contain lowercase ASCII letters, digits, or hyphens",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    let directory = linux_data_directory(
+        application_id,
+        env::var_os("XDG_DATA_HOME"),
+        env::var_os("HOME"),
+    )?;
+    #[cfg(target_os = "windows")]
+    let directory = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "LOCALAPPDATA does not name an absolute directory",
+            )
+        })?
+        .join(application_id);
+    fs::create_dir_all(&directory)?;
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_data_directory(
+    application_id: &str,
+    xdg_data_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf, io::Error> {
+    if let Some(xdg) = xdg_data_home
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        return Ok(xdg.join(application_id));
+    }
+    home.map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .map(|path| path.join(".local/share").join(application_id))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "neither XDG_DATA_HOME nor HOME names an absolute directory",
+            )
+        })
+}
 
 /// Opens a URL through the desktop's registered external handler without
 /// blocking the render thread or invoking a shell.
@@ -95,5 +156,24 @@ mod tests {
         assert_eq!(args.last().unwrap().to_str(), Some(url));
         assert!(external_url_command("file:///etc/passwd").is_err());
         assert!(external_url_command("$(touch /tmp/forbidden)").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_data_path_obeys_absolute_xdg_then_home_fallback() {
+        assert_eq!(
+            linux_data_directory("not-news-canvas", Some("/var/data".into()), None).unwrap(),
+            PathBuf::from("/var/data/not-news-canvas")
+        );
+        assert_eq!(
+            linux_data_directory(
+                "not-news-canvas",
+                Some("relative".into()),
+                Some("/home/researcher".into()),
+            )
+            .unwrap(),
+            PathBuf::from("/home/researcher/.local/share/not-news-canvas")
+        );
+        assert!(linux_data_directory("not-news-canvas", None, None).is_err());
     }
 }
