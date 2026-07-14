@@ -55,38 +55,40 @@ class AiNewsCanvasApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'AI News Canvas',
-      theme: ThemeData(
-        useMaterial3: true,
-        fontFamily: _display,
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: _ink0,
-        canvasColor: _ink1,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: _signal,
-          brightness: Brightness.dark,
-        ),
-        iconTheme: const IconThemeData(color: _inkTextDim, size: 18),
-        tooltipTheme: const TooltipThemeData(
-          textStyle: TextStyle(
-            fontFamily: _mono,
-            color: _inkText,
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.4,
-          ),
-          decoration: BoxDecoration(
-            color: _panelRaised,
-            border: Border.fromBorderSide(
-              BorderSide(color: _hairline, width: 1),
-            ),
-            borderRadius: BorderRadius.all(Radius.circular(4)),
-          ),
-        ),
-      ),
+      theme: _applicationTheme(),
       home: const CanvasPrototypeScreen(),
     );
   }
 }
+
+ThemeData _applicationTheme() => ThemeData(
+      useMaterial3: true,
+      fontFamily: _display,
+      brightness: Brightness.dark,
+      scaffoldBackgroundColor: _ink0,
+      canvasColor: _ink1,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: _signal,
+        brightness: Brightness.dark,
+      ),
+      iconTheme: const IconThemeData(color: _inkTextDim, size: 18),
+      tooltipTheme: const TooltipThemeData(
+        textStyle: TextStyle(
+          fontFamily: _mono,
+          color: _inkText,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.4,
+        ),
+        decoration: BoxDecoration(
+          color: _panelRaised,
+          border: Border.fromBorderSide(
+            BorderSide(color: _hairline, width: 1),
+          ),
+          borderRadius: BorderRadius.all(Radius.circular(4)),
+        ),
+      ),
+    );
 
 class CanvasPrototypeScreen extends StatefulWidget {
   const CanvasPrototypeScreen({super.key});
@@ -1520,6 +1522,89 @@ class _PendingDrag {
   final String eventId;
   final Offset origin;
   final List<EventBridge> oldBridges;
+}
+
+@visibleForTesting
+Widget buildCanvasFullScreenOracle({
+  required Key oracleKey,
+  bool showChrome = true,
+  bool showMetadata = true,
+  String? activeId,
+}) {
+  final viewport = _CanvasViewportController();
+  final positions =
+      generateBasePositions(fixtureEvents, bridges: fixtureBridges);
+  final layouts = displayLayout(
+    events: fixtureEvents,
+    basePositions: positions,
+    activeId: activeId,
+  );
+  return MaterialApp(
+    debugShowCheckedModeBanner: false,
+    theme: _applicationTheme(),
+    home: Scaffold(
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          return RepaintBoundary(
+            key: oracleKey,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                const CustomPaint(painter: CanvasBackgroundPainter()),
+                CustomPaint(
+                  painter: _EventCanvasPainter(
+                    repaint: viewport,
+                    events: fixtureEvents,
+                    bridges: fixtureBridges,
+                    layouts: layouts,
+                    activeId: activeId,
+                    bridgeActiveId: activeId,
+                    hoveredArtifactUrl: null,
+                    artifactHover: const AlwaysStoppedAnimation(0),
+                    expansionProgresses: {
+                      if (activeId != null) activeId: 1,
+                    },
+                    viewport: viewport,
+                    bridgeFlow: const AlwaysStoppedAnimation(0),
+                    dragEventId: null,
+                    dragTargetId: null,
+                    pendingDrag: null,
+                    reconciliationPulse: const AlwaysStoppedAnimation(0),
+                  ),
+                ),
+                if (activeId != null && showMetadata)
+                  _MetadataSheet(
+                    layout: layouts[activeId]!,
+                    viewportSize: Size(
+                      constraints.maxWidth,
+                      constraints.maxHeight,
+                    ),
+                  ),
+                if (showChrome) ...[
+                  _RecordButton(
+                    running: false,
+                    recording: false,
+                    transcribing: false,
+                    onPressed: () {},
+                    onCancel: () {},
+                  ),
+                  _ZoomControls(
+                    zoom: viewport.zoomListenable,
+                    onZoomIn: () {},
+                    onZoomOut: () {},
+                    onReset: () {},
+                    clearing: false,
+                    clearEnabled: true,
+                    onClear: () {},
+                  ),
+                ],
+              ],
+            ),
+          );
+        },
+      ),
+    ),
+  );
 }
 
 @visibleForTesting

@@ -56,6 +56,7 @@ pub enum InteractionEffect {
     Unchanged,
     PixelsChanged,
     Move(MoveNode),
+    OpenUrl(String),
 }
 
 #[derive(Clone, Debug)]
@@ -198,11 +199,7 @@ impl CanvasInteraction {
                 })
             }
             PointerGesture::Drag { .. } | PointerGesture::Pan { moved: false, .. } => {
-                if self.tap(graph, now) {
-                    InteractionEffect::PixelsChanged
-                } else {
-                    InteractionEffect::Unchanged
-                }
+                self.tap(graph, now)
             }
             PointerGesture::Pan { moved: true, .. } => InteractionEffect::Unchanged,
         }
@@ -226,6 +223,29 @@ impl CanvasInteraction {
         }
         let factor = (-vertical_pixels * 0.0016).exp();
         self.set_zoom(self.viewport.zoom * factor, anchor)
+    }
+
+    pub fn zoom_by(&mut self, factor: f64) -> bool {
+        if !factor.is_finite() || factor <= 0.0 {
+            return false;
+        }
+        self.set_zoom(
+            self.viewport.zoom * factor,
+            Point {
+                x: self.width / 2.0,
+                y: self.height / 2.0,
+            },
+        )
+    }
+
+    pub fn reset_zoom(&mut self) -> bool {
+        self.set_zoom(
+            1.0,
+            Point {
+                x: self.width / 2.0,
+                y: self.height / 2.0,
+            },
+        )
     }
 
     pub fn frame(&mut self, graph: &GraphSnapshot, now: Instant) -> InteractionFrame {
@@ -308,18 +328,53 @@ impl CanvasInteraction {
         }
     }
 
-    fn tap(&mut self, graph: &GraphSnapshot, now: Instant) -> bool {
+    fn tap(&mut self, graph: &GraphSnapshot, now: Instant) -> InteractionEffect {
         let Some(screen) = self.cursor else {
-            return false;
+            return InteractionEffect::Unchanged;
         };
         let positions = self.current_positions(graph, now);
         let world = self.transform().screen_to_world(screen);
+        if let Some(active_id) = self.active.as_ref()
+            && let Some(event) = graph.events.get(active_id)
+            && event.artifacts.len() > 1
+            && let Some(url) = hit_artifact_url(
+                world,
+                positions[active_id],
+                event,
+                f64::from(self.active_paint_ease(now)),
+            )
+        {
+            return InteractionEffect::OpenUrl(url);
+        }
         match hit_event(world, graph, &positions) {
-            Some(event) if self.active.as_ref() == Some(&event) => {
-                self.set_active(None, graph, now)
+            Some(event_id) => {
+                let event = &graph.events[&event_id];
+                if event.artifacts.len() <= 1
+                    && let Some(url) = event
+                        .url
+                        .clone()
+                        .or_else(|| event.artifacts.first().map(|artifact| artifact.url.clone()))
+                {
+                    return InteractionEffect::OpenUrl(url);
+                }
+                let changed = if self.active.as_ref() == Some(&event_id) {
+                    self.set_active(None, graph, now)
+                } else {
+                    self.set_active(Some(&event_id), graph, now)
+                };
+                if changed {
+                    InteractionEffect::PixelsChanged
+                } else {
+                    InteractionEffect::Unchanged
+                }
             }
-            Some(event) => self.set_active(Some(&event), graph, now),
-            None => self.set_active(None, graph, now),
+            None => {
+                if self.set_active(None, graph, now) {
+                    InteractionEffect::PixelsChanged
+                } else {
+                    InteractionEffect::Unchanged
+                }
+            }
         }
     }
 
@@ -469,6 +524,23 @@ fn protected_active_path(
     })
 }
 
+fn hit_artifact_url(
+    world: Point,
+    center: Point,
+    event: &not_news_domain::ResearchEvent,
+    ease: f64,
+) -> Option<String> {
+    layout_artifacts(event)
+        .artifacts
+        .iter()
+        .find_map(|artifact| {
+            let position = add(center, scale_point(artifact.offset, ease));
+            let radius = artifact.radius * lerp(0.2, 1.0, ease);
+            (distance(world, position) <= radius)
+                .then(|| event.artifacts[artifact.artifact_index].url.clone())
+        })
+}
+
 fn distance_to_segment(point: Point, start: Point, end: Point) -> f64 {
     let line = subtract(end, start);
     let length_squared = line.x.mul_add(line.x, line.y * line.y);
@@ -564,7 +636,7 @@ mod tests {
                         summary: "b".into(),
                         source_label: "s".into(),
                         artifacts: vec![],
-                        url: None,
+                        url: Some("https://b.test".into()),
                     },
                 ),
             ]),
@@ -672,5 +744,51 @@ mod tests {
         );
         assert!(interaction.viewport.camera.x.abs() > 100_000.0);
         assert!(interaction.viewport.camera.y.abs() > 100_000.0);
+    }
+
+    #[test]
+    fn click_resolves_direct_and_expanded_artifact_urls_without_shell_semantics() {
+        let graph = graph();
+        let mut interaction = interaction();
+        let now = Instant::now();
+        let direct = interaction
+            .transform()
+            .world_to_screen(Point { x: 900.0, y: 400.0 });
+        interaction.cursor_moved(direct, &graph, now);
+        interaction.pointer_down(&graph, now);
+        assert_eq!(
+            interaction.pointer_up(&graph, now),
+            InteractionEffect::OpenUrl("https://b.test".into())
+        );
+
+        let center = Point { x: 400.0, y: 400.0 };
+        let event = &graph.events[&EventId("a".into())];
+        let node = interaction.transform().world_to_screen(center);
+        interaction.cursor_moved(node, &graph, now);
+        interaction.cursor_moved(node, &graph, now + ACTIVE_MOTION);
+        let artifact = &layout_artifacts(event).artifacts[0];
+        let artifact_screen = interaction
+            .transform()
+            .world_to_screen(add(center, artifact.offset));
+        interaction.cursor_moved(artifact_screen, &graph, now + ACTIVE_MOTION);
+        interaction.pointer_down(&graph, now + ACTIVE_MOTION);
+        assert_eq!(
+            interaction.pointer_up(&graph, now + ACTIVE_MOTION),
+            InteractionEffect::OpenUrl("https://one.test".into())
+        );
+    }
+
+    #[test]
+    fn chrome_zoom_uses_view_center_anchor_and_reset_preserves_its_world_point() {
+        let mut interaction = interaction();
+        interaction.resize(1_280, 800);
+        interaction.viewport.camera = Point { x: 250.0, y: -90.0 };
+        let center = Point { x: 640.0, y: 400.0 };
+        let before = interaction.transform().screen_to_world(center);
+        assert!(interaction.zoom_by(1.18));
+        assert_eq!(interaction.transform().screen_to_world(center), before);
+        assert!(interaction.reset_zoom());
+        assert!((interaction.viewport.zoom - 1.0).abs() < f64::EPSILON);
+        assert_eq!(interaction.transform().screen_to_world(center), before);
     }
 }

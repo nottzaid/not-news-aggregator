@@ -316,6 +316,31 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   copied both preserved databases, migrated them, moved and undid a node, and
   found events, bridges, aliases, and placements unchanged; originals were
   never opened writable.
+- Full-screen Flutter goldens now isolate fixed chrome and metadata by pairing
+  each overlay with its identical base. A testing-only factory in `main.dart`
+  composes existing private widgets without audio, network, or graph writes;
+  no Dart behavior was reimplemented. The custom automated binding preserves
+  fixed fake-time/viewport semantics while enabling real shadows, and explicit
+  font loading includes Material Icons. Earlier frames with disabled shadows
+  and missing-glyph boxes were rejected as test-harness artifacts.
+- Rust fixed chrome and desktop metadata now use DPR-aware screen-space Skia.
+  Residual gates separately constrain record, controls, metadata fill,
+  shadow/geometry, and text; exact UTF-16 width selection, five summary line
+  ranges, and baselines prevent raster averages from hiding layout drift. The
+  record and control-strip mean deltas are 0.542288 and 0.450328; blank metadata
+  fill is 0.028571. Pointer regions share paint geometry and are checked at
+  1.5× DPR; label/divider pixels consume input rather than leaking canvas
+  gestures.
+- Source activation matches Flutter: direct events open their event/sole
+  artifact URL, expandable events toggle, and expanded artifacts open their
+  own source. Linux `xdg-open` and Windows' registered handler run off the
+  render thread without a shell; only HTTP(S) is accepted, and metacharacters
+  remain one process argument. Center-control zoom uses Flutter's 1.18 factor
+  and keeps the world point beneath the viewport center through zoom/reset.
+- Hosted evidence for `5dd59b7` passed both Linux contracts and native Windows
+  whole-workspace compilation. The local 2026-07-14 checkpoint passes
+  warning-denied Clippy, all 44 active Rust checks, Flutter analysis, and all 30
+  Flutter tests.
 
 ## Open decisions
 - Exact Linux/Windows Skia backend selection and fallback after on-window,
@@ -333,8 +358,9 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
 - Date: 2026-07-14.
 - Branch: `rust-rewrite`, created from
   `3220d3af5607d27b8d945026f8c0551921a4addc`.
-- Phase: graph painter and primary pointer interaction are compatibility-gated;
-  UI remains an incomplete product slice, not a design candidate.
+- Phase: graph painter, primary pointer interaction, source activation, fixed
+  desktop chrome, and active metadata are compatibility-gated; UI remains an
+  incomplete product slice, not a design candidate.
 - Accepted decisions: ADR 0001 fixes the single-process Rust boundary; ADR 0002
   supersedes its provisional eframe/Linux clauses with a direct Skia painter and
   thin Windows/Linux surface adapters. Eframe and Vizia are rejected for this
@@ -366,9 +392,15 @@ concurrency obscures state; crystallize Discussion conclusions into issue/ADR.
   protected artifact paths, and placement-only drag now run through a
   replayable reducer. Drag,
   `Ctrl+Z`, `Ctrl+Shift+Z`, and `Ctrl+Y` commit through guarded durable history;
-  no move can alter an edge. Chrome, source activation, visible error recovery,
-  research/voice flows, and packaging remain absent. The binary has not been
-  presented as a product candidate.
-- Next safe action: port source activation and surrounding chrome in Flutter
-  paint order, including visible persistence/migration failure states. Never
-  write the preserved live graph during tests.
+  no move can alter an edge. Source clicks, desktop metadata, record orb, and
+  zoom/reset/clear strip match Flutter paint order; fixed chrome owns its input
+  regions. Record and clear are deliberately captured but inert: voice/research
+  and destructive-clear semantics are not implemented, and stderr is not an
+  acceptable final status surface. Narrow-window/mobile-style chrome, visible
+  failures, research/voice flows, platform data-path bootstrapping, and
+  packaging remain absent. The binary has not been presented as a product
+  candidate.
+- Next safe action: add visible status/error surfaces and an empty/platform-data
+  startup contract, then port text research ingestion and progress before
+  activating record or clear. Never write the preserved live graph during
+  tests.

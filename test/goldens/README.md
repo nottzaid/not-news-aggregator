@@ -78,3 +78,30 @@ neighbor displacement, and bridge emphasis share one clock. Its sha256 is
 `0989cbd34c05ce962a3169f521bb1e8e32e76b051788fdbc97ebfa5ec76c692c`;
 the Rust gate caps mean drift at 0.08 and changed pixels at 0.085. This temporal
 oracle prevents independently correct endpoints from concealing a wrong path.
+
+The four `full-screen-*-1280x800.png` frames isolate Flutter's fixed record/
+zoom chrome and active-event metadata by recording each overlay with and
+without its base scene. `buildCanvasFullScreenOracle` is a testing-only aperture
+in `lib/main.dart`: it composes the existing private painter and widgets but
+initializes no audio plugin, network client, or graph writer. Naming the
+unchanged application theme prevents a copied test composition from becoming a
+second design implementation. The oracle binding retains automated fake time
+and fixed viewport semantics while enabling real application shadows, which
+Flutter tests otherwise replace with opaque silhouettes; Manrope, JetBrains
+Mono, and Material Icons are loaded explicitly.
+
+```text
+Closed + chrome sha256 e4238636fd48f92b5c9c2f42cd79ebfc4db4bb7da9df621e669fbb63e58414bc
+Closed base sha256     b854468e83acc9a5d58686838056fe36ccf1fc298eb6420762ebc2ab790a2b9f
+Active + metadata      24c0cf7703bfedb749be3ac8a2dfd8f3576988e3d53a98a7afda272975dc30e9
+Active base            d129ca171f1160d776921ab97185b02f712853ee0be585d757f7f05d18952a36
+```
+
+```sh
+flutter test test/full_screen_oracle_test.dart --update-goldens
+```
+
+Rust compares overlay residuals over the identical Flutter base. Separate
+budgets bind record, control strip, opaque metadata fill, shadows, and text;
+the metadata paragraph additionally fixes all five line ranges and baselines.
+This keeps platform-sensitive glyph edges from weakening geometry checks.

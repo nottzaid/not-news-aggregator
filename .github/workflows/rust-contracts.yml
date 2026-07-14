@@ -13,6 +13,7 @@ on:
       - "rust-toolchain.toml"
       - "test/background_oracle_test.dart"
       - "test/closed_graph_oracle_test.dart"
+      - "test/full_screen_oracle_test.dart"
       - "test/goldens/**"
   pull_request:
     paths:
@@ -24,6 +25,7 @@ on:
       - "rust-toolchain.toml"
       - "test/background_oracle_test.dart"
       - "test/closed_graph_oracle_test.dart"
+      - "test/full_screen_oracle_test.dart"
       - "test/goldens/**"
 
 permissions:
