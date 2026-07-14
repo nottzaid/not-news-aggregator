@@ -161,9 +161,10 @@ Both upgrades require a verified online backup when a prior graph exists.
 The current developer launch requires Flutter, Python/uv, Hermes, curl, and a
 Podman/Docker SearXNG runtime. The Rust target supports Windows and Linux,
 removes Flutter, Python/uv, FastAPI, and the loopback backend from the
-application boundary, and retains:
+application boundary. Its bounded direct-exec research adapter supports either
+the standalone `opencode` CLI or `hermes`; current external capabilities remain:
 
-- `hermes` executable and isolated profile state;
+- an authenticated `opencode` CLI or `hermes` plus configured profile state;
 - Podman/Docker plus SearXNG unless search is later embedded or remote;
 - Browse.sh and provider credentials used by Hermes;
 - Groq transcription HTTP API;
@@ -176,18 +177,22 @@ check output, or agent prompts except where the provider requires them.
 
 ## Evidence gaps to close before parity claims
 
-- Direct Skia currently ports only the source-derived background, grid,
-  viewport transform, motion curves, palette, and deterministic layout. The
-  native surface compiles but has not been used as parity evidence.
-- No synchronized screenshot/motion corpus currently compares Flutter and Rust
-  at canonical viewports, interaction states, and animation timestamps.
-- No current widget/integration test drives actual drag arbitration, hover,
-  target preview, cancellation, zoom conversion, or undo.
-- No current trace measures build/raster/input latency or repainted area.
-- No current experiment covers overlapping drags, late reconciliation over a
-  newer revision, pending-job restart, or destructive undo conflicts.
-- Text-prompt entry is a backend capability without a complete visible input
-  surface.
+- Direct Skia has raster/temporal gates for the background, graph, expansion,
+  fixed desktop chrome, active metadata, and status panel; responsive/narrow
+  chrome, research activity, the new text composer, and voice states still need
+  comparable visual contracts.
+- Native pointer tests cover unbounded pan, anchored zoom, hover grace,
+  activation, artifact paths, placement-only drag, source opening, and durable
+  undo/redo. Real-window latency, invalidation-area, high-node-count, device-loss,
+  and driver/backend traces remain absent.
+- Research now crosses a process-group/Job-Object supervisor, typed parser,
+  sequenced SQLite acceptance, and direct in-memory canvas updates. Remaining
+  parity gaps are durable activity history presentation, generated-cluster focus
+  until manual camera input, capability diagnosis/remediation, voice capture and
+  transcription, and explicit destructive clear.
+- Crash-injection proves transaction rollback and interrupted-session recovery;
+  release evidence must still kill real application/backend processes at each
+  boundary and exercise the shipped recovery UI.
 - Windows has no current executable reference or packaging check. The rewrite
   cross-compiles the renderer/platform boundary and compiles the full workspace
   on a native Windows CI runner, but must still verify native window/input

@@ -1,9 +1,18 @@
 //! Bounded external-agent integration.
 
+mod prompt;
+mod runner;
+
 use not_news_domain::{EventId, GraphSnapshot, ResearchEvent, SnapshotError, SourceArtifact};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
+
+pub use prompt::build_research_prompt;
+pub use runner::{
+    OutputProtocol, ProcessLimits, ResearchBackend, ResearchHandle, ResearchLaunch,
+    ResearchProcessEvent, ResearchTermination,
+};
 
 pub const EVENT_PREFIX: &str = "AI_NEWS_EVENT:";
 
@@ -34,8 +43,8 @@ pub enum AgentProtocolError {
     Object(&'static str),
     #[error("Hermes payload is missing nonempty field {0}")]
     Field(&'static str),
-    #[error("Hermes color must be an ARGB integer or six/eight-digit hex string")]
-    Color,
+    #[error("Hermes color {0} must be an ARGB integer or six/eight-digit hex string")]
+    Color(String),
     #[error("Hermes event violates graph invariants: {0}")]
     Snapshot(#[from] SnapshotError),
 }
@@ -160,22 +169,45 @@ fn parse_color(value: Option<&Value>) -> Result<u32, AgentProtocolError> {
     let Some(value) = value else {
         return Err(AgentProtocolError::Field("color"));
     };
+    let rejected = || AgentProtocolError::Color(bounded_value(value));
     if let Some(number) = value.as_u64() {
-        return u32::try_from(number).map_err(|_| AgentProtocolError::Color);
+        return u32::try_from(number).map_err(|_| rejected());
+    }
+    if let Some(number) = value.as_i64() {
+        return i32::try_from(number)
+            .map(|signed| u32::from_ne_bytes(signed.to_ne_bytes()))
+            .map_err(|_| rejected());
     }
     let Some(text) = value.as_str() else {
-        return Err(AgentProtocolError::Color);
+        return Err(rejected());
     };
-    let text = text.strip_prefix('#').unwrap_or(text);
+    let text = text.trim();
+    if text.bytes().all(|byte| byte.is_ascii_digit()) && !matches!(text.len(), 6 | 8) {
+        return text.parse::<u32>().map_err(|_| rejected());
+    }
+    let text = text
+        .strip_prefix('#')
+        .or_else(|| text.strip_prefix("0x"))
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
     let normalized = if text.len() == 6 {
         format!("ff{text}")
     } else {
         text.to_owned()
     };
     if normalized.len() != 8 {
-        return Err(AgentProtocolError::Color);
+        return Err(rejected());
     }
-    u32::from_str_radix(&normalized, 16).map_err(|_| AgentProtocolError::Color)
+    u32::from_str_radix(&normalized, 16).map_err(|_| rejected())
+}
+
+fn bounded_value(value: &Value) -> String {
+    let serialized = value.to_string();
+    if serialized.chars().count() <= 64 {
+        serialized
+    } else {
+        serialized.chars().take(64).collect::<String>() + "…"
+    }
 }
 
 fn required_string<'a>(
@@ -250,5 +282,29 @@ mod tests {
         ] {
             assert!(parse_output_line(line).is_err(), "accepted {line}");
         }
+    }
+
+    #[test]
+    fn common_agent_color_spellings_normalize_to_argb() {
+        for spelling in ["#4cc9d6", "0xff4cc9d6", "0XFF4CC9D6", "4283222486"] {
+            let line = format!(
+                r#"AI_NEWS_EVENT: {{"type":"event.upsert","data":{{"id":"finding","title":"Finding","date":"Jul 14, 2026","color":"{spelling}","summary":"Summary","sourceLabel":"Primary","artifacts":[]}}}}"#
+            );
+            let AgentEvent::EventUpsert(event) = parse_output_line(&line).unwrap() else {
+                panic!("expected event")
+            };
+            assert_eq!(event.color, 0xff4c_c9d6);
+        }
+        let AgentEvent::EventUpsert(event) = parse_output_line(
+            r#"AI_NEWS_EVENT: {"type":"event.upsert","data":{"id":"finding","title":"Finding","date":"Jul 14, 2026","color":-11744810,"summary":"Summary","sourceLabel":"Primary","artifacts":[]}}"#,
+        )
+        .unwrap()
+        else {
+            panic!("expected event")
+        };
+        assert_eq!(
+            event.color,
+            u32::from_ne_bytes((-11_744_810_i32).to_ne_bytes())
+        );
     }
 }

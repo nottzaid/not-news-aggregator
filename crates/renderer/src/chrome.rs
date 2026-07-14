@@ -272,6 +272,63 @@ pub fn paint_status(
     canvas.restore();
 }
 
+/// Paints the keyboard-driven text-research composer above the Canvas without
+/// changing persistent Flutter-matched chrome when the composer is closed.
+pub fn paint_research_prompt(
+    canvas: &Canvas,
+    physical_width: f32,
+    physical_height: f32,
+    scale_factor: f32,
+    prompt: &str,
+) {
+    let width = physical_width / scale_factor;
+    let height = physical_height / scale_factor;
+    let panel_width = 680.0_f32.min(width - 44.0);
+    if panel_width <= 160.0 || height < 160.0 {
+        return;
+    }
+    let bounds = Rect::from_xywh((width - panel_width) / 2.0, 28.0, panel_width, 92.0);
+    canvas.save();
+    canvas.scale((scale_factor, scale_factor));
+    paint_metadata_shadow(canvas, bounds, INK_0, 0.55, 24.0, 10.0);
+
+    let rounded = RRect::new_rect_xy(bounds, 10.0, 10.0);
+    let mut panel = Paint::default();
+    panel.set_anti_alias(true);
+    panel.set_color(color(PANEL));
+    canvas.draw_rrect(rounded, &panel);
+    let mut border = Paint::default();
+    border.set_anti_alias(true);
+    border.set_style(PaintStyle::Stroke);
+    border.set_stroke_width(1.0);
+    border.set_color(color(SIGNAL));
+    canvas.draw_rrect(rounded, &border);
+
+    STATUS_TEXT.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        resources
+            .label("RESEARCH", true)
+            .paint(canvas, (bounds.left + 16.0, bounds.top + 12.0));
+        let content = if prompt.is_empty() {
+            "Ask a research question…"
+        } else {
+            prompt
+        };
+        resources
+            .paragraph(content, panel_width - 32.0)
+            .paint(canvas, (bounds.left + 16.0, bounds.top + 37.0));
+    });
+    let mut cursor = Paint::default();
+    cursor.set_color(color(crate::palette::SIGNAL_HOT));
+    cursor.set_stroke_width(1.5);
+    canvas.draw_line(
+        (bounds.left + 16.0, bounds.bottom - 14.0),
+        (bounds.right - 16.0, bounds.bottom - 14.0),
+        &cursor,
+    );
+    canvas.restore();
+}
+
 fn desktop_metadata_width(summary: &str) -> f32 {
     match summary.encode_utf16().count() {
         0..145 => 268.0,

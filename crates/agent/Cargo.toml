@@ -5,10 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+command-group.workspace = true
 not-news-domain = { path = "../domain" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+indexmap.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

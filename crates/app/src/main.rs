@@ -1,12 +1,18 @@
 mod interaction;
 
 use std::{
+    collections::VecDeque,
     error::Error,
     path::{Path, PathBuf},
+    time::Duration,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use interaction::{CanvasInteraction, InteractionEffect};
+use not_news_agent::{
+    AgentEvent, BridgeUpsert, ResearchHandle, ResearchLaunch, ResearchProcessEvent,
+    ResearchTermination, build_research_prompt,
+};
 use not_news_domain::{GraphSnapshot, Point};
 use not_news_platform::{
     FrameInfo, FrameSchedule, PlatformApplication, WindowOptions, application_data_directory,
@@ -15,15 +21,26 @@ use not_news_platform::{
     winit::{
         dpi::PhysicalPosition,
         event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
-        keyboard::{Key, ModifiersState},
+        keyboard::{Key, ModifiersState, NamedKey},
     },
 };
 use not_news_renderer::{
     ChromeControl, SceneAnimation, SceneState, hit_fixed_chrome, paint_active_metadata,
-    paint_background, paint_fixed_chrome, paint_graph, paint_grid, paint_status,
-    resolved_positions,
+    paint_background, paint_fixed_chrome, paint_graph, paint_grid, paint_research_prompt,
+    paint_status, resolved_positions,
 };
-use not_news_store::{CommitOutcome, DurableGraphStore};
+use not_news_store::{
+    CommitOutcome, DurableGraphStore, ResearchOutputKind, ResearchSessionStatus, StoreError,
+};
+
+struct ActiveResearch {
+    session_id: String,
+    handle: ResearchHandle,
+    next_sequence: u64,
+    deferred_bridges: VecDeque<BridgeUpsert>,
+    closed: bool,
+    scratch_directory: PathBuf,
+}
 
 struct CanvasApplication {
     store: Option<DurableGraphStore>,
@@ -39,12 +56,16 @@ struct CanvasApplication {
     scale_factor: f64,
     chrome_press: Option<ChromeControl>,
     canvas_pointer_active: bool,
+    research_directory: PathBuf,
+    research_input: Option<String>,
+    research: Option<ActiveResearch>,
 }
 
 impl CanvasApplication {
     fn load(database: &Path) -> Self {
         match DurableGraphStore::open(database) {
             Ok(store) => {
+                let recovery = store.recover_interrupted_research();
                 let graph = match store.load() {
                     Ok(graph) => graph,
                     Err(error) => {
@@ -54,13 +75,28 @@ impl CanvasApplication {
                         ));
                     }
                 };
-                let status = store.migration_backup().map(|backup| {
+                let mut status = store.migration_backup().map(|backup| {
                     format!(
                         "Legacy graph migrated after verified backup: {}",
                         backup.display()
                     )
                 });
-                Self::with_state(Some(store), graph, status)
+                match recovery {
+                    Ok(recovered) if !recovered.is_empty() => {
+                        status = Some(format!(
+                            "Recovered {} interrupted research session{}; accepted findings were preserved.",
+                            recovered.len(),
+                            if recovered.len() == 1 { "" } else { "s" }
+                        ));
+                    }
+                    Err(error) => {
+                        status = Some(format!(
+                            "Saved graph opened, but research recovery failed: {error}"
+                        ));
+                    }
+                    _ => {}
+                }
+                Self::with_state(Some(store), graph, status, database.parent())
             }
             Err(error) => Self::unavailable(format!(
                 "Graph unavailable; no research is shown or writable. {}: {error}",
@@ -70,13 +106,14 @@ impl CanvasApplication {
     }
 
     fn unavailable(status: String) -> Self {
-        Self::with_state(None, GraphSnapshot::default(), Some(status))
+        Self::with_state(None, GraphSnapshot::default(), Some(status), None)
     }
 
     fn with_state(
         store: Option<DurableGraphStore>,
         graph: GraphSnapshot,
         status: Option<String>,
+        data_directory: Option<&Path>,
     ) -> Self {
         let interaction = CanvasInteraction::new(resolved_positions(&graph));
         Self {
@@ -96,6 +133,11 @@ impl CanvasApplication {
             scale_factor: 1.0,
             chrome_press: None,
             canvas_pointer_active: false,
+            research_directory: data_directory
+                .unwrap_or_else(|| Path::new("."))
+                .join("research-scratch"),
+            research_input: None,
+            research: None,
         }
     }
 
@@ -195,10 +237,56 @@ impl CanvasApplication {
         if event.state != ElementState::Pressed || event.repeat {
             return false;
         }
+        if self.research_input.is_some() {
+            match &event.logical_key {
+                Key::Named(NamedKey::Enter) => {
+                    let question = self.research_input.take().unwrap_or_default();
+                    return self.start_research(&question);
+                }
+                Key::Named(NamedKey::Escape) => {
+                    self.research_input = None;
+                    return true;
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    if let Some(input) = self.research_input.as_mut() {
+                        input.pop();
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+            if !self.modifiers.control_key()
+                && !self.modifiers.super_key()
+                && !self.modifiers.alt_key()
+                && let Some(text) = event.text.as_deref()
+                && let Some(input) = self.research_input.as_mut()
+            {
+                let remaining = 4_096_usize.saturating_sub(input.chars().count());
+                input.extend(
+                    text.chars()
+                        .filter(|character| !character.is_control())
+                        .take(remaining),
+                );
+                return true;
+            }
+            return false;
+        }
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+            && let Some(active) = self.research.as_ref()
+            && !active.closed
+        {
+            active.handle.cancel();
+            self.status = Some("Cancelling research…".into());
+            return true;
+        }
         let Key::Character(character) = &event.logical_key else {
             return false;
         };
         let command = self.modifiers.control_key() || self.modifiers.super_key();
+        if (command && character.eq_ignore_ascii_case("k")) || (!command && character == "/") {
+            self.research_input = Some(String::new());
+            return true;
+        }
         if !command {
             return false;
         }
@@ -240,6 +328,352 @@ impl CanvasApplication {
                 self.status = Some("Canvas clearing is not implemented in this Rust build.".into());
                 true
             }
+        }
+    }
+
+    fn start_research(&mut self, question: &str) -> bool {
+        let question = question.trim();
+        if question.is_empty() {
+            self.status = Some("Research question cannot be empty.".into());
+            return true;
+        }
+        if self.research.is_some() {
+            self.status = Some("Research is already running; press Escape to cancel it.".into());
+            return true;
+        }
+        if self.store.is_none() {
+            self.status = Some("Research is unavailable because the graph did not open.".into());
+            return true;
+        }
+        let session_id = self.next_operation_id("research");
+        if let Err(error) = self
+            .store
+            .as_ref()
+            .expect("store existence checked")
+            .start_research_session(&session_id, question)
+        {
+            self.status = Some(format!("Research session could not start: {error}"));
+            return true;
+        }
+        let prompt = build_research_prompt(question, &self.graph);
+        let scratch_directory = self.research_directory.join(&session_id);
+        let launch = match ResearchLaunch::from_environment(&prompt, &scratch_directory) {
+            Ok(launch) => launch,
+            Err(error) => {
+                let _ = self
+                    .store
+                    .as_ref()
+                    .expect("store existence checked")
+                    .finish_research_session(
+                        &session_id,
+                        0,
+                        ResearchSessionStatus::Error,
+                        &error.to_string(),
+                    );
+                self.status = Some(format!("Research backend unavailable: {error}"));
+                return true;
+            }
+        };
+        match launch.spawn() {
+            Ok(handle) => {
+                self.research = Some(ActiveResearch {
+                    session_id,
+                    handle,
+                    next_sequence: 0,
+                    deferred_bridges: VecDeque::new(),
+                    closed: false,
+                    scratch_directory,
+                });
+                self.status = Some("Starting research…".into());
+            }
+            Err(error) => {
+                let _ = self
+                    .store
+                    .as_ref()
+                    .expect("store existence checked")
+                    .finish_research_session(
+                        &session_id,
+                        0,
+                        ResearchSessionStatus::Error,
+                        &error.to_string(),
+                    );
+                self.status = Some(format!("Research supervisor could not start: {error}"));
+            }
+        }
+        true
+    }
+
+    fn drain_research(&mut self) -> bool {
+        let mut events = Vec::new();
+        if let Some(active) = self.research.as_ref() {
+            while let Ok(event) = active.handle.try_recv() {
+                events.push(event);
+            }
+        }
+        let changed = !events.is_empty();
+        for event in events {
+            self.handle_research_event(event);
+        }
+        changed
+    }
+
+    fn handle_research_event(&mut self, event: ResearchProcessEvent) {
+        if self.research.as_ref().is_some_and(|active| active.closed)
+            && !matches!(event, ResearchProcessEvent::Finished(_))
+        {
+            return;
+        }
+        match event {
+            ResearchProcessEvent::Started { backend, .. } => {
+                self.record_research_message(
+                    ResearchOutputKind::Message,
+                    &format!("{backend:?} research started."),
+                );
+            }
+            ResearchProcessEvent::Output(output) => self.accept_agent_output(output),
+            ResearchProcessEvent::ProtocolError(message) => {
+                self.record_research_message(ResearchOutputKind::ProtocolError, &message);
+            }
+            ResearchProcessEvent::Diagnostic(message) => {
+                self.record_research_message(
+                    ResearchOutputKind::ProtocolError,
+                    &format!("Research backend: {message}"),
+                );
+            }
+            ResearchProcessEvent::Finished(termination) => {
+                self.finish_process(termination);
+            }
+        }
+    }
+
+    fn accept_agent_output(&mut self, output: AgentEvent) {
+        match output {
+            AgentEvent::SessionMessage(message) => {
+                self.record_research_message(ResearchOutputKind::Message, &message);
+            }
+            AgentEvent::VoiceNote(message) => {
+                self.record_research_message(ResearchOutputKind::VoiceNote, &message);
+            }
+            AgentEvent::EventUpsert(event) => {
+                let Some((session, sequence)) = self.research_cursor() else {
+                    return;
+                };
+                let result = self
+                    .store
+                    .as_ref()
+                    .ok_or_else(|| "graph store is unavailable".to_owned())
+                    .and_then(|store| {
+                        store
+                            .accept_research_event(&session, sequence, &event)
+                            .map_err(|error| error.to_string())
+                    });
+                match result {
+                    Ok(outcome) => {
+                        self.advance_research_cursor();
+                        self.graph = outcome.snapshot;
+                        self.interaction.placement_committed(&self.graph);
+                        self.status = Some(format!("Accepted finding: {}", event.title));
+                        self.retry_deferred_bridges();
+                    }
+                    Err(error) => self.abort_research(format!(
+                        "Finding was not committed; research stopped: {error}"
+                    )),
+                }
+            }
+            AgentEvent::BridgeUpsert(bridge) => self.accept_or_defer_bridge(bridge),
+            AgentEvent::SessionDone(message) => {
+                self.reject_unresolved_bridges();
+                self.close_research(ResearchSessionStatus::Done, &message, true);
+            }
+            AgentEvent::SessionError(message) => {
+                self.close_research(ResearchSessionStatus::Error, &message, true);
+            }
+        }
+    }
+
+    fn accept_or_defer_bridge(&mut self, bridge: BridgeUpsert) {
+        let Some((session, sequence)) = self.research_cursor() else {
+            return;
+        };
+        let result = self.store.as_ref().map_or_else(
+            || Err(StoreError::MissingResearchSession(session.clone())),
+            |store| {
+                store.accept_research_bridge(
+                    &session,
+                    sequence,
+                    &bridge.from,
+                    &bridge.to,
+                    &bridge.label,
+                )
+            },
+        );
+        match result {
+            Ok(outcome) => {
+                self.advance_research_cursor();
+                self.graph = outcome.snapshot;
+                self.interaction.placement_committed(&self.graph);
+                self.status = Some(format!("Accepted relationship: {}", bridge.label));
+            }
+            Err(StoreError::MissingResearchEndpoint(_)) => {
+                let message = format!(
+                    "Deferred relationship {} → {} until both events exist.",
+                    bridge.from.0, bridge.to.0
+                );
+                if self.record_research_message(ResearchOutputKind::ProtocolError, &message)
+                    && let Some(active) = self.research.as_mut()
+                {
+                    active.deferred_bridges.push_back(bridge);
+                }
+            }
+            Err(error) => self.record_or_abort_bridge_error(&error),
+        }
+    }
+
+    fn retry_deferred_bridges(&mut self) {
+        let mut pending = self
+            .research
+            .as_mut()
+            .map(|active| std::mem::take(&mut active.deferred_bridges))
+            .unwrap_or_default();
+        while let Some(bridge) = pending.pop_front() {
+            self.accept_or_defer_bridge(bridge);
+            if self.research.as_ref().is_none_or(|active| active.closed) {
+                break;
+            }
+        }
+        if let Some(active) = self.research.as_mut() {
+            active.deferred_bridges.extend(pending);
+        }
+    }
+
+    fn reject_unresolved_bridges(&mut self) {
+        let deferred = self
+            .research
+            .as_mut()
+            .map(|active| std::mem::take(&mut active.deferred_bridges))
+            .unwrap_or_default();
+        for bridge in deferred {
+            self.record_research_message(
+                ResearchOutputKind::ProtocolError,
+                &format!(
+                    "Ignored unresolved relationship {} → {}.",
+                    bridge.from.0, bridge.to.0
+                ),
+            );
+        }
+    }
+
+    fn record_or_abort_bridge_error(&mut self, error: &StoreError) {
+        let message = format!("Ignored invalid relationship: {error}");
+        if !self.record_research_message(ResearchOutputKind::ProtocolError, &message) {
+            self.abort_research(message);
+        }
+    }
+
+    fn record_research_message(&mut self, kind: ResearchOutputKind, message: &str) -> bool {
+        let Some((session, sequence)) = self.research_cursor() else {
+            return false;
+        };
+        let result = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "graph store is unavailable".to_owned())
+            .and_then(|store| {
+                store
+                    .record_research_output(&session, sequence, kind, message)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(_) => {
+                self.advance_research_cursor();
+                self.status = Some(message.to_owned());
+                true
+            }
+            Err(error) => {
+                self.abort_research(format!("Research output could not be recorded: {error}"));
+                false
+            }
+        }
+    }
+
+    fn research_cursor(&self) -> Option<(String, u64)> {
+        self.research
+            .as_ref()
+            .filter(|active| !active.closed)
+            .map(|active| (active.session_id.clone(), active.next_sequence))
+    }
+
+    fn advance_research_cursor(&mut self) {
+        if let Some(active) = self.research.as_mut() {
+            active.next_sequence = active
+                .next_sequence
+                .checked_add(1)
+                .expect("one process cannot emit 2^64 research outputs");
+        }
+    }
+
+    fn close_research(
+        &mut self,
+        state: ResearchSessionStatus,
+        message: &str,
+        cancel_process: bool,
+    ) {
+        let Some((session, sequence)) = self.research_cursor() else {
+            return;
+        };
+        match self.store.as_ref().map_or_else(
+            || Err(StoreError::MissingResearchSession(session.clone())),
+            |store| store.finish_research_session(&session, sequence, state, message),
+        ) {
+            Ok(_) => {
+                self.advance_research_cursor();
+                if let Some(active) = self.research.as_mut() {
+                    active.closed = true;
+                    if cancel_process {
+                        active.handle.cancel();
+                    }
+                }
+                self.status = Some(message.to_owned());
+            }
+            Err(error) => self.abort_research(format!(
+                "Research could not be finalized; accepted findings remain: {error}"
+            )),
+        }
+    }
+
+    fn abort_research(&mut self, message: String) {
+        if let Some((session, sequence)) = self.research_cursor()
+            && let Some(store) = self.store.as_ref()
+            && store
+                .finish_research_session(&session, sequence, ResearchSessionStatus::Error, &message)
+                .is_ok()
+        {
+            self.advance_research_cursor();
+        }
+        if let Some(active) = self.research.as_mut() {
+            active.closed = true;
+            active.handle.cancel();
+        }
+        self.status = Some(message);
+    }
+
+    fn finish_process(&mut self, termination: ResearchTermination) {
+        let already_closed = self.research.as_ref().is_none_or(|active| active.closed);
+        if !already_closed {
+            match termination {
+                ResearchTermination::Completed => {
+                    self.reject_unresolved_bridges();
+                    self.close_research(ResearchSessionStatus::Done, "Research completed.", false);
+                }
+                other => self.close_research(
+                    ResearchSessionStatus::Error,
+                    &termination_message(&other),
+                    false,
+                ),
+            }
+        }
+        if let Some(active) = self.research.take() {
+            let _ = std::fs::remove_dir_all(active.scratch_directory);
         }
     }
 }
@@ -322,6 +756,7 @@ impl PlatformApplication for CanvasApplication {
     }
 
     fn render(&mut self, canvas: &Canvas, frame: FrameInfo) -> FrameSchedule {
+        self.drain_research();
         self.interaction
             .resize(frame.physical_width, frame.physical_height);
         self.physical_width = f64::from(frame.physical_width);
@@ -368,7 +803,16 @@ impl PlatformApplication for CanvasApplication {
                 height,
                 scale_scalar(frame.scale_factor),
                 status,
-                false,
+                self.research.is_some(),
+            );
+        }
+        if let Some(prompt) = self.research_input.as_deref() {
+            paint_research_prompt(
+                canvas,
+                width,
+                height,
+                scale_scalar(frame.scale_factor),
+                prompt,
             );
         }
         paint_fixed_chrome(
@@ -378,8 +822,15 @@ impl PlatformApplication for CanvasApplication {
             scale_scalar(frame.scale_factor),
             viewport.zoom,
         );
-        self.interaction
-            .next_deadline(frame.now)
+        let interaction_deadline = self.interaction.next_deadline(frame.now);
+        let research_deadline = self
+            .research
+            .as_ref()
+            .map(|_| frame.now + Duration::from_millis(33));
+        interaction_deadline
+            .into_iter()
+            .chain(research_deadline)
+            .min()
             .map_or(FrameSchedule::Wait, FrameSchedule::RedrawAt)
     }
 }
@@ -419,8 +870,37 @@ fn scroll_pixels(delta: MouseScrollDelta) -> f64 {
     }
 }
 
+fn termination_message(termination: &ResearchTermination) -> String {
+    match termination {
+        ResearchTermination::Completed => "Research completed.".into(),
+        ResearchTermination::ExitFailure(code) => code.map_or_else(
+            || "Research backend exited unsuccessfully.".into(),
+            |code| format!("Research backend exited with status {code}."),
+        ),
+        ResearchTermination::SpawnFailure(error) => {
+            format!("Research backend could not start: {error}")
+        }
+        ResearchTermination::Cancelled => "Research was cancelled.".into(),
+        ResearchTermination::TimedOut => "Research exceeded its total time limit.".into(),
+        ResearchTermination::IdleTimedOut => {
+            "Research backend stopped producing output and was terminated.".into()
+        }
+        ResearchTermination::OutputLimit => {
+            "Research backend exceeded its bounded output allowance.".into()
+        }
+        ResearchTermination::IoFailure(error) => {
+            format!("Research process communication failed: {error}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod app_tests {
+    #[cfg(unix)]
+    use std::ffi::OsString;
+
+    #[cfg(unix)]
+    use not_news_agent::{OutputProtocol, ProcessLimits, ResearchBackend};
     use tempfile::TempDir;
 
     use super::*;
@@ -442,5 +922,83 @@ mod app_tests {
             status.contains("Graph unavailable")
                 && status.contains("no research is shown or writable")
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_parser_store_and_canvas_accept_an_early_bridge_without_polling_snapshots() {
+        let directory = TempDir::new().unwrap();
+        let mut application = CanvasApplication::load(&directory.path().join("graph.sqlite"));
+        let session_id = "integration-session".to_owned();
+        application
+            .store
+            .as_ref()
+            .unwrap()
+            .start_research_session(&session_id, "Investigate")
+            .unwrap();
+        let script = r#"
+printf '%s\n' 'AI_NEWS_EVENT: {"type":"event.upsert","data":{"id":"a","title":"A","date":"Jul 14, 2026","color":4283218390,"summary":"A finding.","sourceLabel":"Primary","artifacts":[],"url":"https://example.test/a"}}'
+printf '%s\n' 'AI_NEWS_EVENT: {"type":"bridge.upsert","data":{"from":"a","to":"b","label":"Supports"}}'
+printf '%s\n' 'AI_NEWS_EVENT: {"type":"event.upsert","data":{"id":"b","title":"B","date":"Jul 14, 2026","color":4283218390,"summary":"Another finding.","sourceLabel":"Primary","artifacts":[],"url":"https://example.test/b"}}'
+printf '%s\n' 'AI_NEWS_EVENT: {"type":"session.done","data":{"message":"Complete."}}'
+"#;
+        let scratch = directory.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let handle = ResearchLaunch::command(
+            ResearchBackend::Hermes,
+            "/bin/sh",
+            [OsString::from("-c"), OsString::from(script)],
+            &scratch,
+            OutputProtocol::HermesLines,
+            ProcessLimits::default(),
+        )
+        .spawn()
+        .unwrap();
+        application.research = Some(ActiveResearch {
+            session_id,
+            handle,
+            next_sequence: 0,
+            deferred_bridges: VecDeque::new(),
+            closed: false,
+            scratch_directory: scratch,
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while application.research.is_some() && Instant::now() < deadline {
+            application.drain_research();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            application.research.is_none(),
+            "research process did not finish"
+        );
+        assert_eq!(application.graph.events.len(), 2);
+        assert_eq!(application.graph.bridges.len(), 1);
+        assert_eq!(application.graph.revision, 3);
+        assert_eq!(application.status.as_deref(), Some("Complete."));
+
+        let connection =
+            rusqlite::Connection::open(application.store.as_ref().unwrap().path()).unwrap();
+        let output_kinds = connection
+            .prepare(
+                "SELECT kind FROM research_output_log WHERE session_id='integration-session' \
+                 ORDER BY output_sequence",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            output_kinds,
+            [
+                "message",
+                "event",
+                "protocol_error",
+                "event",
+                "bridge",
+                "done"
+            ]
+        );
     }
 }

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+not-news-agent = { path = "../agent" }
 not-news-domain = { path = "../domain" }
 not-news-platform = { path = "../platform" }
 not-news-renderer = { path = "../renderer" }
@@ -12,6 +13,7 @@ not-news-store = { path = "../store" }
 
 [dev-dependencies]
 indexmap.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 
 [lints]
