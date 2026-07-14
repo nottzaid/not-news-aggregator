@@ -135,6 +135,12 @@ drag_transactions(
 `artifacts,color,date,id,sourceLabel,summary,title,url`. Bridge key union is
 `from,label,to`.
 
+Rust schema version 1 adds per-event placement generations and immutable
+move/undo/redo rows without altering these legacy tables. Version 2 adds durable
+research sessions plus one causally ordered output log; a typed proposal, any
+event/alias/bridge change, revision, log row, and session cursor commit together.
+Both upgrades require a verified online backup when a prior graph exists.
+
 ## Intentional incompatibilities
 
 - Ordinary `MoveNode` never creates, removes, amends, or asks Hermes to review

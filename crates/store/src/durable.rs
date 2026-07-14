@@ -12,7 +12,7 @@ use rusqlite::{
 
 use crate::{StoreError, load_snapshot, table_exists};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Debug)]
 pub struct CommitOutcome {
@@ -22,7 +22,7 @@ pub struct CommitOutcome {
 
 #[derive(Clone, Debug)]
 pub struct DurableGraphStore {
-    path: PathBuf,
+    pub(crate) path: PathBuf,
     migration_backup: Option<PathBuf>,
 }
 
@@ -201,7 +201,7 @@ impl DurableGraphStore {
     }
 }
 
-fn open_connection(path: &Path) -> Result<Connection, StoreError> {
+pub(crate) fn open_connection(path: &Path) -> Result<Connection, StoreError> {
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -227,11 +227,20 @@ fn migrate(connection: &mut Connection, path: &Path) -> Result<Option<PathBuf>, 
     if has_existing_graph {
         load_snapshot(&transaction)?;
     }
-    let backup = has_existing_graph.then(|| migration_backup_path(path));
+    let backup = has_existing_graph.then(|| migration_backup_path(path, version));
     if let Some(backup) = &backup {
         ensure_verified_backup(path, backup)?;
     }
-    transaction.execute_batch(
+    if version == 0 {
+        install_schema_v1(&transaction)?;
+    }
+    install_schema_v2(&transaction)?;
+    transaction.commit()?;
+    Ok(backup)
+}
+
+fn install_schema_v1(connection: &Connection) -> Result<(), StoreError> {
+    connection.execute_batch(
         r"
         CREATE TABLE IF NOT EXISTS events (
             id TEXT PRIMARY KEY,
@@ -286,8 +295,40 @@ fn migrate(connection: &mut Connection, path: &Path) -> Result<Option<PathBuf>, 
         PRAGMA user_version = 1;
         ",
     )?;
-    transaction.commit()?;
-    Ok(backup)
+    Ok(())
+}
+
+fn install_schema_v2(connection: &Connection) -> Result<(), StoreError> {
+    connection.execute_batch(
+        r"
+        CREATE TABLE research_sessions (
+            id TEXT PRIMARY KEY,
+            prompt TEXT NOT NULL CHECK (length(trim(prompt)) > 0),
+            status TEXT NOT NULL CHECK (status IN ('running', 'done', 'error', 'interrupted')),
+            last_output_sequence INTEGER,
+            message TEXT,
+            started_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            CHECK (last_output_sequence IS NULL OR last_output_sequence >= 0)
+        );
+        CREATE TABLE research_output_log (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            output_sequence INTEGER NOT NULL CHECK (output_sequence >= 0),
+            kind TEXT NOT NULL CHECK (kind IN (
+                'message', 'voice_note', 'event', 'bridge', 'done', 'error', 'protocol_error'
+            )),
+            payload TEXT NOT NULL,
+            canonical_key TEXT,
+            graph_revision INTEGER NOT NULL CHECK (graph_revision >= 0),
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            UNIQUE (session_id, output_sequence),
+            FOREIGN KEY (session_id) REFERENCES research_sessions(id)
+        );
+        PRAGMA user_version = 2;
+        ",
+    )?;
+    Ok(())
 }
 
 fn ensure_verified_backup(source_path: &Path, backup: &Path) -> Result<(), StoreError> {
@@ -321,12 +362,16 @@ fn verify_backup(path: &Path) -> Result<(), StoreError> {
     }
 }
 
-fn migration_backup_path(path: &Path) -> PathBuf {
+fn migration_backup_path(path: &Path, version: i64) -> PathBuf {
     let epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    path.with_extension(format!("pre-rust-v1-{epoch}-{}.sqlite", std::process::id()))
+    path.with_extension(format!(
+        "pre-rust-v{}-{epoch}-{}.sqlite",
+        version + 1,
+        std::process::id()
+    ))
 }
 
 fn temporary_backup_path(path: &Path) -> PathBuf {

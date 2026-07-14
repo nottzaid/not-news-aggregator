@@ -1,4 +1,5 @@
 mod durable;
+mod research;
 
 use std::path::{Path, PathBuf};
 
@@ -12,6 +13,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 pub use durable::{CommitOutcome, DurableGraphStore};
+pub use research::{
+    AcceptedResearchMutation, ResearchOutputKind, ResearchSession, ResearchSessionStatus,
+};
 
 pub struct LegacyGraphReader {
     path: PathBuf,
@@ -41,7 +45,7 @@ impl LegacyGraphReader {
     }
 }
 
-fn load_snapshot(connection: &Connection) -> Result<GraphSnapshot, StoreError> {
+pub(crate) fn load_snapshot(connection: &Connection) -> Result<GraphSnapshot, StoreError> {
     let events = read_events(connection)?;
     let mut bridges = read_bridges(connection)?;
     bridges
@@ -296,6 +300,30 @@ pub enum StoreError {
     UnsupportedSchema(i64),
     #[error("counter {0} cannot be represented by SQLite")]
     CounterTooLarge(u64),
+    #[error("research session ID must not be blank")]
+    EmptySessionId,
+    #[error("research prompt must not be blank")]
+    EmptyResearchPrompt,
+    #[error("research output message must not be blank")]
+    EmptyResearchMessage,
+    #[error("research session {0:?} does not exist")]
+    MissingResearchSession(String),
+    #[error("research session {session:?} is {status}, not running")]
+    ResearchSessionClosed { session: String, status: String },
+    #[error("research session {session:?} expected output sequence {expected}, received {actual}")]
+    ResearchSequenceConflict {
+        session: String,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("research output {sequence} for session {session:?} was retried with different data")]
+    ResearchOutputConflict { session: String, sequence: u64 },
+    #[error("research bridge references missing endpoint {0:?}")]
+    MissingResearchEndpoint(EventId),
+    #[error("research bridge resolves both endpoints to {0:?}")]
+    ResearchSelfLoop(EventId),
+    #[error("graph revision overflow")]
+    RevisionOverflow,
     #[error(transparent)]
     Move(#[from] MoveNodeError),
     #[error("duplicate event ID")]
