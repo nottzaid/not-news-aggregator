@@ -1,4 +1,4 @@
-# Not News Canvas
+# Not News
 
 Not News is a native Windows/Linux research canvas. A question becomes a
 durable graph of findings, exact sources, and explicit relationships; the
@@ -12,6 +12,9 @@ graph state, migrations, verified backups, research activity, and reversible
 mutations. There is no loopback web server or runtime Flutter/Python toolchain.
 OpenCode or Hermes is an optional external researcher; a saved canvas opens and
 remains editable without either.
+
+Download the current unsigned Windows/Linux engineering preview from
+[Not News 0.1.1](https://github.com/muradkant/not-news-aggregator/releases/tag/rust-v0.1.1).
 
 ## Use the canvas
 
