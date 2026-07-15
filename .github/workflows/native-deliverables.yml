@@ -172,6 +172,7 @@ jobs:
       - name: Publish a visible, checksum-bearing prerelease
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           version="${GITHUB_REF_NAME#rust-v}"
           gh release create "$GITHUB_REF_NAME" release/* \

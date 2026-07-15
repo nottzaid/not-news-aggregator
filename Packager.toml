@@ -1,6 +1,6 @@
 name = "not-news-app"
 productName = "Not News"
-version = "0.1.0"
+version = "0.1.1"
 identifier = "io.github.muradkant.not-news"
 description = "A durable native research canvas for findings, sources, and explicit relationships."
 longDescription = "Not News turns questions into a spatially unbounded, durable graph of findings, exact sources, and explicit relationships. Moving knowledge never invents meaning; research, curation, undo, migration, and recovery remain transactional."
