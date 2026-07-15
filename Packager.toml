@@ -16,6 +16,10 @@ icons = [
   "assets/icon/not-news.png",
   "assets/icon/not-news.ico",
 ]
+resources = [
+  { src = "assets/fonts/manrope/OFL.txt", target = "licenses/Manrope-OFL.txt" },
+  { src = "assets/fonts/jetbrainsmono/OFL.txt", target = "licenses/JetBrains-Mono-OFL.txt" },
+]
 
 [[binaries]]
 path = "not-news-app"

@@ -66,12 +66,15 @@ $portableRoot = Join-Path $env:RUNNER_TEMP "not-news-portable"
 Remove-Item $portableRoot -Recurse -Force -ErrorAction SilentlyContinue
 $portable = Join-Path $portableRoot "not-news_${version}_windows-x86_64"
 New-Item $portable -ItemType Directory -Force | Out-Null
+New-Item (Join-Path $portable "licenses") -ItemType Directory -Force | Out-Null
 Copy-Item -Path @(
     "target/release/not-news-app.exe",
     "README.md",
     "dist/BUILDINFO-windows-x86_64.json",
     "dist/DEPENDENCIES-windows-x86_64.json"
 ) -Destination $portable
+Copy-Item "assets/fonts/manrope/OFL.txt" (Join-Path $portable "licenses/Manrope-OFL.txt")
+Copy-Item "assets/fonts/jetbrainsmono/OFL.txt" (Join-Path $portable "licenses/JetBrains-Mono-OFL.txt")
 $zip = Join-Path $root "dist/not-news_${version}_windows-x86_64.zip"
 Compress-Archive -Path $portable -DestinationPath $zip -CompressionLevel Optimal
 

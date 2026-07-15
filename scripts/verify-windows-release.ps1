@@ -44,6 +44,8 @@ function Invoke-ReleaseSelfCheck([string]$Binary, [string]$CheckRoot, [string]$R
 $zip = Join-Path $root "dist/not-news_${version}_windows-x86_64.zip"
 Expand-Archive $zip (Join-Path $scratch "portable")
 $portable = Join-Path $scratch "portable/not-news_${version}_windows-x86_64/not-news-app.exe"
+if ((Get-FileHash "assets/fonts/manrope/OFL.txt").Hash -ne (Get-FileHash (Join-Path (Split-Path $portable) "licenses/Manrope-OFL.txt")).Hash) { throw "portable archive changed the Manrope license" }
+if ((Get-FileHash "assets/fonts/jetbrainsmono/OFL.txt").Hash -ne (Get-FileHash (Join-Path (Split-Path $portable) "licenses/JetBrains-Mono-OFL.txt")).Hash) { throw "portable archive changed the JetBrains Mono license" }
 $portableAuto = Invoke-ReleaseSelfCheck $portable (Join-Path $scratch "portable-check") "auto"
 $capabilityOutput = (& $portable --capability-check (Join-Path $scratch "capabilities") | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { throw "portable capability check failed" }
@@ -81,6 +83,8 @@ if ($install.ExitCode -ne 0) { throw "NSIS installation exited $($install.ExitCo
 
 $installed = Join-Path $env:LOCALAPPDATA "Not News/not-news-app.exe"
 if (-not (Test-Path $installed)) { throw "NSIS did not install the executable" }
+if (-not (Test-Path (Join-Path $env:LOCALAPPDATA "Not News/licenses/Manrope-OFL.txt"))) { throw "NSIS omitted the Manrope license" }
+if (-not (Test-Path (Join-Path $env:LOCALAPPDATA "Not News/licenses/JetBrains-Mono-OFL.txt"))) { throw "NSIS omitted the JetBrains Mono license" }
 if ((Get-FileHash $installed).Hash -ne $sourceHash) { throw "NSIS changed the release executable" }
 $installedAuto = Invoke-ReleaseSelfCheck $installed (Join-Path $scratch "installed-check") "auto"
 
