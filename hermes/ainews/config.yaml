@@ -1,0 +1,19 @@
+web:
+  search_backend: exa
+  extract_backend: exa
+
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+
+skills:
+  external_dirs: []
+
+terminal:
+  env_passthrough:
+    - EXA_API_KEY
+    - SEARXNG_URL
+    - AI_NEWS_SEARXNG_URL
+    - AI_NEWS_SEARXNG_SEARCH_URL
+    - BROWSERBASE_API_KEY
+    - BROWSE_CLI
