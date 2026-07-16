@@ -1,0 +1,15 @@
+[package]
+name = "not-news-renderer"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+not-news-domain = { path = "../domain" }
+skia-safe.workspace = true
+
+[dev-dependencies]
+indexmap.workspace = true
+
+[lints]
+workspace = true
