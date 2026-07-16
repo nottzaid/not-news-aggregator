@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
+missing=0
+for command in cargo rustc; do
+  if command -v "$command" >/dev/null 2>&1; then
+    printf 'ready     %s\n' "$command"
+  else
+    printf 'missing   %s (required to build from source)\n' "$command" >&2
+    missing=1
+  fi
+done
+
+if command -v pkg-config >/dev/null 2>&1; then
+  printf 'ready     pkg-config\n'
+else
+  printf 'missing   pkg-config (required for Linux native-link discovery)\n' >&2
+  missing=1
+fi
+
+if command -v hermes >/dev/null 2>&1; then
+  printf 'ready     Hermes available; configure its provider through Connections\n'
+else
+  printf 'missing   Hermes (required for new research; saved Canvas remains available)\n' >&2
+fi
+
+printf 'runtime   Exa vault key and SearXNG endpoint are configured through Connections\n'
+
+if command -v browse >/dev/null 2>&1; then
+  printf 'ready     Browse local automation/skills available\n'
+else
+  printf 'missing   Browse CLI (required for dynamic-page research)\n' >&2
+fi
+
+printf 'optional  Groq transcription key is configured through Connections\n'
+
+if [[ ${AI_NEWS_ENABLE_VOICE:-1} == 0 ]]; then
+  printf 'optional  synthesized voice disabled explicitly\n'
+elif [[ -n ${KOKORO_TTS_BASE_URL:-} ]]; then
+  printf 'optional  Kokoro endpoint configured\n'
+else
+  printf 'optional  Kokoro endpoint defaults to http://127.0.0.1:8890\n'
+fi
+
+(( missing == 0 )) || exit 1
+cargo metadata --no-deps --format-version 1 >/dev/null
+printf 'source build contract: PASS\n'

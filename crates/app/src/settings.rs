@@ -217,16 +217,8 @@ fn credential_entry(account: &str) -> Result<Entry, KeyringError> {
 
 #[cfg(target_os = "linux")]
 fn vault_entry_for(service: &str, account: &str) -> Result<Entry, KeyringError> {
-    use std::collections::HashMap;
-
     prepare_linux_secret_service();
-    // Initialize keyring's platform store, then use an application-owned
-    // collection. KWallet installations without a global `default` alias can
-    // create this collection without changing the user's default wallet.
-    let _ = Entry::new(service, account)?;
-    let modifiers = HashMap::from([("target", CREDENTIAL_SERVICE)]);
-    let inner = keyring_core::Entry::new_with_modifiers(service, account, &modifiers)?;
-    Ok(Entry { inner })
+    Entry::new(service, account)
 }
 
 #[cfg(target_os = "windows")]

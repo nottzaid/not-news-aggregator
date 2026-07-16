@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$root"
+
+command -v cargo-packager >/dev/null || {
+  echo "cargo-packager 0.11.8 is required" >&2
+  exit 1
+}
+
+version=$(cargo metadata --no-deps --filter-platform x86_64-unknown-linux-gnu --format-version 1 | jq -r '.packages[] | select(.name == "not-news-app") | .version')
+commit=${GITHUB_SHA:-$(git rev-parse HEAD)}
+export NOT_NEWS_BUILD_COMMIT=${commit:0:12}
+export SOURCE_DATE_EPOCH
+SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$commit")
+
+rm -rf dist
+cargo build --locked --release -p not-news-app
+cargo-packager --config Packager.toml --formats deb
+cargo-packager --config Packager.toml --formats appimage
+
+mv "dist/not-news-app_${version}_amd64.deb" "dist/not-news_${version}_linux-x86_64.deb"
+mv "dist/not-news-app_${version}_x86_64.AppImage" "dist/not-news_${version}_linux-x86_64.AppImage"
+chmod +x "dist/not-news_${version}_linux-x86_64.AppImage"
+
+cargo metadata --locked --filter-platform x86_64-unknown-linux-gnu --format-version 1 | jq \
+  --arg target "x86_64-unknown-linux-gnu" \
+  '[.resolve.nodes[].id] as $resolved | {
+    schema: 1,
+    target: $target,
+    packages: [
+      .packages[]
+      | . as $package
+      | select($resolved | index($package.id))
+      | select(.source != null)
+      | {name, version, license, source}
+    ] | sort_by(.name, .version)
+  }' > dist/DEPENDENCIES-linux-x86_64.json
+jq -n \
+  --arg version "$version" \
+  --arg commit "$commit" \
+  --arg target "x86_64-unknown-linux-gnu" \
+  --arg rustc "$(rustc --version)" \
+  --arg packager "$(cargo-packager --version)" \
+  '{schema: 1, product: "Not News", version: $version, commit: $commit, target: $target, rustc: $rustc, packager: $packager}' \
+  > dist/BUILDINFO-linux-x86_64.json
+
+portable=$(mktemp -d)
+trap 'rm -rf "$portable"' EXIT
+mkdir -p "$portable/not-news_${version}_linux-x86_64"
+mkdir -p "$portable/not-news_${version}_linux-x86_64/licenses"
+cp \
+  target/release/not-news-app \
+  README.md \
+  dist/BUILDINFO-linux-x86_64.json \
+  dist/DEPENDENCIES-linux-x86_64.json \
+  "$portable/not-news_${version}_linux-x86_64/"
+cp assets/fonts/manrope/OFL.txt \
+  "$portable/not-news_${version}_linux-x86_64/licenses/Manrope-OFL.txt"
+cp assets/fonts/jetbrainsmono/OFL.txt \
+  "$portable/not-news_${version}_linux-x86_64/licenses/JetBrains-Mono-OFL.txt"
+tar \
+  --sort=name \
+  --owner=0 \
+  --group=0 \
+  --numeric-owner \
+  --mtime="@$SOURCE_DATE_EPOCH" \
+  -C "$portable" \
+  -cJf "dist/not-news_${version}_linux-x86_64.tar.xz" \
+  "not-news_${version}_linux-x86_64"
+
+(
+  cd dist
+  sha256sum \
+    "not-news_${version}_linux-x86_64.AppImage" \
+    "not-news_${version}_linux-x86_64.deb" \
+    "not-news_${version}_linux-x86_64.tar.xz" \
+    BUILDINFO-linux-x86_64.json \
+    DEPENDENCIES-linux-x86_64.json \
+    > SHA256SUMS-linux-x86_64.txt
+)
