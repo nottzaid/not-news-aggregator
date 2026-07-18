@@ -174,6 +174,37 @@ pub fn hit_activity_surface(
         && point.y <= height - bottom
 }
 
+/// Returns how far the open activity history can travel toward its oldest entry.
+#[allow(clippy::cast_possible_truncation)]
+pub fn activity_scroll_max(
+    physical_width: f64,
+    physical_height: f64,
+    scale_factor: f64,
+    messages: &[String],
+) -> f64 {
+    if !physical_width.is_finite()
+        || !physical_height.is_finite()
+        || !scale_factor.is_finite()
+        || physical_width <= 0.0
+        || physical_height <= 0.0
+        || scale_factor <= 0.0
+    {
+        return 0.0;
+    }
+    let width = physical_width as f32 / scale_factor as f32;
+    let height = physical_height as f32 / scale_factor as f32;
+    let open_width = activity_panel_width_f32(width);
+    let top = activity_top(width);
+    let bottom = if width > 960.0 { 116.0 } else { 164.0 };
+    let panel = Rect::from_xywh(
+        width - ACTIVITY_RIGHT - open_width + ACTIVITY_GAP,
+        top,
+        open_width - ACTIVITY_GAP,
+        (height - top - bottom).max(80.0),
+    );
+    f64::from(activity_message_layout(panel, messages).scroll_max)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct MetadataLayout {
     bounds: Rect,
@@ -247,6 +278,7 @@ pub fn active_metadata_scroll_max(
     .map_or(0.0, |layout| f64::from(layout.scroll_max))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn paint_activity_drawer(
     canvas: &Canvas,
     physical_width: f32,
@@ -255,6 +287,7 @@ pub fn paint_activity_drawer(
     messages: &[String],
     running: bool,
     open_progress: f32,
+    scroll_from_latest: f32,
 ) {
     let width = physical_width / scale_factor;
     let height = physical_height / scale_factor;
@@ -280,7 +313,7 @@ pub fn paint_activity_drawer(
         );
         canvas.save();
         canvas.clip_rect(panel, skia_safe::ClipOp::Intersect, true);
-        paint_activity_panel(canvas, panel, messages, running);
+        paint_activity_panel(canvas, panel, messages, running, scroll_from_latest);
         canvas.restore();
     }
     canvas.restore();
@@ -316,7 +349,13 @@ fn paint_activity_button(canvas: &Canvas, bounds: Rect, open: bool) {
     canvas.draw_path(&chevron.detach(), &paint);
 }
 
-fn paint_activity_panel(canvas: &Canvas, bounds: Rect, messages: &[String], running: bool) {
+fn paint_activity_panel(
+    canvas: &Canvas,
+    bounds: Rect,
+    messages: &[String],
+    running: bool,
+    scroll_from_latest: f32,
+) {
     paint_metadata_shadow(canvas, bounds, INK_0, 0.50, 24.0, 10.0);
     let rounded = RRect::new_rect_xy(bounds, 10.0, 10.0);
     let mut fill = Paint::default();
@@ -359,16 +398,53 @@ fn paint_activity_panel(canvas: &Canvas, bounds: Rect, messages: &[String], runn
         let state_x = bounds.right - 12.0 - state.max_intrinsic_width();
         state.paint(canvas, (state_x, bounds.top + 11.0));
     });
-    paint_activity_messages(canvas, bounds, messages);
+    paint_activity_messages(canvas, bounds, messages, scroll_from_latest);
 }
 
-fn paint_activity_messages(canvas: &Canvas, bounds: Rect, messages: &[String]) {
+#[derive(Debug)]
+struct ActivityMessageLayout {
+    content: Rect,
+    heights: Vec<f32>,
+    scroll_max: f32,
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn activity_message_layout(bounds: Rect, messages: &[String]) -> ActivityMessageLayout {
     let content = Rect::from_ltrb(
         bounds.left + 12.0,
         bounds.top + 34.0,
         bounds.right - 12.0,
         bounds.bottom - 12.0,
     );
+    let heights = STATUS_TEXT.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        messages
+            .iter()
+            .map(|message| {
+                resources
+                    .activity_message(message, content.width() - 20.0)
+                    .height()
+                    + 16.0
+            })
+            .collect::<Vec<_>>()
+    });
+    let gaps = heights.len().saturating_sub(1) as f32 * 8.0;
+    let total_height = heights.iter().sum::<f32>() + gaps;
+    ActivityMessageLayout {
+        content,
+        heights,
+        scroll_max: (total_height - content.height()).max(0.0),
+    }
+}
+
+fn paint_activity_messages(
+    canvas: &Canvas,
+    bounds: Rect,
+    messages: &[String],
+    scroll_from_latest: f32,
+) {
+    let layout = activity_message_layout(bounds, messages);
+    let content = layout.content;
     if messages.is_empty() {
         STATUS_TEXT.with(|resources| {
             resources
@@ -378,55 +454,70 @@ fn paint_activity_messages(canvas: &Canvas, bounds: Rect, messages: &[String]) {
         });
         return;
     }
-    let mut cards = Vec::new();
-    let mut used = 0.0;
-    STATUS_TEXT.with(|resources| {
-        let mut resources = resources.borrow_mut();
-        for (reverse_index, message) in messages.iter().rev().enumerate() {
-            let paragraph = resources.activity_message(message, content.width() - 20.0);
-            let height = paragraph.height() + 16.0;
-            if used + height > content.height() && !cards.is_empty() {
-                break;
-            }
-            cards.push((messages.len() - 1 - reverse_index, message.clone(), height));
-            used += height + 8.0;
-        }
-    });
-    cards.reverse();
+    let from_latest = scroll_from_latest.clamp(0.0, layout.scroll_max);
+    let offset_from_top = layout.scroll_max - from_latest;
     let latest = messages.len() - 1;
-    let mut y = content.top;
-    for (index, message, height) in cards {
-        let bounds = Rect::from_xywh(content.left, y, content.width(), height);
-        let mut fill = Paint::default();
-        fill.set_color4f(
-            color4f_with_alpha(
-                if index == latest {
-                    SIGNAL
-                } else {
-                    PANEL_RAISED
-                },
-                if index == latest { 0.12 } else { 0.5 },
-            ),
-            None,
-        );
-        canvas.draw_rrect(RRect::new_rect_xy(bounds, 6.0, 6.0), &fill);
-        let mut outline = Paint::default();
-        outline.set_anti_alias(true);
-        outline.set_style(PaintStyle::Stroke);
-        outline.set_stroke_width(1.0);
-        if index == latest {
-            outline.set_color4f(color4f_with_alpha(SIGNAL, 0.5), None);
-        } else {
-            outline.set_color(color(HAIRLINE_DIM));
+    let mut y = content.top - offset_from_top;
+    canvas.save();
+    canvas.clip_rect(content, skia_safe::ClipOp::Intersect, true);
+    for (index, (message, height)) in messages.iter().zip(&layout.heights).enumerate() {
+        let bounds = Rect::from_xywh(content.left, y, content.width(), *height);
+        if bounds.bottom >= content.top && bounds.top <= content.bottom {
+            let mut fill = Paint::default();
+            fill.set_color4f(
+                color4f_with_alpha(
+                    if index == latest {
+                        SIGNAL
+                    } else {
+                        PANEL_RAISED
+                    },
+                    if index == latest { 0.12 } else { 0.5 },
+                ),
+                None,
+            );
+            canvas.draw_rrect(RRect::new_rect_xy(bounds, 6.0, 6.0), &fill);
+            let mut outline = Paint::default();
+            outline.set_anti_alias(true);
+            outline.set_style(PaintStyle::Stroke);
+            outline.set_stroke_width(1.0);
+            if index == latest {
+                outline.set_color4f(color4f_with_alpha(SIGNAL, 0.5), None);
+            } else {
+                outline.set_color(color(HAIRLINE_DIM));
+            }
+            canvas.draw_rrect(RRect::new_rect_xy(bounds, 6.0, 6.0), &outline);
+            STATUS_TEXT.with(|resources| {
+                resources
+                    .borrow_mut()
+                    .activity_message(message, bounds.width() - 20.0)
+                    .paint(canvas, (bounds.left + 10.0, bounds.top + 8.0));
+            });
         }
-        canvas.draw_rrect(RRect::new_rect_xy(bounds, 6.0, 6.0), &outline);
-        STATUS_TEXT.with(|resources| {
-            resources
-                .borrow_mut()
-                .activity_message(&message, bounds.width() - 20.0)
-                .paint(canvas, (bounds.left + 10.0, bounds.top + 8.0));
-        });
         y += height + 8.0;
+    }
+    canvas.restore();
+    if layout.scroll_max > 0.0 {
+        let viewport_height = content.height().max(1.0);
+        let total_height = viewport_height + layout.scroll_max;
+        let thumb_height = (viewport_height * viewport_height / total_height).max(24.0);
+        let thumb_top =
+            content.top + offset_from_top / layout.scroll_max * (viewport_height - thumb_height);
+        let mut track = Paint::default();
+        track.set_color(color(HAIRLINE_DIM));
+        canvas.draw_round_rect(
+            Rect::from_xywh(bounds.right - 5.0, content.top, 2.0, viewport_height),
+            1.0,
+            1.0,
+            &track,
+        );
+        let mut thumb = Paint::default();
+        thumb.set_color(color(TEXT_FAINT));
+        canvas.draw_round_rect(
+            Rect::from_xywh(bounds.right - 5.0, thumb_top, 2.0, thumb_height),
+            1.0,
+            1.0,
+            &thumb,
+        );
     }
 }
 
@@ -2682,13 +2773,48 @@ mod tests {
             "Accepted finding: Rust language release".to_owned(),
         ];
         let rust = paint_over(&base, |canvas| {
-            paint_activity_drawer(canvas, 1280.0, 800.0, 1.0, &messages, true, 1.0);
+            paint_activity_drawer(canvas, 1280.0, 800.0, 1.0, &messages, true, 1.0, 0.0);
         });
         let metrics = residual_crop_metrics(&base, &flutter, &base, &rust, &[(810, 50, 470, 650)]);
         assert!(
             metrics.0 <= 26_000 && metrics.1 <= 1.60 && metrics.2 <= 230,
             "Flutter/Rust activity-drawer drift {metrics:?}"
         );
+    }
+
+    #[test]
+    fn activity_history_scroll_reaches_oldest_and_latest_cards() {
+        let messages = (0..24)
+            .map(|index| format!("Hermes activity {index}: retained research evidence."))
+            .collect::<Vec<_>>();
+        let maximum = activity_scroll_max(1_280.0, 800.0, 1.0, &messages);
+        assert!(maximum > 0.0);
+
+        let panel = Rect::from_xywh(894.0, 72.0, 372.0, 612.0);
+        let layout = activity_message_layout(panel, &messages);
+        assert!((maximum - f64::from(layout.scroll_max)).abs() < f64::EPSILON);
+        let first_bottom_at_latest = layout.content.top - layout.scroll_max + layout.heights[0];
+        assert!(first_bottom_at_latest < layout.content.top);
+        let latest_top_at_oldest =
+            layout.content.top + layout.heights.iter().take(23).sum::<f32>() + 23.0 * 8.0;
+        assert!(latest_top_at_oldest > layout.content.bottom);
+
+        let render = |scroll| {
+            let mut surface = surfaces::raster_n32_premul((1_280, 800)).unwrap();
+            surface.canvas().clear(color(INK_0));
+            paint_activity_drawer(
+                surface.canvas(),
+                1_280.0,
+                800.0,
+                1.0,
+                &messages,
+                false,
+                1.0,
+                scroll,
+            );
+            read_image(&surface.image_snapshot())
+        };
+        assert_ne!(render(0.0), render(layout.scroll_max));
     }
 
     #[test]

@@ -29,6 +29,9 @@ Download the current unsigned Windows/Linux prerelease from
 - Hovering a finding opens a content-sized summary. When its bounded reader
   shows `TAB FOCUS TO READ`, press `Tab` to freeze canvas interaction; use arrow
   keys, Page Up/Down, Home/End, then `Esc` or `Tab` to return.
+- The Hermes activity drawer follows the newest retained entry. Wheel upward
+  over the open drawer to recover older entries and downward to return to the
+  latest; the thumb shows position within the retained history.
 - `Ctrl+Z` undoes; `Ctrl+Shift+Z` or `Ctrl+Y` redoes the latest committed move
   or semantic command, including after restart.
 - Drop a legacy `graph.sqlite` onto a pristine canvas to import it. The source
@@ -81,7 +84,9 @@ operation may finish later. No plaintext credential fallback exists.
 Spoken research notes are separate from Groq transcription. They use Kokoro
 configuration inherited by the Rust application and a discovered local WAV
 player; neither is configurable in Connections, bundled, or probed end-to-end
-before the first note.
+before the first note. Only an explicit `voice.note` emitted by Hermes is sent
+to Kokoro; ordinary progress, findings, and completion messages are not spoken,
+and the provider-neutral prompt permits rather than guarantees such notes.
 
 First launch transactionally creates a marker-owned Hermes profile `not-news`
 beside, without reading or selecting, `default`; Hermes may be absent. Locked,

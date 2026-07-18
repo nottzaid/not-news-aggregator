@@ -16,7 +16,8 @@ Connections; `Ctrl+K` starts research only after readiness passes. Ordinary
 uninstall removes program files and preserves user research. Hovered finding
 summaries grow to their content until bounded by the viewport; `Tab` focuses an
 overflowing summary, arrow keys and Page Up/Down scroll it, and `Esc` or `Tab`
-returns to the canvas.
+returns to the canvas. Wheel over the open Hermes activity drawer to move
+between its newest and oldest retained entries.
 
 ## New-research prerequisites
 
@@ -79,5 +80,6 @@ means the outcome is unknown because an OS vault operation may finish later.
 Groq transcribes questions and is configured in Connections; it never supplies
 Hermes inference. Synthesized research notes use the separate environment-driven
 Kokoro endpoint and a discovered local WAV player. Neither is bundled or proved
-reachable/audible before use. Their absence degrades voice only, not research or
-saved graphs.
+reachable/audible before use. Playback occurs only when Hermes emits an explicit
+`voice.note`; ordinary research output is silent, and a note is not guaranteed.
+Their absence degrades voice only, not research or saved graphs.

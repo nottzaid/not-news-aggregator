@@ -64,12 +64,13 @@ const BROWSE_INSTALL_URL: &str = "https://browse.sh";
 const CURL_INSTALL_URL: &str = "https://curl.se/download.html";
 use not_news_renderer::{
     ChromeControl, CurationMenu, Motion, RecordOrbState, SceneAnimation, SceneState,
-    ViewportTransform, active_metadata_scroll_max, curation_menu_reveal_offset,
-    curation_menu_scroll_max, hit_active_metadata, hit_activity_surface, hit_activity_toggle,
-    hit_curation_menu, hit_curation_menu_surface, hit_fixed_chrome, paint_active_metadata,
-    paint_activity_drawer, paint_background, paint_connection_prompt, paint_credential_prompt,
-    paint_curation_menu, paint_curation_prompt, paint_fixed_chrome, paint_graph, paint_grid,
-    paint_research_prompt, paint_status, resolved_positions,
+    ViewportTransform, active_metadata_scroll_max, activity_scroll_max,
+    curation_menu_reveal_offset, curation_menu_scroll_max, hit_active_metadata,
+    hit_activity_surface, hit_activity_toggle, hit_curation_menu, hit_curation_menu_surface,
+    hit_fixed_chrome, paint_active_metadata, paint_activity_drawer, paint_background,
+    paint_connection_prompt, paint_credential_prompt, paint_curation_menu, paint_curation_prompt,
+    paint_fixed_chrome, paint_graph, paint_grid, paint_research_prompt, paint_status,
+    resolved_positions,
 };
 use not_news_store::{
     CommitOutcome, DurableGraphStore, LegacyGraphReader, ResearchOutputKind, ResearchSessionStatus,
@@ -501,6 +502,7 @@ struct CanvasApplication {
     activity_open: bool,
     activity_openness: f64,
     activity_motion: Option<ActivityMotion>,
+    activity_scroll: f64,
     record_hold_deadline: Option<Instant>,
     metadata_scroll_event: Option<EventId>,
     metadata_scroll: f64,
@@ -671,6 +673,7 @@ impl CanvasApplication {
             activity_open: false,
             activity_openness: 0.0,
             activity_motion: None,
+            activity_scroll: 0.0,
             record_hold_deadline: None,
             metadata_scroll_event: None,
             metadata_scroll: 0.0,
@@ -2464,6 +2467,7 @@ impl CanvasApplication {
                 self.curation = None;
                 self.curation_preedit.clear();
                 self.research_messages.clear();
+                self.activity_scroll = 0.0;
                 self.speech.cancel_session();
                 self.generated_research_events.clear();
                 self.auto_follow_research = true;
@@ -2509,6 +2513,7 @@ impl CanvasApplication {
                 self.curation = None;
                 self.curation_preedit.clear();
                 self.research_messages.clear();
+                self.activity_scroll = 0.0;
                 self.speech.cancel_session();
                 self.generated_research_events.clear();
                 self.auto_follow_research = true;
@@ -2775,6 +2780,7 @@ impl CanvasApplication {
                     scratch_directory,
                 });
                 self.research_messages.clear();
+                self.activity_scroll = 0.0;
                 self.generated_research_events.clear();
                 self.auto_follow_research = true;
                 self.set_activity_open(true, Instant::now());
@@ -3034,6 +3040,8 @@ impl CanvasApplication {
             });
         match result {
             Ok(_) => {
+                let previous_scroll_max = self.activity_scroll_maximum();
+                let preserve_visible_history = self.activity_scroll > f64::EPSILON;
                 self.advance_research_cursor();
                 self.status = Some(message.to_owned());
                 if self
@@ -3045,6 +3053,12 @@ impl CanvasApplication {
                         self.research_messages.remove(0);
                     }
                     self.research_messages.push(message.to_owned());
+                }
+                if preserve_visible_history {
+                    let scroll_max = self.activity_scroll_maximum();
+                    self.activity_scroll = (self.activity_scroll
+                        + (scroll_max - previous_scroll_max))
+                        .clamp(0.0, scroll_max);
                 }
                 true
             }
@@ -3214,6 +3228,24 @@ impl CanvasApplication {
                 self.scale_factor,
                 progress,
             )
+    }
+
+    fn activity_scroll_maximum(&self) -> f64 {
+        activity_scroll_max(
+            self.physical_width,
+            self.physical_height,
+            self.scale_factor,
+            &self.research_messages,
+        )
+    }
+
+    fn scroll_activity(&mut self, delta: MouseScrollDelta) -> bool {
+        let maximum = self.activity_scroll_maximum();
+        let next =
+            (self.activity_scroll + scroll_pixels(delta) / self.scale_factor).clamp(0.0, maximum);
+        let changed = (next - self.activity_scroll).abs() > f64::EPSILON;
+        self.activity_scroll = next;
+        changed
     }
 
     fn cursor_moved(&mut self, point: Point, now: Instant) -> bool {
@@ -3659,6 +3691,7 @@ impl CanvasApplication {
                 &self.research_messages,
                 self.research.is_some() || self.research_preflight.is_some(),
                 scale_scalar(activity_progress),
+                scale_scalar(self.activity_scroll),
             );
         }
         self.paint_composer(canvas, width, height, scale_factor);
@@ -3829,7 +3862,7 @@ impl PlatformApplication for CanvasApplication {
                 {
                     self.scroll_curation_menu(*delta)
                 } else if self.activity_surface_at_cursor(now) {
-                    false
+                    self.scroll_activity(*delta)
                 } else if self.metadata_focus.is_some() || self.metadata_at_cursor(now) {
                     self.scroll_metadata(*delta)
                 } else if matches!(self.curation, Some(CurationFlow::Menu { .. })) {
@@ -4947,6 +4980,20 @@ mod app_tests {
         ));
         application.mouse_input(ElementState::Released, settled_at);
         assert!((application.interaction.viewport().zoom - zoom).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn activity_wheel_moves_from_latest_to_oldest_and_back() {
+        let mut application =
+            CanvasApplication::with_state(None, GraphSnapshot::default(), None, None, None, None);
+        application.research_messages = (0..24)
+            .map(|index| format!("Hermes activity {index}: retained research evidence."))
+            .collect();
+        assert!(application.activity_scroll_maximum() > 0.0);
+        assert!(application.scroll_activity(MouseScrollDelta::LineDelta(0.0, 1.0)));
+        assert!(application.activity_scroll > 0.0);
+        assert!(application.scroll_activity(MouseScrollDelta::LineDelta(0.0, -100.0)));
+        assert!(application.activity_scroll.abs() < f64::EPSILON);
     }
 
     #[test]

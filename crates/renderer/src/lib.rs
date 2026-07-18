@@ -11,7 +11,7 @@ pub mod viewport;
 pub use artifacts::{ArtifactLayout, ArtifactMetrics, layout_artifacts};
 pub use background::{BackgroundError, paint_background, render_background_png};
 pub use chrome::{
-    ChromeControl, CurationMenu, RecordOrbState, active_metadata_scroll_max,
+    ChromeControl, CurationMenu, RecordOrbState, active_metadata_scroll_max, activity_scroll_max,
     curation_menu_reveal_offset, curation_menu_scroll_max, hit_active_metadata,
     hit_activity_surface, hit_activity_toggle, hit_curation_menu, hit_curation_menu_surface,
     hit_fixed_chrome, paint_active_metadata, paint_activity_drawer, paint_connection_prompt,
