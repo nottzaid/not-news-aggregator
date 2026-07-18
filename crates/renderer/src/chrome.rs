@@ -27,6 +27,8 @@ const CONTROL_WIDTH: f32 = 215.0;
 const ACTIVITY_RIGHT: f32 = 14.0;
 const ACTIVITY_BUTTON: f32 = 48.0;
 const ACTIVITY_GAP: f32 = 8.0;
+const METADATA_FOOTER_HEIGHT: f32 = 25.0;
+const METADATA_DESKTOP_MAX_HEIGHT: f32 = 360.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChromeControl {
@@ -172,14 +174,24 @@ pub fn hit_activity_surface(
         && point.y <= height - bottom
 }
 
-/// Resolves the fixed metadata overlay so canvas gestures cannot pass through it.
+#[derive(Clone, Copy, Debug)]
+struct MetadataLayout {
+    bounds: Rect,
+    summary_top: f32,
+    header_stacked: bool,
+    footer_height: f32,
+    scroll_max: f32,
+}
+
+/// Resolves the adaptive metadata overlay so canvas gestures cannot pass through it.
+#[allow(clippy::cast_possible_truncation)]
 pub fn hit_active_metadata(
     physical_point: WorldPoint,
     physical_width: f64,
     physical_height: f64,
     scale_factor: f64,
     event: &ResearchEvent,
-    world_position: WorldPoint,
+    screen_position: WorldPoint,
 ) -> bool {
     if !physical_width.is_finite()
         || !physical_height.is_finite()
@@ -192,43 +204,23 @@ pub fn hit_active_metadata(
         x: physical_point.x / scale_factor,
         y: physical_point.y / scale_factor,
     };
-    let width = physical_width / scale_factor;
-    let height = physical_height / scale_factor;
-    let mobile = width < 720.0;
-    let sheet_width = if mobile {
-        width - 28.0
-    } else {
-        f64::from(desktop_metadata_width(&event.summary))
-    };
-    let sheet_height = if mobile {
-        260.0_f64.min(height - 150.0)
-    } else {
-        260.0
-    };
-    if sheet_width <= 80.0 || sheet_height <= 40.0 {
+    let Some(layout) = metadata_layout(
+        physical_width as f32,
+        physical_height as f32,
+        scale_factor as f32,
+        event,
+        screen_position,
+    ) else {
         return false;
-    }
-    let left = if mobile {
-        14.0
-    } else if world_position.x >= 700.0 {
-        22.0
-    } else {
-        width - 22.0 - sheet_width
     };
-    let top = if mobile {
-        height - 92.0 - sheet_height
-    } else if world_position.y > 468.0 {
-        78.0
-    } else {
-        height - 22.0 - sheet_height
-    };
-    point.x >= left
-        && point.x <= left + sheet_width
-        && point.y >= top
-        && point.y <= top + sheet_height
+    point.x >= f64::from(layout.bounds.left)
+        && point.x <= f64::from(layout.bounds.right)
+        && point.y >= f64::from(layout.bounds.top)
+        && point.y <= f64::from(layout.bounds.bottom)
 }
 
-/// Returns the logical scroll extent of Flutter's metadata content viewport.
+/// Returns the logical scroll extent of the adaptive metadata reader.
+#[allow(clippy::cast_possible_truncation)]
 pub fn active_metadata_scroll_max(
     physical_width: f64,
     physical_height: f64,
@@ -242,30 +234,17 @@ pub fn active_metadata_scroll_max(
     {
         return 0.0;
     }
-    let width = physical_width / scale_factor;
-    let height = physical_height / scale_factor;
-    let sheet_width = if width < 720.0 {
-        width - 28.0
-    } else {
-        f64::from(desktop_metadata_width(&event.summary))
-    };
-    let sheet_height = if width < 720.0 {
-        260.0_f64.min(height - 150.0)
-    } else {
-        260.0
-    };
-    if sheet_width <= 80.0 || sheet_height <= 40.0 {
-        return 0.0;
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    let content_width = (sheet_width - 32.0) as f32;
-    let summary_height = METADATA_TEXT.with(|resources| {
-        let mut resources = resources.borrow_mut();
-        let summary = resources.paragraph(&event.summary, MetadataStyle::Summary, content_width);
-        summary.layout(content_width);
-        summary.height()
-    });
-    (f64::from(33.0 + summary_height + 13.0) - sheet_height).max(0.0)
+    metadata_layout(
+        physical_width as f32,
+        physical_height as f32,
+        scale_factor as f32,
+        event,
+        WorldPoint {
+            x: physical_width * 0.5,
+            y: physical_height * 0.5,
+        },
+    )
+    .map_or(0.0, |layout| f64::from(layout.scroll_max))
 }
 
 pub fn paint_activity_drawer(
@@ -494,18 +473,29 @@ pub fn paint_fixed_chrome(
     canvas.restore();
 }
 
-/// Paints Flutter's responsive active-event metadata sheet in screen space.
-pub fn paint_active_metadata(
-    canvas: &Canvas,
+#[allow(clippy::cast_possible_truncation)]
+fn metadata_layout(
     physical_width: f32,
     physical_height: f32,
     scale_factor: f32,
     event: &ResearchEvent,
-    world_position: WorldPoint,
-    scroll_offset: f32,
-) {
+    physical_screen_position: WorldPoint,
+) -> Option<MetadataLayout> {
+    if !physical_width.is_finite()
+        || !physical_height.is_finite()
+        || !scale_factor.is_finite()
+        || physical_width <= 0.0
+        || physical_height <= 0.0
+        || scale_factor <= 0.0
+    {
+        return None;
+    }
     let width = physical_width / scale_factor;
     let height = physical_height / scale_factor;
+    let screen_position = WorldPoint {
+        x: physical_screen_position.x / f64::from(scale_factor),
+        y: physical_screen_position.y / f64::from(scale_factor),
+    };
     let mobile = width < 720.0;
     let sheet_width = if mobile {
         width - 28.0
@@ -513,31 +503,87 @@ pub fn paint_active_metadata(
         desktop_metadata_width(&event.summary)
     };
     if sheet_width <= 80.0 {
-        return;
+        return None;
     }
-    let sheet_height = if mobile {
+    let content_width = sheet_width - 32.0;
+    let (source_width, date_width, summary_height) = METADATA_TEXT.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        let source = resources.paragraph(
+            &event.source_label.to_uppercase(),
+            MetadataStyle::Source,
+            content_width,
+        );
+        let source_width = source.max_intrinsic_width().ceil();
+        let date = resources.paragraph(&event.date, MetadataStyle::Date, content_width);
+        let date_width = date.max_intrinsic_width().ceil();
+        let summary = resources.paragraph(&event.summary, MetadataStyle::Summary, content_width);
+        summary.layout(content_width);
+        (source_width, date_width, summary.height())
+    });
+    let header_stacked = source_width + 8.0 + date_width > content_width;
+    let summary_top = if header_stacked { 47.0 } else { 33.0 };
+    let content_height = summary_top + summary_height + 13.0;
+    let maximum_height = if mobile {
         260.0_f32.min(height - 150.0)
     } else {
-        260.0
+        METADATA_DESKTOP_MAX_HEIGHT.min(height - 100.0)
     };
-    if sheet_height <= 40.0 {
-        return;
+    if maximum_height <= 40.0 {
+        return None;
     }
+    let overflowing = content_height > maximum_height;
+    let footer_height = if overflowing {
+        METADATA_FOOTER_HEIGHT
+    } else {
+        0.0
+    };
+    let sheet_height = content_height.min(maximum_height);
+    let scroll_max = (content_height - (sheet_height - footer_height)).max(0.0);
     let left = if mobile {
         14.0
-    } else if world_position.x >= 700.0 {
+    } else if screen_position.x >= f64::from(width) * 0.5 {
         22.0
     } else {
         width - 22.0 - sheet_width
     };
     let top = if mobile {
         height - 92.0 - sheet_height
-    } else if world_position.y > 468.0 {
+    } else if screen_position.y >= f64::from(height) * 0.5 {
         78.0
     } else {
         height - 22.0 - sheet_height
     };
-    let bounds = Rect::from_xywh(left, top, sheet_width, sheet_height);
+    Some(MetadataLayout {
+        bounds: Rect::from_xywh(left, top, sheet_width, sheet_height),
+        summary_top,
+        header_stacked,
+        footer_height,
+        scroll_max,
+    })
+}
+
+/// Paints the adaptive active-event metadata sheet in screen space.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_active_metadata(
+    canvas: &Canvas,
+    physical_width: f32,
+    physical_height: f32,
+    scale_factor: f32,
+    event: &ResearchEvent,
+    screen_position: WorldPoint,
+    scroll_offset: f32,
+    focused: bool,
+) {
+    let Some(layout) = metadata_layout(
+        physical_width,
+        physical_height,
+        scale_factor,
+        event,
+        screen_position,
+    ) else {
+        return;
+    };
+    let bounds = layout.bounds;
     canvas.save();
     canvas.scale((scale_factor, scale_factor));
     paint_metadata_shadow(canvas, bounds, INK_0, 0.62, 36.0, 18.0);
@@ -557,7 +603,7 @@ pub fn paint_active_metadata(
 
     canvas.save();
     canvas.clip_rrect(rounded, skia_safe::ClipOp::Intersect, true);
-    let stripe = Rect::from_xywh(left, top, 4.0, sheet_height);
+    let stripe = Rect::from_xywh(bounds.left, bounds.top, 4.0, bounds.height());
     let mut stripe_glow = Paint::default();
     stripe_glow.set_anti_alias(true);
     stripe_glow.set_color4f(color4f_with_alpha(event.color, 0.50), None);
@@ -573,10 +619,22 @@ pub fn paint_active_metadata(
     canvas.restore();
 
     canvas.save();
-    canvas.clip_rrect(rounded, skia_safe::ClipOp::Intersect, true);
-    canvas.translate((0.0, -scroll_offset.max(0.0)));
-    paint_metadata_text(canvas, bounds, event);
+    canvas.clip_rect(
+        Rect::from_ltrb(
+            bounds.left,
+            bounds.top,
+            bounds.right,
+            bounds.bottom - layout.footer_height,
+        ),
+        skia_safe::ClipOp::Intersect,
+        true,
+    );
+    canvas.translate((0.0, -scroll_offset.clamp(0.0, layout.scroll_max)));
+    paint_metadata_text(canvas, layout, event);
     canvas.restore();
+    if layout.footer_height > 0.0 {
+        paint_metadata_footer(canvas, layout, focused);
+    }
     canvas.restore();
 }
 
@@ -883,13 +941,12 @@ pub fn hit_curation_menu(
     physical_height: f64,
     scale_factor: f64,
     anchor: WorldPoint,
-    item_count: usize,
+    items: &[String],
+    scroll_offset: f64,
 ) -> Option<usize> {
-    if item_count == 0 || !scale_factor.is_finite() || scale_factor <= 0.0 {
+    if items.is_empty() || !scale_factor.is_finite() || scale_factor <= 0.0 {
         return None;
     }
-    let width = physical_width / scale_factor;
-    let height = physical_height / scale_factor;
     let point = WorldPoint {
         x: physical_point.x / scale_factor,
         y: physical_point.y / scale_factor,
@@ -898,19 +955,123 @@ pub fn hit_curation_menu(
         x: anchor.x / scale_factor,
         y: anchor.y / scale_factor,
     };
-    let bounds = curation_menu_bounds(width, height, anchor, item_count);
-    if point.x < f64::from(bounds.left)
-        || point.x > f64::from(bounds.right)
-        || point.y < f64::from(bounds.top + 42.0)
-        || point.y > f64::from(bounds.bottom)
+    let layout = menu_layout(
+        physical_width / scale_factor,
+        physical_height / scale_factor,
+        anchor,
+        items,
+        scroll_offset,
+    )?;
+    let content_top = f64::from(layout.bounds.top + 42.0);
+    if point.x < f64::from(layout.bounds.left)
+        || point.x > f64::from(layout.bounds.right)
+        || point.y < content_top
+        || point.y > f64::from(layout.bounds.bottom)
     {
         return None;
     }
-    let relative = point.y - f64::from(bounds.top + 42.0);
-    (0..item_count).find(|index| {
-        let row = f64::from(u32::try_from(*index).unwrap_or(u32::MAX)) * 48.0;
-        relative >= row && relative < row + 48.0
+    layout
+        .rows
+        .iter()
+        .position(|row| point.y >= f64::from(row.top) && point.y < f64::from(row.bottom))
+}
+
+pub fn hit_curation_menu_surface(
+    physical_point: WorldPoint,
+    physical_width: f64,
+    physical_height: f64,
+    scale_factor: f64,
+    anchor: WorldPoint,
+    items: &[String],
+    scroll_offset: f64,
+) -> bool {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let point = WorldPoint {
+        x: physical_point.x / scale_factor,
+        y: physical_point.y / scale_factor,
+    };
+    let anchor = WorldPoint {
+        x: anchor.x / scale_factor,
+        y: anchor.y / scale_factor,
+    };
+    menu_layout(
+        physical_width / scale_factor,
+        physical_height / scale_factor,
+        anchor,
+        items,
+        scroll_offset,
+    )
+    .is_some_and(|layout| {
+        point.x >= f64::from(layout.bounds.left)
+            && point.x <= f64::from(layout.bounds.right)
+            && point.y >= f64::from(layout.bounds.top)
+            && point.y <= f64::from(layout.bounds.bottom)
     })
+}
+
+pub fn curation_menu_scroll_max(
+    physical_width: f64,
+    physical_height: f64,
+    scale_factor: f64,
+    anchor: WorldPoint,
+    items: &[String],
+) -> f64 {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return 0.0;
+    }
+    menu_layout(
+        physical_width / scale_factor,
+        physical_height / scale_factor,
+        WorldPoint {
+            x: anchor.x / scale_factor,
+            y: anchor.y / scale_factor,
+        },
+        items,
+        0.0,
+    )
+    .map_or(0.0, |layout| f64::from(layout.scroll_max))
+}
+
+pub fn curation_menu_reveal_offset(
+    physical_width: f64,
+    physical_height: f64,
+    scale_factor: f64,
+    anchor: WorldPoint,
+    items: &[String],
+    row: usize,
+    current: f64,
+) -> f64 {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return 0.0;
+    }
+    let anchor = WorldPoint {
+        x: anchor.x / scale_factor,
+        y: anchor.y / scale_factor,
+    };
+    let Some(layout) = menu_layout(
+        physical_width / scale_factor,
+        physical_height / scale_factor,
+        anchor,
+        items,
+        current,
+    ) else {
+        return 0.0;
+    };
+    let Some(rect) = layout.rows.get(row) else {
+        return current.clamp(0.0, f64::from(layout.scroll_max));
+    };
+    let viewport_top = layout.bounds.top + 42.0;
+    let viewport_bottom = layout.bounds.bottom;
+    let next = if rect.top < viewport_top {
+        current - f64::from(viewport_top - rect.top)
+    } else if rect.bottom > viewport_bottom {
+        current + f64::from(rect.bottom - viewport_bottom)
+    } else {
+        current
+    };
+    next.clamp(0.0, f64::from(layout.scroll_max))
 }
 
 #[derive(Clone, Copy)]
@@ -918,8 +1079,10 @@ pub struct CurationMenu<'a> {
     pub title: &'a str,
     pub items: &'a [String],
     pub selected: Option<usize>,
+    pub scroll_offset: f32,
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn paint_curation_menu(
     canvas: &Canvas,
     physical_width: f32,
@@ -937,12 +1100,16 @@ pub fn paint_curation_menu(
         x: anchor.x / f64::from(scale_factor),
         y: anchor.y / f64::from(scale_factor),
     };
-    let bounds = curation_menu_bounds(
+    let Some(layout) = menu_layout(
         f64::from(width),
         f64::from(height),
         anchor,
-        menu.items.len(),
-    );
+        menu.items,
+        f64::from(menu.scroll_offset),
+    ) else {
+        return;
+    };
+    let bounds = layout.bounds;
     canvas.save();
     canvas.scale((scale_factor, scale_factor));
     paint_metadata_shadow(canvas, bounds, INK_0, 0.62, 24.0, 10.0);
@@ -970,10 +1137,20 @@ pub fn paint_curation_menu(
             (bounds.right - 10.0, bounds.top + 41.0),
             &header_rule,
         );
-        for (index, item) in menu.items.iter().enumerate() {
-            let y = bounds.top + 42.0 + f32::from(u16::try_from(index).unwrap_or(u16::MAX)) * 48.0;
+        canvas.save();
+        canvas.clip_rect(
+            Rect::from_ltrb(bounds.left, bounds.top + 42.0, bounds.right, bounds.bottom),
+            skia_safe::ClipOp::Intersect,
+            true,
+        );
+        for (index, (item, row_slot)) in menu.items.iter().zip(&layout.rows).enumerate() {
             let active = menu.selected == Some(index);
-            let row = Rect::from_xywh(bounds.left + 6.0, y + 3.0, bounds.width() - 12.0, 42.0);
+            let row = Rect::from_xywh(
+                bounds.left + 6.0,
+                row_slot.top + 3.0,
+                bounds.width() - 12.0,
+                row_slot.height() - 6.0,
+            );
             if active {
                 let mut selection = Paint::default();
                 selection.set_anti_alias(true);
@@ -1001,7 +1178,11 @@ pub fn paint_curation_menu(
             } else if index > 0 {
                 let mut divider = Paint::default();
                 divider.set_color(color(HAIRLINE_DIM));
-                canvas.draw_line((bounds.left + 12.0, y), (bounds.right - 12.0, y), &divider);
+                canvas.draw_line(
+                    (bounds.left + 12.0, row_slot.top),
+                    (bounds.right - 12.0, row_slot.top),
+                    &divider,
+                );
             }
             let (primary, detail) = item
                 .split_once("  ·  ")
@@ -1012,38 +1193,113 @@ pub fn paint_curation_menu(
                 .label(&(index + 1).to_string(), active)
                 .paint(canvas, (row.left + 10.0, row.top + 10.0));
             let text_width = row.width() - 62.0;
+            let primary = resources.menu_item(primary, text_width, active);
+            let primary_height = primary.height();
             let primary_y = if detail.is_some() {
                 row.top + 6.0
             } else {
-                row.top + 13.0
+                row.top + (row.height() - primary_height) * 0.5
             };
-            resources
-                .menu_item(primary, text_width, active)
-                .paint(canvas, (row.left + 38.0, primary_y));
+            primary.paint(canvas, (row.left + 38.0, primary_y));
             if let Some(detail) = detail {
                 resources
                     .menu_detail(detail, text_width, active)
-                    .paint(canvas, (row.left + 38.0, row.top + 23.0));
+                    .paint(canvas, (row.left + 38.0, primary_y + primary_height + 3.0));
             }
+        }
+        canvas.restore();
+        if layout.scroll_max > 0.0 {
+            let viewport_top = bounds.top + 46.0;
+            let viewport_height = (bounds.height() - 50.0).max(1.0);
+            let content_height = viewport_height + layout.scroll_max;
+            let thumb_height = (viewport_height * viewport_height / content_height).max(24.0);
+            let offset = menu.scroll_offset.clamp(0.0, layout.scroll_max);
+            let thumb_top =
+                viewport_top + offset / layout.scroll_max * (viewport_height - thumb_height);
+            let mut track = Paint::default();
+            track.set_color(color(HAIRLINE_DIM));
+            canvas.draw_round_rect(
+                Rect::from_xywh(bounds.right - 5.0, viewport_top, 2.0, viewport_height),
+                1.0,
+                1.0,
+                &track,
+            );
+            let mut thumb = Paint::default();
+            thumb.set_color(color(TEXT_FAINT));
+            canvas.draw_round_rect(
+                Rect::from_xywh(bounds.right - 5.0, thumb_top, 2.0, thumb_height),
+                1.0,
+                1.0,
+                &thumb,
+            );
         }
     });
     canvas.restore();
 }
 
+#[derive(Debug)]
+struct MenuLayout {
+    bounds: Rect,
+    rows: Vec<Rect>,
+    scroll_max: f32,
+}
+
 #[allow(clippy::cast_possible_truncation)]
-fn curation_menu_bounds(width: f64, height: f64, anchor: WorldPoint, item_count: usize) -> Rect {
-    let menu_width = 340.0_f64.min((width - 24.0).max(180.0));
-    let menu_height = 42.0 + 48.0 * f64::from(u32::try_from(item_count).unwrap_or(u32::MAX));
+fn menu_layout(
+    width: f64,
+    height: f64,
+    anchor: WorldPoint,
+    items: &[String],
+    scroll_offset: f64,
+) -> Option<MenuLayout> {
+    if items.is_empty() || width < 204.0 || height < 104.0 {
+        return None;
+    }
+    let menu_width = 340.0_f64.min(width - 24.0);
+    let text_width = menu_width as f32 - 74.0;
+    let row_heights = STATUS_TEXT.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        items
+            .iter()
+            .map(|item| {
+                let (primary, detail) = item
+                    .split_once("  ·  ")
+                    .map_or((item.as_str(), None), |(primary, detail)| {
+                        (primary, Some(detail))
+                    });
+                let primary_height = resources.menu_item(primary, text_width, false).height();
+                detail.map_or(48.0, |detail| {
+                    let detail_height = resources.menu_detail(detail, text_width, false).height();
+                    (15.0 + primary_height + detail_height).max(48.0)
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let content_height = row_heights.iter().sum::<f32>();
+    let available_height = (height - 24.0) as f32;
+    let menu_height = (42.0 + content_height).min(available_height);
     let left = anchor.x.clamp(12.0, (width - menu_width - 12.0).max(12.0));
     let top = anchor
         .y
-        .clamp(12.0, (height - menu_height - 12.0).max(12.0));
-    Rect::from_xywh(
-        left as f32,
-        top as f32,
-        menu_width as f32,
-        menu_height as f32,
-    )
+        .clamp(12.0, (height - f64::from(menu_height) - 12.0).max(12.0));
+    let bounds = Rect::from_xywh(left as f32, top as f32, menu_width as f32, menu_height);
+    let viewport_height = (menu_height - 42.0).max(0.0);
+    let scroll_max = (content_height - viewport_height).max(0.0);
+    let scroll_offset = scroll_offset.clamp(0.0, f64::from(scroll_max)) as f32;
+    let mut y = bounds.top + 42.0 - scroll_offset;
+    let rows = row_heights
+        .into_iter()
+        .map(|height| {
+            let row = Rect::from_xywh(bounds.left, y, bounds.width(), height);
+            y += height;
+            row
+        })
+        .collect();
+    Some(MenuLayout {
+        bounds,
+        rows,
+        scroll_max,
+    })
 }
 
 fn desktop_metadata_width(summary: &str) -> f32 {
@@ -1076,7 +1332,8 @@ fn paint_metadata_shadow(
     canvas.restore();
 }
 
-fn paint_metadata_text(canvas: &Canvas, bounds: Rect, event: &ResearchEvent) {
+fn paint_metadata_text(canvas: &Canvas, layout: MetadataLayout, event: &ResearchEvent) {
+    let bounds = layout.bounds;
     let content_left = bounds.left + 18.0;
     let content_right = bounds.right - 14.0;
     let content_width = content_right - content_left;
@@ -1088,20 +1345,54 @@ fn paint_metadata_text(canvas: &Canvas, bounds: Rect, event: &ResearchEvent) {
             content_width,
         );
         let source_width = source.max_intrinsic_width().ceil();
-        source.layout(source_width);
+        source.layout(source_width.min(content_width));
         source.paint(canvas, (content_left, bounds.top + 12.0));
 
         let date = resources.paragraph(&event.date, MetadataStyle::Date, content_width);
-        let date_width = date.max_intrinsic_width().ceil();
+        let date_width = date.max_intrinsic_width().ceil().min(content_width);
         date.layout(date_width);
         date.paint(
             canvas,
-            (content_left + source_width + 8.0, bounds.top + 12.0),
+            (
+                if layout.header_stacked {
+                    content_left
+                } else {
+                    content_left + source_width + 8.0
+                },
+                bounds.top + if layout.header_stacked { 26.0 } else { 12.0 },
+            ),
         );
 
         let summary = resources.paragraph(&event.summary, MetadataStyle::Summary, content_width);
         summary.layout(content_width);
-        summary.paint(canvas, (content_left, bounds.top + 33.0));
+        summary.paint(canvas, (content_left, bounds.top + layout.summary_top));
+    });
+}
+
+fn paint_metadata_footer(canvas: &Canvas, layout: MetadataLayout, focused: bool) {
+    let bounds = layout.bounds;
+    let top = bounds.bottom - layout.footer_height;
+    let mut fill = Paint::default();
+    fill.set_color(color(PANEL));
+    canvas.draw_rect(
+        Rect::from_ltrb(bounds.left, top, bounds.right, bounds.bottom),
+        &fill,
+    );
+    let mut rule = Paint::default();
+    rule.set_color(color(HAIRLINE_DIM));
+    canvas.draw_line((bounds.left + 12.0, top), (bounds.right - 12.0, top), &rule);
+    STATUS_TEXT.with(|resources| {
+        resources
+            .borrow_mut()
+            .prompt_instruction(
+                if focused {
+                    "↑↓ READ  ·  PAGE UP/DOWN  ·  ESC RETURN"
+                } else {
+                    "TAB FOCUS TO READ"
+                },
+                bounds.width() - 28.0,
+            )
+            .paint(canvas, (bounds.left + 16.0, top + 7.0));
     });
 }
 
@@ -1553,6 +1844,10 @@ impl MetadataText {
             paragraph_style.set_text_align(TextAlign::Left);
             paragraph_style.set_text_direction(TextDirection::LTR);
             paragraph_style.set_text_style(&style);
+            if matches!(metadata_style, MetadataStyle::Source | MetadataStyle::Date) {
+                paragraph_style.set_max_lines(1);
+                paragraph_style.set_ellipsis("…");
+            }
             let mut builder = ParagraphBuilder::new(&paragraph_style, fonts);
             builder.push_style(&style);
             builder.add_text(text);
@@ -1785,7 +2080,7 @@ thread_local! {
 
 #[cfg(test)]
 mod tests {
-    use not_news_domain::{EventId, SourceArtifact};
+    use not_news_domain::EventId;
     use skia_safe::{Data, Image, ImageInfo, image::CachingHint, surfaces};
 
     use super::*;
@@ -1855,51 +2150,19 @@ mod tests {
     }
 
     #[test]
-    fn narrow_chrome_metadata_and_status_follow_flutter_breakpoints() {
+    fn narrow_chrome_and_status_follow_flutter_breakpoints() {
         const FLUTTER_BASE: &[u8] =
             include_bytes!("../../../fixtures/reference-raster/narrow-active-base-640x720.png");
-        const FLUTTER_ACTIVE: &[u8] =
-            include_bytes!("../../../fixtures/reference-raster/narrow-active-640x720.png");
         const FLUTTER_STATUS: &[u8] =
             include_bytes!("../../../fixtures/reference-raster/narrow-status-640x720.png");
         let flutter_base = read_image_size(
             &Image::from_encoded(Data::new_copy(FLUTTER_BASE)).unwrap(),
             (640, 720),
         );
-        let flutter_active = read_image_size(
-            &Image::from_encoded(Data::new_copy(FLUTTER_ACTIVE)).unwrap(),
-            (640, 720),
-        );
         let flutter_status = read_image_size(
             &Image::from_encoded(Data::new_copy(FLUTTER_STATUS)).unwrap(),
             (640, 720),
         );
-        let event = ResearchEvent {
-            id: EventId("spacex".into()),
-            title: "SpaceX compute partnership".into(),
-            date: "May 6, 2026".into(),
-            color: 0xffb8_5534,
-            summary: "Anthropic announces access to SpaceX's Colossus 1 capacity. Claude usage-limit changes and orbital compute interest live inside this event graph as claims, not separate Canvas points.".into(),
-            source_label: "Anthropic".into(),
-            artifacts: vec![SourceArtifact {
-                text: "unused".into(),
-                source: "official".into(),
-                url: "https://example.com".into(),
-            }],
-            url: None,
-        };
-        let rust_active = paint_over_size(&flutter_base, (640, 720), |canvas| {
-            paint_active_metadata(
-                canvas,
-                640.0,
-                720.0,
-                1.0,
-                &event,
-                WorldPoint { x: 800.0, y: 500.0 },
-                0.0,
-            );
-            paint_fixed_chrome(canvas, 640.0, 720.0, 1.0, 1.0, RecordOrbState::Idle);
-        });
         let rust_status = paint_over_size(&flutter_base, (640, 720), |canvas| {
             paint_status(
                 canvas,
@@ -1911,14 +2174,6 @@ mod tests {
             );
             paint_fixed_chrome(canvas, 640.0, 720.0, 1.0, 1.0, RecordOrbState::Idle);
         });
-        let metadata = residual_crop_metrics_width(
-            &flutter_base,
-            &flutter_active,
-            &flutter_base,
-            &rust_active,
-            &[(0, 330, 640, 310)],
-            640,
-        );
         let chrome = residual_crop_metrics_width(
             &flutter_base,
             &flutter_status,
@@ -1934,10 +2189,6 @@ mod tests {
             &rust_status,
             &[(0, 540, 480, 95)],
             640,
-        );
-        assert!(
-            metadata.1 <= 4.3 && metadata.2 <= 230,
-            "Flutter/Rust narrow metadata drift {metadata:?}"
         );
         assert!(
             chrome.1 <= 0.8 && chrome.2 <= 130,
@@ -1970,7 +2221,7 @@ mod tests {
             Some(ChromeControl::Clear)
         );
         assert!(hit_active_metadata(
-            WorldPoint { x: 20.0, y: 400.0 },
+            WorldPoint { x: 20.0, y: 580.0 },
             640.0,
             720.0,
             1.0,
@@ -1978,7 +2229,7 @@ mod tests {
             WorldPoint { x: 800.0, y: 500.0 },
         ));
         assert!(!hit_active_metadata(
-            WorldPoint { x: 10.0, y: 400.0 },
+            WorldPoint { x: 10.0, y: 580.0 },
             640.0,
             720.0,
             1.0,
@@ -2007,89 +2258,44 @@ mod tests {
     }
 
     #[test]
-    fn active_metadata_stays_within_flutter_crop_budget() {
-        const FLUTTER: &[u8] =
-            include_bytes!("../../../fixtures/reference-raster/full-screen-active-1280x800.png");
-        const FLUTTER_BASE: &[u8] = include_bytes!(
-            "../../../fixtures/reference-raster/full-screen-active-base-1280x800.png"
-        );
-        let event = ResearchEvent {
+    fn active_metadata_uses_natural_height_then_a_focused_scroll_viewport() {
+        let mut event = ResearchEvent {
             id: EventId("spacex".into()),
             title: "SpaceX compute partnership".into(),
             date: "May 6, 2026".into(),
             color: 0xffb8_5534,
-            summary: "Anthropic announces access to SpaceX's Colossus 1 capacity. Claude usage-limit changes and orbital compute interest live inside this event graph as claims, not separate Canvas points.".into(),
+            summary: "Short saved finding.".into(),
             source_label: "Anthropic".into(),
-            artifacts: vec![SourceArtifact {
-                text: "unused".into(),
-                source: "official".into(),
-                url: "https://example.com".into(),
-            }],
+            artifacts: Vec::new(),
             url: None,
         };
-        let flutter_metadata = read_image(&Image::from_encoded(Data::new_copy(FLUTTER)).unwrap());
-        let flutter_base = read_image(&Image::from_encoded(Data::new_copy(FLUTTER_BASE)).unwrap());
-        let rust_metadata = paint_over(&flutter_base, |canvas| {
-            paint_active_metadata(
-                canvas,
-                1280.0,
-                800.0,
-                1.0,
-                &event,
-                WorldPoint { x: 600.0, y: 500.0 },
-                0.0,
-            );
-        });
-        let metrics = residual_crop_metrics(
-            &flutter_base,
-            &flutter_metadata,
-            &flutter_base,
-            &rust_metadata,
-            &[(900, 40, 380, 360)],
-        );
-        let blank_panel = residual_crop_metrics(
-            &flutter_base,
-            &flutter_metadata,
-            &flutter_base,
-            &rust_metadata,
-            &[(965, 220, 280, 90)],
-        );
-        let shadow = residual_crop_metrics(
-            &flutter_base,
-            &flutter_metadata,
-            &flutter_base,
-            &rust_metadata,
-            &[
-                (900, 40, 46, 360),
-                (1_258, 40, 22, 360),
-                (946, 40, 312, 38),
-                (946, 338, 312, 62),
-            ],
-        );
-        let text = residual_crop_metrics(
-            &flutter_base,
-            &flutter_metadata,
-            &flutter_base,
-            &rust_metadata,
-            &[(960, 88, 290, 125)],
-        );
-        assert!(
-            metrics.1 <= 5.60,
-            "Flutter/Rust metadata mean drift {}",
-            metrics.1
-        );
-        assert!(
-            blank_panel.1 <= 0.04 && blank_panel.2 <= 3,
-            "Flutter/Rust metadata fill drift {blank_panel:?}"
-        );
-        assert!(
-            shadow.1 <= 1.30,
-            "Flutter/Rust metadata geometry/shadow drift {shadow:?}"
-        );
-        assert!(
-            text.1 <= 19.0,
-            "Flutter/Rust localized metadata text drift {text:?}"
-        );
+        let short = metadata_layout(
+            1_280.0,
+            800.0,
+            1.0,
+            &event,
+            WorldPoint { x: 900.0, y: 500.0 },
+        )
+        .unwrap();
+        assert!(short.bounds.height() < 120.0, "{:?}", short.bounds);
+        assert!(short.footer_height.abs() < f32::EPSILON);
+        assert!(short.scroll_max.abs() < f32::EPSILON);
+        assert!((short.bounds.left - 22.0).abs() < f32::EPSILON);
+        assert!((short.bounds.top - 78.0).abs() < f32::EPSILON);
+        assert!(900.0 > short.bounds.right || 500.0 > short.bounds.bottom);
+
+        event.summary = "A long saved finding remains available without network services and must be readable through an explicit focused viewport. ".repeat(80);
+        let long = metadata_layout(
+            1_280.0,
+            800.0,
+            1.0,
+            &event,
+            WorldPoint { x: 900.0, y: 500.0 },
+        )
+        .unwrap();
+        assert!((long.bounds.height() - METADATA_DESKTOP_MAX_HEIGHT).abs() < f32::EPSILON);
+        assert!((long.footer_height - METADATA_FOOTER_HEIGHT).abs() < f32::EPSILON);
+        assert!(long.scroll_max > 1_000.0);
     }
 
     fn paint_over(base: &[u8], paint: impl FnOnce(&Canvas)) -> Vec<u8> {
@@ -2268,7 +2474,18 @@ mod tests {
     #[test]
     fn curation_menu_hits_exact_rows_without_leaking_into_its_heading() {
         let anchor = WorldPoint { x: 120.0, y: 100.0 };
-        let hit = |x, y| hit_curation_menu(WorldPoint { x, y }, 1_280.0, 800.0, 1.0, anchor, 3);
+        let items = vec!["ONE".into(), "TWO".into(), "THREE".into()];
+        let hit = |x, y| {
+            hit_curation_menu(
+                WorldPoint { x, y },
+                1_280.0,
+                800.0,
+                1.0,
+                anchor,
+                &items,
+                0.0,
+            )
+        };
         assert_eq!(hit(140.0, 130.0), None);
         assert_eq!(hit(140.0, 150.0), Some(0));
         assert_eq!(hit(140.0, 198.0), Some(1));
@@ -2284,6 +2501,37 @@ mod tests {
                 "curation headings must remain a single line"
             );
         });
+    }
+
+    #[test]
+    fn measured_menu_rows_scroll_and_reveal_without_crossing_the_viewport() {
+        let anchor = WorldPoint { x: 120.0, y: 72.0 };
+        let items = vec![
+            "HERMES  ·  EXECUTABLE PRESENT  ·  ACP CHECK ON RESEARCH".into(),
+            "EXA DISCOVERY  ·  OS VAULT".into(),
+            "SEARXNG FRONTIER  ·  APP SETTINGS".into(),
+            "BROWSE  ·  EXECUTABLE PRESENT  ·  BROWSER UNVERIFIED".into(),
+            "CURL  ·  EXECUTABLE PRESENT  ·  VERSION CHECK ON RESEARCH".into(),
+            "COMPLETE ERASE  ·  GRAPH, SETTINGS, VAULT, OWNED PROFILE".into(),
+        ];
+        let initial = menu_layout(640.0, 300.0, anchor, &items, 0.0).unwrap();
+        assert!(initial.rows[0].height() > 48.0);
+        assert!(initial.scroll_max > 0.0);
+        assert!(initial.bounds.bottom <= 288.0);
+
+        let revealed =
+            curation_menu_reveal_offset(640.0, 300.0, 1.0, anchor, &items, items.len() - 1, 0.0);
+        assert!(revealed > 0.0);
+        let layout = menu_layout(640.0, 300.0, anchor, &items, revealed).unwrap();
+        let last = layout.rows.last().unwrap();
+        let point = WorldPoint {
+            x: f64::from(last.center_x()),
+            y: f64::from(last.center_y()),
+        };
+        assert_eq!(
+            hit_curation_menu(point, 640.0, 300.0, 1.0, anchor, &items, revealed),
+            Some(items.len() - 1)
+        );
     }
 
     #[test]
@@ -2305,6 +2553,7 @@ mod tests {
                     title: "CONNECTIONS  ·  CTRL+,",
                     items: &items,
                     selected: Some(selected),
+                    scroll_offset: 0.0,
                 },
             );
             read_image_size(&surface.image_snapshot(), (640, 420))

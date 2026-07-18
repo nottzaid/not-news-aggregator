@@ -11,11 +11,12 @@ pub mod viewport;
 pub use artifacts::{ArtifactLayout, ArtifactMetrics, layout_artifacts};
 pub use background::{BackgroundError, paint_background, render_background_png};
 pub use chrome::{
-    ChromeControl, CurationMenu, RecordOrbState, active_metadata_scroll_max, hit_active_metadata,
-    hit_activity_surface, hit_activity_toggle, hit_curation_menu, hit_fixed_chrome,
-    paint_active_metadata, paint_activity_drawer, paint_connection_prompt, paint_credential_prompt,
-    paint_curation_menu, paint_curation_prompt, paint_fixed_chrome, paint_research_prompt,
-    paint_status,
+    ChromeControl, CurationMenu, RecordOrbState, active_metadata_scroll_max,
+    curation_menu_reveal_offset, curation_menu_scroll_max, hit_active_metadata,
+    hit_activity_surface, hit_activity_toggle, hit_curation_menu, hit_curation_menu_surface,
+    hit_fixed_chrome, paint_active_metadata, paint_activity_drawer, paint_connection_prompt,
+    paint_credential_prompt, paint_curation_menu, paint_curation_prompt, paint_fixed_chrome,
+    paint_research_prompt, paint_status,
 };
 pub use grid::paint_grid;
 pub use layout::{

@@ -26,6 +26,9 @@ Download the current unsigned Windows/Linux prerelease from
   The world has no fixed bounds, and none of these gestures creates a fact.
 - Right-click a finding or source, or hover and press `Ctrl+E`, to relate,
   detach, or promote it explicitly.
+- Hovering a finding opens a content-sized summary. When its bounded reader
+  shows `TAB FOCUS TO READ`, press `Tab` to freeze canvas interaction; use arrow
+  keys, Page Up/Down, Home/End, then `Esc` or `Tab` to return.
 - `Ctrl+Z` undoes; `Ctrl+Shift+Z` or `Ctrl+Y` redoes the latest committed move
   or semantic command, including after restart.
 - Drop a legacy `graph.sqlite` onto a pristine canvas to import it. The source
@@ -65,10 +68,11 @@ retrieval is needed. Linux Hermes 0.18.2 is one observed compatible point, not a
 version corridor; native Windows Hermes research remains unproved.
 
 Browserbase is Browse's optional cloud surface. Groq is optional question
-transcription, not Hermes inference. Re-entering an Exa, Browserbase, or Groq
-key replaces that Not News vault entry; removal rows delete those entries and
-the SearXNG setting. Not News neither discovers nor copies those inputs from the
-ambient environment or other apps. On Linux the release does not install a
+transcription, not Hermes inference. Each Connections row opens its own
+configure/replace/remove actions; replacement writes the same Not News vault
+account, while removal returns that capability to `NOT CONFIGURED`. Not News
+neither discovers nor copies those inputs from the ambient environment or other
+apps. On Linux the release does not install a
 Secret Service provider: KWallet or GNOME Keyring must already expose one, and
 first access may prompt for setup or unlock. Vault work has a five-second
 application deadline; timeout means the result is unconfirmed because the OS

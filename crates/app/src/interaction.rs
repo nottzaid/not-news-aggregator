@@ -118,6 +118,49 @@ impl CanvasInteraction {
             .map(|position| (event, *position))
     }
 
+    pub fn active_event_position_at(
+        &self,
+        graph: &GraphSnapshot,
+        now: Instant,
+    ) -> Option<(&EventId, Point)> {
+        let event = self.active.as_ref()?;
+        let position = if let Some(PointerGesture::Drag {
+            event: dragged,
+            position,
+            ..
+        }) = &self.pointer
+            && dragged == event
+        {
+            *position
+        } else if let Some(motion) = &self.motion {
+            if self.motion_complete(now) {
+                motion.to_positions[event]
+            } else {
+                let progress = f64::from(motion_progress(motion.started, now));
+                lerp_point(
+                    motion.from_positions[event],
+                    motion.to_positions[event],
+                    progress,
+                )
+            }
+        } else {
+            self.settled_positions[event]
+        };
+        debug_assert!(graph.events.contains_key(event));
+        Some((event, position))
+    }
+
+    pub fn retain_active(&mut self) -> bool {
+        self.collapse_at.take().is_some()
+    }
+
+    pub fn freeze_view(&mut self) -> bool {
+        let pointer = self.pointer.take().is_some();
+        let camera = self.camera_motion.take().is_some();
+        let collapse = self.collapse_at.take().is_some();
+        pointer || camera || collapse
+    }
+
     pub fn subject_at_cursor(&self, graph: &GraphSnapshot, now: Instant) -> Option<CanvasSubject> {
         let screen = self.cursor?;
         let positions = self.current_positions(graph, now);
@@ -345,6 +388,10 @@ impl CanvasInteraction {
         let Some(anchor) = self.cursor else {
             return false;
         };
+        self.scroll_at(vertical_pixels, anchor)
+    }
+
+    pub fn scroll_at(&mut self, vertical_pixels: f64, anchor: Point) -> bool {
         if vertical_pixels == 0.0 || !vertical_pixels.is_finite() {
             return false;
         }

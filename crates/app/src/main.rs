@@ -64,11 +64,12 @@ const BROWSE_INSTALL_URL: &str = "https://browse.sh";
 const CURL_INSTALL_URL: &str = "https://curl.se/download.html";
 use not_news_renderer::{
     ChromeControl, CurationMenu, Motion, RecordOrbState, SceneAnimation, SceneState,
-    active_metadata_scroll_max, hit_active_metadata, hit_activity_surface, hit_activity_toggle,
-    hit_curation_menu, hit_fixed_chrome, paint_active_metadata, paint_activity_drawer,
-    paint_background, paint_connection_prompt, paint_credential_prompt, paint_curation_menu,
-    paint_curation_prompt, paint_fixed_chrome, paint_graph, paint_grid, paint_research_prompt,
-    paint_status, resolved_positions,
+    ViewportTransform, active_metadata_scroll_max, curation_menu_reveal_offset,
+    curation_menu_scroll_max, hit_active_metadata, hit_activity_surface, hit_activity_toggle,
+    hit_curation_menu, hit_curation_menu_surface, hit_fixed_chrome, paint_active_metadata,
+    paint_activity_drawer, paint_background, paint_connection_prompt, paint_credential_prompt,
+    paint_curation_menu, paint_curation_prompt, paint_fixed_chrome, paint_graph, paint_grid,
+    paint_research_prompt, paint_status, resolved_positions,
 };
 use not_news_store::{
     CommitOutcome, DurableGraphStore, LegacyGraphReader, ResearchOutputKind, ResearchSessionStatus,
@@ -311,6 +312,7 @@ enum SettingsFlow {
         hermes_available: bool,
         browse_available: bool,
         curl_available: bool,
+        page: SettingsPage,
         selected: usize,
     },
     Credential {
@@ -323,6 +325,13 @@ enum SettingsFlow {
     EraseConfirmation {
         input: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsPage {
+    Root,
+    Credential(CredentialKind),
+    Searxng,
 }
 
 #[derive(Clone)]
@@ -394,6 +403,22 @@ impl CredentialKind {
             Self::Groq => "Groq",
         }
     }
+
+    fn menu_label(self) -> &'static str {
+        match self {
+            Self::Browserbase => "BROWSERBASE",
+            Self::Exa => "EXA",
+            Self::Groq => "GROQ",
+        }
+    }
+
+    fn removal_consequence(self) -> &'static str {
+        match self {
+            Self::Browserbase => "CLOUD BROWSING DISABLED; LOCAL BROWSE REMAINS",
+            Self::Exa => "RESEARCH DISCOVERY BECOMES INCOMPLETE",
+            Self::Groq => "TRANSCRIPTION DISABLED",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -401,10 +426,13 @@ enum SettingsChoice {
     Hermes,
     Browse,
     Curl,
-    Searxng,
-    Credential(CredentialKind),
+    OpenSearxng,
+    EditSearxng,
+    OpenCredential(CredentialKind),
+    EditCredential(CredentialKind),
     RemoveCredential(CredentialKind),
     RemoveSearxng,
+    Back,
     EraseAll,
 }
 
@@ -476,6 +504,9 @@ struct CanvasApplication {
     record_hold_deadline: Option<Instant>,
     metadata_scroll_event: Option<EventId>,
     metadata_scroll: f64,
+    metadata_focus: Option<EventId>,
+    curation_scroll: f64,
+    settings_scroll: f64,
     exit_after_present: bool,
 }
 
@@ -643,6 +674,9 @@ impl CanvasApplication {
             record_hold_deadline: None,
             metadata_scroll_event: None,
             metadata_scroll: 0.0,
+            metadata_focus: None,
+            curation_scroll: 0.0,
+            settings_scroll: 0.0,
             exit_after_present: false,
         }
     }
@@ -666,6 +700,7 @@ impl CanvasApplication {
             .graph_committed(&previous, &self.graph, now);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn settings_choices(&self) -> Vec<(SettingsChoice, String)> {
         let Some(SettingsFlow::Menu {
             browserbase,
@@ -675,91 +710,120 @@ impl CanvasApplication {
             hermes_available,
             browse_available,
             curl_available,
+            page,
             ..
         }) = self.settings.as_ref()
         else {
             return Vec::new();
         };
-        let mut choices = vec![
-            (
-                SettingsChoice::Hermes,
-                if self.hermes_profile.is_none() {
-                    "HERMES PROFILE  ·  INSTALLATION FAILED".into()
-                } else if *hermes_available {
-                    "HERMES  ·  EXECUTABLE PRESENT  ·  ACP CHECK ON RESEARCH".into()
-                } else {
-                    "HERMES  ·  MISSING  ·  OPEN INSTALL GUIDE".into()
-                },
-            ),
-            (
-                SettingsChoice::Credential(CredentialKind::Exa),
-                format!("EXA DISCOVERY  ·  {}", exa.label()),
-            ),
-            (
-                SettingsChoice::Searxng,
-                format!("SEARXNG FRONTIER  ·  {}", searxng.label()),
-            ),
-            (
-                SettingsChoice::Credential(CredentialKind::Groq),
-                format!("GROQ VOICE  ·  {}", groq.label()),
-            ),
-            (
-                SettingsChoice::Credential(CredentialKind::Browserbase),
-                format!("BROWSERBASE CLOUD  ·  {}", browserbase.label()),
-            ),
-            (
-                SettingsChoice::Browse,
-                if *browse_available {
-                    "BROWSE  ·  EXECUTABLE PRESENT  ·  BROWSER UNVERIFIED".into()
-                } else {
-                    "BROWSE  ·  MISSING  ·  OPEN INSTALL GUIDE".into()
-                },
-            ),
-            (
-                SettingsChoice::Curl,
-                if *curl_available {
-                    "CURL  ·  EXECUTABLE PRESENT  ·  VERSION CHECK ON RESEARCH".into()
-                } else {
-                    "CURL  ·  MISSING  ·  OPEN INSTALL GUIDE".into()
-                },
-            ),
-        ];
-        if matches!(exa, CredentialMenuState::Ready(CredentialState::Vault)) {
-            choices.push((
-                SettingsChoice::RemoveCredential(CredentialKind::Exa),
-                "REMOVE EXA VAULT KEY".into(),
-            ));
+        match page {
+            SettingsPage::Root => vec![
+                (
+                    SettingsChoice::Hermes,
+                    if self.hermes_profile.is_none() {
+                        "HERMES PROFILE  ·  INSTALLATION FAILED".into()
+                    } else if *hermes_available {
+                        "HERMES  ·  EXECUTABLE PRESENT  ·  ACP CHECK ON RESEARCH".into()
+                    } else {
+                        "HERMES  ·  MISSING  ·  OPEN INSTALL GUIDE".into()
+                    },
+                ),
+                (
+                    SettingsChoice::OpenCredential(CredentialKind::Exa),
+                    format!("EXA DISCOVERY  ·  {}", exa.label()),
+                ),
+                (
+                    SettingsChoice::OpenSearxng,
+                    format!("SEARXNG FRONTIER  ·  {}", searxng.label()),
+                ),
+                (
+                    SettingsChoice::OpenCredential(CredentialKind::Groq),
+                    format!("GROQ VOICE  ·  {}", groq.label()),
+                ),
+                (
+                    SettingsChoice::OpenCredential(CredentialKind::Browserbase),
+                    format!("BROWSERBASE CLOUD  ·  {}", browserbase.label()),
+                ),
+                (
+                    SettingsChoice::Browse,
+                    if *browse_available {
+                        "BROWSE  ·  EXECUTABLE PRESENT  ·  BROWSER UNVERIFIED".into()
+                    } else {
+                        "BROWSE  ·  MISSING  ·  OPEN INSTALL GUIDE".into()
+                    },
+                ),
+                (
+                    SettingsChoice::Curl,
+                    if *curl_available {
+                        "CURL  ·  EXECUTABLE PRESENT  ·  VERSION CHECK ON RESEARCH".into()
+                    } else {
+                        "CURL  ·  MISSING  ·  OPEN INSTALL GUIDE".into()
+                    },
+                ),
+                (
+                    SettingsChoice::EraseAll,
+                    "COMPLETE ERASE  ·  GRAPH, SETTINGS, VAULT, OWNED PROFILE".into(),
+                ),
+            ],
+            SettingsPage::Credential(kind) => {
+                let state = match kind {
+                    CredentialKind::Browserbase => browserbase,
+                    CredentialKind::Exa => exa,
+                    CredentialKind::Groq => groq,
+                };
+                let mut choices = vec![(
+                    SettingsChoice::EditCredential(*kind),
+                    format!(
+                        "{} KEY  ·  {}",
+                        if matches!(state, CredentialMenuState::Ready(CredentialState::Vault)) {
+                            "REPLACE"
+                        } else {
+                            "CONFIGURE"
+                        },
+                        state.label()
+                    ),
+                )];
+                if matches!(state, CredentialMenuState::Ready(CredentialState::Vault)) {
+                    choices.push((
+                        SettingsChoice::RemoveCredential(*kind),
+                        format!(
+                            "REMOVE {} KEY  ·  {}",
+                            kind.menu_label(),
+                            kind.removal_consequence()
+                        ),
+                    ));
+                }
+                choices.push((SettingsChoice::Back, "← BACK TO CONNECTIONS".into()));
+                choices
+            }
+            SettingsPage::Searxng => {
+                let mut choices = vec![(
+                    SettingsChoice::EditSearxng,
+                    format!(
+                        "{} ENDPOINT  ·  {}",
+                        if matches!(searxng, EndpointState::Saved) {
+                            "REPLACE"
+                        } else {
+                            "CONFIGURE"
+                        },
+                        searxng.label()
+                    ),
+                )];
+                if matches!(searxng, EndpointState::Saved) {
+                    choices.push((
+                        SettingsChoice::RemoveSearxng,
+                        "REMOVE ENDPOINT  ·  RESEARCH DISCOVERY BECOMES INCOMPLETE".into(),
+                    ));
+                }
+                choices.push((SettingsChoice::Back, "← BACK TO CONNECTIONS".into()));
+                choices
+            }
         }
-        if matches!(groq, CredentialMenuState::Ready(CredentialState::Vault)) {
-            choices.push((
-                SettingsChoice::RemoveCredential(CredentialKind::Groq),
-                "REMOVE GROQ VAULT KEY".into(),
-            ));
-        }
-        if matches!(
-            browserbase,
-            CredentialMenuState::Ready(CredentialState::Vault)
-        ) {
-            choices.push((
-                SettingsChoice::RemoveCredential(CredentialKind::Browserbase),
-                "REMOVE BROWSERBASE VAULT KEY".into(),
-            ));
-        }
-        if matches!(searxng, EndpointState::Saved) {
-            choices.push((
-                SettingsChoice::RemoveSearxng,
-                "REMOVE SEARXNG APP SETTING".into(),
-            ));
-        }
-        choices.push((
-            SettingsChoice::EraseAll,
-            "COMPLETE ERASE  ·  GRAPH, SETTINGS, VAULT, OWNED PROFILE".into(),
-        ));
-        choices
     }
 
     fn open_settings(&mut self, now: Instant) -> bool {
         self.interaction.cancel_pointer();
+        self.metadata_focus = None;
         self.pointer_owner = PointerOwner::ConsumedChrome;
         self.research_input = None;
         self.research_preedit.clear();
@@ -773,8 +837,10 @@ impl CanvasApplication {
             hermes_available: hermes_is_available(),
             browse_available: browse_is_available(),
             curl_available: curl_is_available(),
+            page: SettingsPage::Root,
             selected: 0,
         });
+        self.settings_scroll = 0.0;
         self.settings_preedit.zeroize();
         self.start_credential_state_resolution();
         self.interaction.cursor_left(now);
@@ -799,12 +865,14 @@ impl CanvasApplication {
             hermes_available: hermes_is_available(),
             browse_available: browse_is_available(),
             curl_available: curl_is_available(),
+            page: SettingsPage::Root,
             selected,
         });
         let last = self.settings_choices().len().saturating_sub(1);
         if let Some(SettingsFlow::Menu { selected, .. }) = self.settings.as_mut() {
             *selected = (*selected).min(last);
         }
+        self.settings_scroll = 0.0;
         self.settings_preedit.zeroize();
         self.start_credential_state_resolution();
     }
@@ -944,7 +1012,11 @@ impl CanvasApplication {
         } else {
             (*selected + 1) % count
         };
-        *selected != previous
+        let changed = *selected != previous;
+        if changed {
+            self.reveal_settings_selection();
+        }
+        changed
     }
 
     fn select_settings_row(&mut self, row: usize) -> bool {
@@ -956,23 +1028,49 @@ impl CanvasApplication {
         changed
     }
 
+    fn reveal_settings_selection(&mut self) {
+        let Some(selected) = self.settings_selection() else {
+            return;
+        };
+        let items = self
+            .settings_choices()
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        self.settings_scroll = curation_menu_reveal_offset(
+            self.physical_width,
+            self.physical_height,
+            self.scale_factor,
+            self.settings_anchor(),
+            &items,
+            selected,
+            self.settings_scroll,
+        );
+    }
+
     fn settings_anchor(&self) -> Point {
         Point {
-            x: (self.physical_width * 0.5 - 170.0).max(12.0),
-            y: (self.physical_height * 0.18).max(72.0),
+            x: (self.physical_width * 0.5 - 170.0 * self.scale_factor)
+                .max(12.0 * self.scale_factor),
+            y: (self.physical_height * 0.18).max(72.0 * self.scale_factor),
         }
     }
 
     fn settings_menu_at_cursor(&self) -> Option<usize> {
         let cursor = self.cursor?;
-        let count = self.settings_choices().len();
+        let items = self
+            .settings_choices()
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
         hit_curation_menu(
             cursor,
             self.physical_width,
             self.physical_height,
             self.scale_factor,
             self.settings_anchor(),
-            count,
+            &items,
+            self.settings_scroll,
         )
     }
 
@@ -1020,7 +1118,14 @@ impl CanvasApplication {
                 }
                 self.begin_settings_refresh();
             }
-            SettingsChoice::Searxng => {
+            SettingsChoice::OpenSearxng => {
+                if let Some(SettingsFlow::Menu { page, selected, .. }) = self.settings.as_mut() {
+                    *page = SettingsPage::Searxng;
+                    *selected = 0;
+                }
+                self.settings_scroll = 0.0;
+            }
+            SettingsChoice::EditSearxng => {
                 let input = searxng_url(&self.data_directory)
                     .ok()
                     .flatten()
@@ -1028,7 +1133,14 @@ impl CanvasApplication {
                 self.settings = Some(SettingsFlow::SearxngEndpoint { input });
                 self.settings_preedit.zeroize();
             }
-            SettingsChoice::Credential(kind) => {
+            SettingsChoice::OpenCredential(kind) => {
+                if let Some(SettingsFlow::Menu { page, selected, .. }) = self.settings.as_mut() {
+                    *page = SettingsPage::Credential(kind);
+                    *selected = 0;
+                }
+                self.settings_scroll = 0.0;
+            }
+            SettingsChoice::EditCredential(kind) => {
                 if self.vault_task.is_some() {
                     self.status =
                         Some("The credential vault is already processing a request.".into());
@@ -1103,6 +1215,13 @@ impl CanvasApplication {
                 });
                 self.begin_settings_refresh();
             }
+            SettingsChoice::Back => {
+                if let Some(SettingsFlow::Menu { page, selected, .. }) = self.settings.as_mut() {
+                    *page = SettingsPage::Root;
+                    *selected = 0;
+                }
+                self.settings_scroll = 0.0;
+            }
             SettingsChoice::EraseAll => {
                 if self.research.is_some()
                     || self.research_preflight.is_some()
@@ -1175,6 +1294,7 @@ impl CanvasApplication {
             hermes_available: hermes_is_available(),
             browse_available: browse_is_available(),
             curl_available: curl_is_available(),
+            page: SettingsPage::Root,
             selected: 1,
         });
         if let Some(state) = self.credential_menu_mut(kind) {
@@ -1308,6 +1428,18 @@ impl CanvasApplication {
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
             if key_input || endpoint_input || erase_input {
                 self.begin_settings_refresh();
+            } else if matches!(
+                self.settings,
+                Some(SettingsFlow::Menu {
+                    page: SettingsPage::Credential(_) | SettingsPage::Searxng,
+                    ..
+                })
+            ) {
+                if let Some(SettingsFlow::Menu { page, selected, .. }) = self.settings.as_mut() {
+                    *page = SettingsPage::Root;
+                    *selected = 0;
+                }
+                self.settings_scroll = 0.0;
             } else {
                 self.settings = None;
                 self.settings_preedit.zeroize();
@@ -1490,6 +1622,7 @@ impl CanvasApplication {
 
     fn open_curation_menu(&mut self, now: Instant) -> bool {
         self.interaction.cancel_pointer();
+        self.metadata_focus = None;
         let Some(anchor) = self.cursor else {
             return false;
         };
@@ -1507,6 +1640,7 @@ impl CanvasApplication {
             page: 0,
             expected_revision: self.graph.revision,
         });
+        self.curation_scroll = 0.0;
         self.curation_preedit.clear();
         true
     }
@@ -1523,14 +1657,49 @@ impl CanvasApplication {
         else {
             return None;
         };
-        let count = self.curation_choices(subject, *stage, *page).len();
+        let items = self
+            .curation_choices(subject, *stage, *page)
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
         hit_curation_menu(
             cursor,
             self.physical_width,
             self.physical_height,
             self.scale_factor,
             *anchor,
-            count,
+            &items,
+            self.curation_scroll,
+        )
+    }
+
+    fn curation_menu_surface_at_cursor(&self) -> bool {
+        let Some(cursor) = self.cursor else {
+            return false;
+        };
+        let Some(CurationFlow::Menu {
+            anchor,
+            subject,
+            stage,
+            page,
+            ..
+        }) = self.curation.as_ref()
+        else {
+            return false;
+        };
+        let items = self
+            .curation_choices(subject, *stage, *page)
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        hit_curation_menu_surface(
+            cursor,
+            self.physical_width,
+            self.physical_height,
+            self.scale_factor,
+            *anchor,
+            &items,
+            self.curation_scroll,
         )
     }
 
@@ -1620,6 +1789,7 @@ impl CanvasApplication {
                     page: 0,
                     expected_revision,
                 });
+                self.curation_scroll = 0.0;
                 true
             }
             CurationChoice::Promote => {
@@ -1647,6 +1817,7 @@ impl CanvasApplication {
                     page: page.saturating_sub(1),
                     expected_revision,
                 });
+                self.curation_scroll = 0.0;
                 true
             }
             CurationChoice::NextPage if matches!(stage, CurationMenuStage::Detach) => {
@@ -1657,6 +1828,7 @@ impl CanvasApplication {
                     page: page.saturating_add(1),
                     expected_revision,
                 });
+                self.curation_scroll = 0.0;
                 true
             }
             CurationChoice::Detach | CurationChoice::PreviousPage | CurationChoice::NextPage => {
@@ -1982,6 +2154,53 @@ impl CanvasApplication {
         }
     }
 
+    fn metadata_keyboard_input(
+        &mut self,
+        event: &not_news_platform::winit::event::KeyEvent,
+        now: Instant,
+    ) -> Option<bool> {
+        if self.metadata_focus.is_some() {
+            return Some(match event.logical_key {
+                Key::Named(NamedKey::Escape) => self.release_metadata_focus(now),
+                Key::Named(NamedKey::Tab) if !event.repeat => self.release_metadata_focus(now),
+                Key::Named(NamedKey::ArrowDown) => self.scroll_metadata_by(36.0),
+                Key::Named(NamedKey::ArrowUp) => self.scroll_metadata_by(-36.0),
+                Key::Named(NamedKey::PageDown) => self.scroll_metadata_by(240.0),
+                Key::Named(NamedKey::PageUp) => self.scroll_metadata_by(-240.0),
+                Key::Named(NamedKey::Home) => {
+                    let changed = self.metadata_scroll > 0.0;
+                    self.metadata_scroll = 0.0;
+                    changed
+                }
+                Key::Named(NamedKey::End) => {
+                    let Some((active, _)) = self.interaction.active_event_position() else {
+                        return Some(false);
+                    };
+                    let maximum = active_metadata_scroll_max(
+                        self.physical_width,
+                        self.physical_height,
+                        self.scale_factor,
+                        &self.graph.events[active],
+                    );
+                    let changed = (self.metadata_scroll - maximum).abs() > f64::EPSILON;
+                    self.metadata_scroll = maximum;
+                    changed
+                }
+                _ => false,
+            });
+        }
+        if matches!(event.logical_key, Key::Named(NamedKey::Tab))
+            && !event.repeat
+            && !self.modifiers.control_key()
+            && !self.modifiers.alt_key()
+            && !self.modifiers.super_key()
+            && self.metadata_has_overflow()
+        {
+            return Some(self.focus_metadata());
+        }
+        None
+    }
+
     #[allow(clippy::too_many_lines)]
     fn keyboard_input(
         &mut self,
@@ -2038,6 +2257,9 @@ impl CanvasApplication {
                 return true;
             }
             return false;
+        }
+        if let Some(changed) = self.metadata_keyboard_input(event, now) {
+            return changed;
         }
         if event.repeat {
             return false;
@@ -2916,7 +3138,10 @@ impl CanvasApplication {
     }
 
     fn focus_generated_research(&mut self) {
-        if self.auto_follow_research && !self.generated_research_events.is_empty() {
+        if self.metadata_focus.is_none()
+            && self.auto_follow_research
+            && !self.generated_research_events.is_empty()
+        {
             self.interaction
                 .focus_events(&self.generated_research_events, Instant::now());
         }
@@ -2994,6 +3219,9 @@ impl CanvasApplication {
     fn cursor_moved(&mut self, point: Point, now: Instant) -> bool {
         let previous_curation_row = self.curation_menu_at_cursor();
         self.cursor = Some(point);
+        if self.metadata_focus.is_some() {
+            return self.interaction.retain_active();
+        }
         if self.record_hold_deadline.is_some()
             && self.chrome_at_cursor() != Some(ChromeControl::Record)
         {
@@ -3001,7 +3229,11 @@ impl CanvasApplication {
         }
         if matches!(self.curation, Some(CurationFlow::Menu { .. })) {
             let selection_changed = previous_curation_row != self.curation_menu_at_cursor();
-            self.interaction.cursor_left(now) || selection_changed
+            if self.curation_menu_surface_at_cursor() {
+                self.interaction.cursor_left(now) || selection_changed
+            } else {
+                self.interaction.cursor_moved(point, &self.graph, now) || selection_changed
+            }
         } else if self.settings.is_some() {
             let selection_changed = self
                 .settings_menu_at_cursor()
@@ -3011,17 +3243,24 @@ impl CanvasApplication {
             let changed = self.interaction.cursor_moved(point, &self.graph, now);
             self.stop_auto_follow_if_panning();
             changed
-        } else if self.activity_surface_at_cursor(now)
-            || self.chrome_at_cursor().is_some()
-            || self.metadata_at_cursor()
-        {
+        } else if self.activity_surface_at_cursor(now) || self.chrome_at_cursor().is_some() {
             self.interaction.cursor_left(now)
+        } else if self.metadata_at_cursor(now) {
+            self.interaction.retain_active()
         } else {
             self.interaction.cursor_moved(point, &self.graph, now)
         }
     }
 
     fn mouse_input(&mut self, state: ElementState, now: Instant) -> bool {
+        if self.metadata_focus.is_some() {
+            self.pointer_owner = if state == ElementState::Pressed {
+                PointerOwner::MetadataSurface
+            } else {
+                PointerOwner::None
+            };
+            return self.interaction.retain_active();
+        }
         if state == ElementState::Pressed {
             if let Some(changed) = self.settings_left_press() {
                 self.pointer_owner = PointerOwner::ConsumedChrome;
@@ -3046,9 +3285,9 @@ impl CanvasApplication {
                 }
                 return self.interaction.cursor_left(now);
             }
-            if self.metadata_at_cursor() {
+            if self.metadata_at_cursor(now) {
                 self.pointer_owner = PointerOwner::MetadataSurface;
-                return self.interaction.cursor_left(now);
+                return self.interaction.retain_active();
             }
             self.pointer_owner = PointerOwner::Canvas;
             return self.interaction.pointer_down(&self.graph, now);
@@ -3081,7 +3320,7 @@ impl CanvasApplication {
     }
 
     fn right_mouse_input(&mut self, state: ElementState, now: Instant) -> bool {
-        if self.settings.is_some() {
+        if self.settings.is_some() || self.metadata_focus.is_some() {
             self.pointer_owner = PointerOwner::ConsumedChrome;
             return state == ElementState::Pressed;
         }
@@ -3112,11 +3351,23 @@ impl CanvasApplication {
         false
     }
 
-    fn metadata_at_cursor(&self) -> bool {
+    fn active_metadata_screen_position(&self, now: Instant) -> Option<(EventId, Point)> {
+        let (active, world) = self
+            .interaction
+            .active_event_position_at(&self.graph, now)?;
+        let transform = ViewportTransform::new(
+            self.physical_width,
+            self.physical_height,
+            self.interaction.viewport(),
+        );
+        Some((active.clone(), transform.world_to_screen(world)))
+    }
+
+    fn metadata_at_cursor(&self, now: Instant) -> bool {
         let Some(cursor) = self.cursor else {
             return false;
         };
-        let Some((active, position)) = self.interaction.active_event_position() else {
+        let Some((active, position)) = self.active_metadata_screen_position(now) else {
             return false;
         };
         hit_active_metadata(
@@ -3124,12 +3375,12 @@ impl CanvasApplication {
             self.physical_width,
             self.physical_height,
             self.scale_factor,
-            &self.graph.events[active],
+            &self.graph.events[&active],
             position,
         )
     }
 
-    fn scroll_metadata(&mut self, delta: MouseScrollDelta) -> bool {
+    fn scroll_metadata_by(&mut self, logical_delta: f64) -> bool {
         let Some((active, _)) = self.interaction.active_event_position() else {
             return false;
         };
@@ -3142,10 +3393,53 @@ impl CanvasApplication {
             self.scale_factor,
             event,
         );
-        let next = (self.metadata_scroll + scroll_pixels(delta)).clamp(0.0, maximum);
+        let next = (self.metadata_scroll + logical_delta).clamp(0.0, maximum);
         let changed = (next - self.metadata_scroll).abs() > f64::EPSILON;
         self.metadata_scroll = next;
         changed
+    }
+
+    fn scroll_metadata(&mut self, delta: MouseScrollDelta) -> bool {
+        self.scroll_metadata_by(-scroll_pixels(delta) / self.scale_factor)
+    }
+
+    fn metadata_has_overflow(&self) -> bool {
+        let Some((active, _)) = self.interaction.active_event_position() else {
+            return false;
+        };
+        active_metadata_scroll_max(
+            self.physical_width,
+            self.physical_height,
+            self.scale_factor,
+            &self.graph.events[active],
+        ) > 0.0
+    }
+
+    fn focus_metadata(&mut self) -> bool {
+        let Some((active, _)) = self.interaction.active_event_position() else {
+            return false;
+        };
+        let active = active.clone();
+        if !self.metadata_has_overflow() {
+            return false;
+        }
+        let changed = self.metadata_focus.as_ref() != Some(&active);
+        self.metadata_focus = Some(active);
+        self.interaction.freeze_view() || changed
+    }
+
+    fn release_metadata_focus(&mut self, now: Instant) -> bool {
+        if self.metadata_focus.take().is_none() {
+            return false;
+        }
+        if self.metadata_at_cursor(now) {
+            self.interaction.retain_active();
+        } else if let Some(cursor) = self.cursor {
+            self.interaction.cursor_moved(cursor, &self.graph, now);
+        } else {
+            self.interaction.cursor_left(now);
+        }
+        true
     }
 
     fn sync_metadata_scroll(&mut self, active: Option<&EventId>) {
@@ -3153,8 +3447,86 @@ impl CanvasApplication {
             return;
         }
         let active = active.cloned();
+        if self.metadata_focus.as_ref() != active.as_ref() {
+            self.metadata_focus = None;
+        }
         self.metadata_scroll_event.clone_from(&active);
         self.metadata_scroll = 0.0;
+    }
+
+    fn scroll_settings_menu(&mut self, delta: MouseScrollDelta) -> bool {
+        let items = self
+            .settings_choices()
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        let maximum = curation_menu_scroll_max(
+            self.physical_width,
+            self.physical_height,
+            self.scale_factor,
+            self.settings_anchor(),
+            &items,
+        );
+        let next =
+            (self.settings_scroll - scroll_pixels(delta) / self.scale_factor).clamp(0.0, maximum);
+        let changed = (next - self.settings_scroll).abs() > f64::EPSILON;
+        self.settings_scroll = next;
+        changed
+    }
+
+    fn scroll_curation_menu(&mut self, delta: MouseScrollDelta) -> bool {
+        let Some(CurationFlow::Menu {
+            anchor,
+            subject,
+            stage,
+            page,
+            ..
+        }) = self.curation.as_ref()
+        else {
+            return false;
+        };
+        let items = self
+            .curation_choices(subject, *stage, *page)
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        let maximum = curation_menu_scroll_max(
+            self.physical_width,
+            self.physical_height,
+            self.scale_factor,
+            *anchor,
+            &items,
+        );
+        let next =
+            (self.curation_scroll - scroll_pixels(delta) / self.scale_factor).clamp(0.0, maximum);
+        let changed = (next - self.curation_scroll).abs() > f64::EPSILON;
+        self.curation_scroll = next;
+        changed
+    }
+
+    fn curation_menu_can_scroll(&self) -> bool {
+        let Some(CurationFlow::Menu {
+            anchor,
+            subject,
+            stage,
+            page,
+            ..
+        }) = self.curation.as_ref()
+        else {
+            return false;
+        };
+        let items = self
+            .curation_choices(subject, *stage, *page)
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        curation_menu_scroll_max(
+            self.physical_width,
+            self.physical_height,
+            self.scale_factor,
+            *anchor,
+            &items,
+        ) > 0.0
     }
 
     fn record_orb_state(&self) -> RecordOrbState {
@@ -3243,14 +3615,18 @@ impl CanvasApplication {
         activity_progress: f64,
     ) {
         if let Some(active) = state.expanded_event.as_ref() {
+            let screen_position =
+                ViewportTransform::new(f64::from(width), f64::from(height), viewport)
+                    .world_to_screen(state.positions[active]);
             paint_active_metadata(
                 canvas,
                 width,
                 height,
                 scale_factor,
                 &self.graph.events[active],
-                state.positions[active],
+                screen_position,
                 scale_scalar(self.metadata_scroll),
+                self.metadata_focus.as_ref() == Some(active),
             );
         }
         if let Some(status) = self.status.as_deref() {
@@ -3360,6 +3736,7 @@ impl CanvasApplication {
                 title,
                 items: &items,
                 selected: self.curation_menu_at_cursor(),
+                scroll_offset: scale_scalar(self.curation_scroll),
             },
         );
     }
@@ -3373,6 +3750,17 @@ impl CanvasApplication {
             .into_iter()
             .map(|(_, label)| label)
             .collect::<Vec<_>>();
+        let title = match self.settings.as_ref() {
+            Some(SettingsFlow::Menu {
+                page: SettingsPage::Credential(kind),
+                ..
+            }) => format!("CONNECTIONS  ·  {}", kind.title()),
+            Some(SettingsFlow::Menu {
+                page: SettingsPage::Searxng,
+                ..
+            }) => "CONNECTIONS  ·  SEARXNG FRONTIER".into(),
+            _ => "CONNECTIONS  ·  CTRL+,".into(),
+        };
         paint_curation_menu(
             canvas,
             width,
@@ -3380,9 +3768,10 @@ impl CanvasApplication {
             scale_factor,
             self.settings_anchor(),
             CurationMenu {
-                title: "CONNECTIONS  ·  CTRL+,",
+                title: &title,
                 items: &items,
                 selected: self.settings_selection(),
+                scroll_offset: scale_scalar(self.settings_scroll),
             },
         );
     }
@@ -3412,7 +3801,11 @@ impl PlatformApplication for CanvasApplication {
             WindowEvent::CursorLeft { .. } => {
                 self.cursor = None;
                 self.record_hold_deadline = None;
-                self.interaction.cursor_left(now)
+                if self.metadata_focus.is_some() {
+                    self.interaction.retain_active()
+                } else {
+                    self.interaction.cursor_left(now)
+                }
             }
             WindowEvent::MouseInput {
                 state,
@@ -3426,9 +3819,18 @@ impl PlatformApplication for CanvasApplication {
             } => self.right_mouse_input(*state, now),
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.settings.is_some() {
-                    false
-                } else if self.metadata_at_cursor() {
+                    self.scroll_settings_menu(*delta)
+                } else if self.metadata_focus.is_some() || self.metadata_at_cursor(now) {
                     self.scroll_metadata(*delta)
+                } else if matches!(self.curation, Some(CurationFlow::Menu { .. }))
+                    && self.curation_menu_surface_at_cursor()
+                    && self.curation_menu_can_scroll()
+                {
+                    self.scroll_curation_menu(*delta)
+                } else if matches!(self.curation, Some(CurationFlow::Menu { .. })) {
+                    self.cursor.is_some_and(|cursor| {
+                        self.interaction.scroll_at(scroll_pixels(*delta), cursor)
+                    })
                 } else if self.activity_surface_at_cursor(now) {
                     false
                 } else {
@@ -4201,12 +4603,13 @@ mod app_tests {
         let mut application = CanvasApplication::load(&directory.path().join("graph.sqlite"));
         application.settings = Some(SettingsFlow::Menu {
             browserbase: CredentialMenuState::Ready(CredentialState::Missing),
-            exa: CredentialMenuState::Ready(CredentialState::Missing),
+            exa: CredentialMenuState::Ready(CredentialState::Vault),
             groq: CredentialMenuState::Ready(CredentialState::Missing),
-            searxng: EndpointState::Missing,
+            searxng: EndpointState::Saved,
             hermes_available: true,
             browse_available: true,
             curl_available: true,
+            page: SettingsPage::Root,
             selected: 0,
         });
         let labels = application
@@ -4222,6 +4625,8 @@ mod app_tests {
         assert!(labels[5].starts_with("BROWSE  ·  EXECUTABLE PRESENT"));
         assert!(labels[6].starts_with("CURL  ·  EXECUTABLE PRESENT"));
         assert!(labels.last().unwrap().starts_with("COMPLETE ERASE"));
+        assert_eq!(labels.len(), 8);
+        assert!(labels.iter().all(|label| !label.starts_with("REMOVE")));
         assert!(labels.iter().all(|label| !label.contains("BACKEND")
             && !label.contains("OPENCODE")
             && !label.contains("CLOSE")));
@@ -4232,6 +4637,16 @@ mod app_tests {
         assert_eq!(application.settings_selection(), Some(0));
         assert!(application.select_settings_row(1));
         assert_eq!(application.settings_selection(), Some(1));
+        assert!(application.activate_settings_row(1));
+        let detail = application
+            .settings_choices()
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        assert!(detail[0].starts_with("REPLACE KEY  ·  OS VAULT"));
+        assert!(detail[1].contains("REMOVE EXA KEY"));
+        assert!(detail[1].contains("RESEARCH DISCOVERY BECOMES INCOMPLETE"));
+        assert_eq!(detail[2], "← BACK TO CONNECTIONS");
     }
 
     #[test]
@@ -4245,6 +4660,7 @@ mod app_tests {
             hermes_available: true,
             browse_available: true,
             curl_available: true,
+            page: SettingsPage::Root,
             selected: 1,
         });
         let labels = application
@@ -4399,6 +4815,81 @@ mod app_tests {
     }
 
     #[test]
+    fn metadata_surface_retains_hover_and_focused_reading_freezes_canvas_selection() {
+        let event_id = EventId("active".into());
+        let mut graph = GraphSnapshot::default();
+        graph.events.insert(
+            event_id.clone(),
+            not_news_domain::ResearchEvent {
+                id: event_id.clone(),
+                title: "Long finding".into(),
+                date: "Jul 18, 2026".into(),
+                color: 0xff4c_9be8,
+                summary: "Long metadata remains readable while its surface owns input. ".repeat(80),
+                source_label: "Primary".into(),
+                artifacts: Vec::new(),
+                url: None,
+            },
+        );
+        graph.placements.insert(
+            event_id.clone(),
+            not_news_domain::Placement {
+                point: Point { x: 900.0, y: 500.0 },
+                pinned: true,
+            },
+        );
+        let mut application = CanvasApplication::with_state(None, graph, None, None, None, None);
+        application.interaction.resize(1_280, 800);
+        let transform = ViewportTransform::new(1_280.0, 800.0, application.interaction.viewport());
+        let node = transform.world_to_screen(Point { x: 900.0, y: 500.0 });
+        let opened_at = Instant::now();
+        assert!(application.cursor_moved(node, opened_at));
+        let settled_at = opened_at + Duration::from_millis(220);
+        assert_eq!(
+            application
+                .interaction
+                .frame(&application.graph, settled_at)
+                .expanded_event
+                .as_ref(),
+            Some(&event_id)
+        );
+
+        let card = Point { x: 100.0, y: 100.0 };
+        application.cursor_moved(card, settled_at);
+        assert!(application.metadata_at_cursor(settled_at));
+        assert_eq!(
+            application
+                .interaction
+                .frame(&application.graph, settled_at + Duration::from_millis(500))
+                .expanded_event
+                .as_ref(),
+            Some(&event_id),
+            "entering the metadata surface must cancel its collapse deadline"
+        );
+
+        assert!(application.focus_metadata());
+        assert!(application.scroll_metadata_by(240.0));
+        let scroll = application.metadata_scroll;
+        application.cursor_moved(
+            Point {
+                x: 1_200.0,
+                y: 700.0,
+            },
+            settled_at + Duration::from_millis(600),
+        );
+        assert!((application.metadata_scroll - scroll).abs() < f64::EPSILON);
+        assert_eq!(
+            application
+                .interaction
+                .frame(&application.graph, settled_at + Duration::from_secs(2))
+                .expanded_event
+                .as_ref(),
+            Some(&event_id),
+            "focused reading must ignore canvas hover movement"
+        );
+    }
+
+    #[test]
     fn every_curation_hover_row_change_requests_a_repaint() {
         let subject = EventId("subject".into());
         let peer = EventId("peer".into());
@@ -4481,6 +4972,25 @@ mod app_tests {
         assert!(application.cursor_moved(Point { x: 140.0, y: 166.0 }, now));
         assert_eq!(application.curation_menu_at_cursor(), Some(0));
         assert!(!application.cursor_moved(Point { x: 141.0, y: 167.0 }, now));
+
+        let peer_screen = ViewportTransform::new(
+            application.physical_width,
+            application.physical_height,
+            application.interaction.viewport(),
+        )
+        .world_to_screen(Point {
+            x: 1_100.0,
+            y: 700.0,
+        });
+        assert!(application.cursor_moved(peer_screen, now + Duration::from_millis(1)));
+        assert_eq!(
+            application
+                .interaction
+                .active_event_position()
+                .map(|(event, _)| event.clone()),
+            Some(EventId("peer".into())),
+            "canvas hover outside the Curate surface must remain live"
+        );
     }
 
     #[test]

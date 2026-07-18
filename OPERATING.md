@@ -13,7 +13,10 @@ equivalent host runtime libraries; they do not install system packages.
 The canvas opens, edits, imports, undoes, and reopens saved graphs without
 Hermes, a provider, discovery services, or network access. Press `Ctrl+,` for
 Connections; `Ctrl+K` starts research only after readiness passes. Ordinary
-uninstall removes program files and preserves user research.
+uninstall removes program files and preserves user research. Hovered finding
+summaries grow to their content until bounded by the viewport; `Tab` focuses an
+overflowing summary, arrow keys and Page Up/Down scroll it, and `Esc` or `Tab`
+returns to the canvas.
 
 ## New-research prerequisites
 
@@ -60,7 +63,9 @@ Existing owned files are preserved; policy v2 is recorded separately. An
 unmarked `not-news` collision stops profile setup. Hermes `default` is neither
 read nor changed.
 
-Connections can remove each vault key and the SearXNG setting. “Complete erase”
+Each connection opens a local action surface for configure/replace/remove;
+removal is not a replacement with an empty value. Connections can delete each
+Not News vault key and the SearXNG setting. “Complete erase”
 requires typing `ERASE`, exclusive access against other Not News instances, and
 confirmed deletion of all three vault accounts before filesystem deletion. It
 then removes the graph and known migration backups, settings/scratch state, and
