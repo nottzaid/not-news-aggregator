@@ -2057,10 +2057,10 @@ impl StatusText {
             paragraph_style.set_text_align(TextAlign::Left);
             paragraph_style.set_text_direction(TextDirection::LTR);
             paragraph_style.set_text_style(&style);
-            if matches!(
-                status_style,
-                StatusStyle::Message | StatusStyle::ActivityMessage
-            ) {
+            if matches!(status_style, StatusStyle::Message) {
+                paragraph_style.set_max_lines(6);
+                paragraph_style.set_ellipsis("…");
+            } else if matches!(status_style, StatusStyle::ActivityMessage) {
                 paragraph_style.set_max_lines(3);
                 paragraph_style.set_ellipsis("…");
             }
@@ -2392,6 +2392,23 @@ mod tests {
                 .chunks_exact(4)
                 .all(|pixel| pixel == background)
         );
+    }
+
+    #[test]
+    fn desktop_status_preserves_the_complete_searxng_reachability_diagnostic() {
+        let message = "Research did not start; the offline canvas remains available. SearXNG endpoint is unreachable: error sending request for url (http://127.0.0.1:8889/search?q=not-news%20connectivity&format=json)";
+        let message_width = 420.0 - 82.0;
+        STATUS_TEXT.with(|resources| {
+            let mut resources = resources.borrow_mut();
+            let paragraph = resources.paragraph(message, message_width);
+            let lines = paragraph.get_line_metrics();
+            assert!(lines.len() <= 6, "status exceeded its bounded line budget");
+            assert_eq!(
+                lines.last().unwrap().end_excluding_whitespaces,
+                message.len(),
+                "ordinary readiness evidence was silently ellipsized"
+            );
+        });
     }
 
     #[test]

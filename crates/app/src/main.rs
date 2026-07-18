@@ -3223,7 +3223,8 @@ impl CanvasApplication {
             return self.interaction.retain_active();
         }
         if self.record_hold_deadline.is_some()
-            && self.chrome_at_cursor() != Some(ChromeControl::Record)
+            && (self.metadata_at_cursor(now)
+                || self.chrome_at_cursor() != Some(ChromeControl::Record))
         {
             self.record_hold_deadline = None;
         }
@@ -3243,10 +3244,12 @@ impl CanvasApplication {
             let changed = self.interaction.cursor_moved(point, &self.graph, now);
             self.stop_auto_follow_if_panning();
             changed
-        } else if self.activity_surface_at_cursor(now) || self.chrome_at_cursor().is_some() {
+        } else if self.activity_surface_at_cursor(now) {
             self.interaction.cursor_left(now)
         } else if self.metadata_at_cursor(now) {
             self.interaction.retain_active()
+        } else if self.chrome_at_cursor().is_some() {
+            self.interaction.cursor_left(now)
         } else {
             self.interaction.cursor_moved(point, &self.graph, now)
         }
@@ -3278,16 +3281,16 @@ impl CanvasApplication {
                 self.pointer_owner = PointerOwner::ActivitySurface;
                 return self.interaction.cursor_left(now);
             }
+            if self.metadata_at_cursor(now) {
+                self.pointer_owner = PointerOwner::MetadataSurface;
+                return self.interaction.retain_active();
+            }
             if let Some(control) = self.chrome_at_cursor() {
                 self.pointer_owner = PointerOwner::FixedChrome(control);
                 if control == ChromeControl::Record && self.voice.is_recording() {
                     self.record_hold_deadline = Some(now + Duration::from_millis(500));
                 }
                 return self.interaction.cursor_left(now);
-            }
-            if self.metadata_at_cursor(now) {
-                self.pointer_owner = PointerOwner::MetadataSurface;
-                return self.interaction.retain_active();
             }
             self.pointer_owner = PointerOwner::Canvas;
             return self.interaction.pointer_down(&self.graph, now);
@@ -3614,6 +3617,24 @@ impl CanvasApplication {
         state: &InteractionFrame,
         activity_progress: f64,
     ) {
+        if let Some(status) = self.status.as_deref() {
+            paint_status(
+                canvas,
+                width,
+                height,
+                scale_factor,
+                status,
+                self.research.is_some() || self.research_preflight.is_some(),
+            );
+        }
+        paint_fixed_chrome(
+            canvas,
+            width,
+            height,
+            scale_factor,
+            viewport.zoom,
+            self.record_orb_state(),
+        );
         if let Some(active) = state.expanded_event.as_ref() {
             let screen_position =
                 ViewportTransform::new(f64::from(width), f64::from(height), viewport)
@@ -3629,16 +3650,6 @@ impl CanvasApplication {
                 self.metadata_focus.as_ref() == Some(active),
             );
         }
-        if let Some(status) = self.status.as_deref() {
-            paint_status(
-                canvas,
-                width,
-                height,
-                scale_factor,
-                status,
-                self.research.is_some() || self.research_preflight.is_some(),
-            );
-        }
         if self.activity_visible() {
             paint_activity_drawer(
                 canvas,
@@ -3652,14 +3663,6 @@ impl CanvasApplication {
         }
         self.paint_composer(canvas, width, height, scale_factor);
         self.paint_curation_surface(canvas, width, height, scale_factor);
-        paint_fixed_chrome(
-            canvas,
-            width,
-            height,
-            scale_factor,
-            viewport.zoom,
-            self.record_orb_state(),
-        );
         self.paint_settings_surface(canvas, width, height, scale_factor);
     }
 
@@ -3820,19 +3823,19 @@ impl PlatformApplication for CanvasApplication {
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.settings.is_some() {
                     self.scroll_settings_menu(*delta)
-                } else if self.metadata_focus.is_some() || self.metadata_at_cursor(now) {
-                    self.scroll_metadata(*delta)
                 } else if matches!(self.curation, Some(CurationFlow::Menu { .. }))
                     && self.curation_menu_surface_at_cursor()
                     && self.curation_menu_can_scroll()
                 {
                     self.scroll_curation_menu(*delta)
+                } else if self.activity_surface_at_cursor(now) {
+                    false
+                } else if self.metadata_focus.is_some() || self.metadata_at_cursor(now) {
+                    self.scroll_metadata(*delta)
                 } else if matches!(self.curation, Some(CurationFlow::Menu { .. })) {
                     self.cursor.is_some_and(|cursor| {
                         self.interaction.scroll_at(scroll_pixels(*delta), cursor)
                     })
-                } else if self.activity_surface_at_cursor(now) {
-                    false
                 } else {
                     self.interaction.scroll(scroll_pixels(*delta))
                 }
@@ -4887,6 +4890,63 @@ mod app_tests {
             Some(&event_id),
             "focused reading must ignore canvas hover movement"
         );
+    }
+
+    #[test]
+    fn metadata_composited_over_fixed_chrome_also_owns_the_overlap() {
+        let event_id = EventId("active".into());
+        let mut graph = GraphSnapshot::default();
+        graph.events.insert(
+            event_id.clone(),
+            not_news_domain::ResearchEvent {
+                id: event_id.clone(),
+                title: "Long finding".into(),
+                date: "Jul 18, 2026".into(),
+                color: 0xff4c_9be8,
+                summary: "Metadata intentionally overlaps persistent chrome. ".repeat(80),
+                source_label: "Primary".into(),
+                artifacts: Vec::new(),
+                url: None,
+            },
+        );
+        graph.placements.insert(
+            event_id.clone(),
+            not_news_domain::Placement {
+                point: Point { x: 300.0, y: 200.0 },
+                pinned: true,
+            },
+        );
+        let mut application = CanvasApplication::with_state(None, graph, None, None, None, None);
+        application.interaction.resize(1_280, 800);
+        let transform = ViewportTransform::new(1_280.0, 800.0, application.interaction.viewport());
+        let node = transform.world_to_screen(Point { x: 300.0, y: 200.0 });
+        let opened_at = Instant::now();
+        assert!(application.cursor_moved(node, opened_at));
+        let settled_at = opened_at + Duration::from_millis(220);
+        assert_eq!(
+            application
+                .interaction
+                .frame(&application.graph, settled_at)
+                .expanded_event
+                .as_ref(),
+            Some(&event_id)
+        );
+
+        let overlap = Point {
+            x: 1_160.0,
+            y: 750.0,
+        };
+        application.cursor_moved(overlap, settled_at);
+        assert!(application.metadata_at_cursor(settled_at));
+        assert_eq!(application.chrome_at_cursor(), Some(ChromeControl::ZoomIn));
+        let zoom = application.interaction.viewport().zoom;
+        application.mouse_input(ElementState::Pressed, settled_at);
+        assert!(matches!(
+            application.pointer_owner,
+            PointerOwner::MetadataSurface
+        ));
+        application.mouse_input(ElementState::Released, settled_at);
+        assert!((application.interaction.viewport().zoom - zoom).abs() < f64::EPSILON);
     }
 
     #[test]
