@@ -7,17 +7,20 @@ use std::{
     collections::{HashSet, VecDeque},
     error::Error,
     ffi::OsString,
-    fs,
+    fs::{self, File, OpenOptions},
+    io,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
     time::Duration,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+use fs2::FileExt;
 use interaction::{CanvasInteraction, CanvasSubject, InteractionEffect, InteractionFrame};
 use not_news_agent::{
     AgentEvent, BridgeUpsert, ResearchHandle, ResearchLaunch, ResearchProcessEvent,
-    ResearchTermination, browse_is_available, build_research_prompt, hermes_is_available,
+    ResearchTermination, ResolvedEnvironment, browse_is_available, build_research_prompt,
+    check_hermes_compatibility, check_tool_capability, curl_is_available, hermes_is_available,
     open_hermes_dashboard,
 };
 use not_news_audio::{
@@ -43,10 +46,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 use settings::{
     CredentialState, EndpointState, browserbase_api_key, browserbase_credential_state,
-    delete_browserbase_api_key, delete_exa_api_key, delete_groq_api_key, exa_api_key,
-    exa_credential_state, groq_api_key, groq_credential_state, retire_backend_selector,
-    save_browserbase_api_key, save_exa_api_key, save_groq_api_key, save_searxng_url,
-    searxng_endpoint_state, searxng_url,
+    delete_browserbase_api_key, delete_exa_api_key, delete_groq_api_key, delete_searxng_url,
+    exa_api_key, exa_credential_state, groq_api_key, groq_credential_state,
+    retire_backend_selector, save_browserbase_api_key, save_exa_api_key, save_groq_api_key,
+    save_searxng_url, searxng_endpoint_state, searxng_url,
 };
 
 const MAX_RESEARCH_CHARS: usize = 4_096;
@@ -57,6 +60,8 @@ const MAX_CREDENTIAL_CHARS: usize = 4_096;
 const MAX_CREDENTIAL_BYTES: usize = 16_384;
 const CURATION_RELATIONSHIPS_PER_PAGE: usize = 7;
 const HERMES_INSTALL_URL: &str = "https://hermes-agent.nousresearch.com";
+const BROWSE_INSTALL_URL: &str = "https://browse.sh";
+const CURL_INSTALL_URL: &str = "https://curl.se/download.html";
 use not_news_renderer::{
     ChromeControl, CurationMenu, Motion, RecordOrbState, SceneAnimation, SceneState,
     active_metadata_scroll_max, hit_active_metadata, hit_activity_surface, hit_activity_toggle,
@@ -83,10 +88,90 @@ struct ActiveResearch {
     scratch_directory: PathBuf,
 }
 
-fn research_environment(data_directory: &Path) -> Result<Vec<(OsString, OsString)>, String> {
+struct ResearchPreflight {
+    question: String,
+    receiver: Receiver<Result<PreparedResearch, String>>,
+}
+
+struct PreparedResearch {
+    environment: ResolvedEnvironment,
+    evidence: String,
+}
+
+struct ApplicationLease {
+    file: Option<File>,
+    path: PathBuf,
+    remove_on_drop: bool,
+}
+
+impl ApplicationLease {
+    fn acquire(data_directory: &Path) -> io::Result<Self> {
+        let parent = data_directory.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let name = data_directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("not-news-canvas");
+        let path = parent.join(format!(".{name}.not-news-instance.lock"));
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let file = options.open(&path)?;
+        file.lock_shared()?;
+        Ok(Self {
+            file: Some(file),
+            path,
+            remove_on_drop: false,
+        })
+    }
+
+    fn require_exclusive(&mut self) -> io::Result<()> {
+        let file = self.file.as_ref().expect("application lease missing");
+        FileExt::unlock(file)?;
+        if let Err(error) = file.try_lock_exclusive() {
+            file.lock_shared()?;
+            return Err(io::Error::new(
+                error.kind(),
+                "another Not News instance is using this application state",
+            ));
+        }
+        Ok(())
+    }
+
+    fn remove_after_exit(&mut self) {
+        self.remove_on_drop = true;
+    }
+
+    fn restore_shared(&self) -> io::Result<()> {
+        let file = self.file.as_ref().expect("application lease missing");
+        FileExt::unlock(file)?;
+        file.lock_shared()
+    }
+}
+
+impl Drop for ApplicationLease {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = FileExt::unlock(&file);
+            drop(file);
+        }
+        if self.remove_on_drop {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn research_environment(data_directory: &Path) -> Result<ResolvedEnvironment, String> {
     let exa = exa_api_key()
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "EXA_API_KEY is required; store it in Connections (Ctrl+,)".to_owned())?;
+    if exa.len() < 8 {
+        return Err("The stored Exa key is too short to use or redact safely; replace it in Connections (Ctrl+,)".into());
+    }
     let searxng = searxng_url(data_directory)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| {
@@ -94,6 +179,7 @@ fn research_environment(data_directory: &Path) -> Result<Vec<(OsString, OsString
         })?;
     validate_searxng_endpoint(&searxng)?;
     let search_url = format!("{searxng}/search");
+    let mut secrets = vec![exa.clone()];
     let mut environment = vec![
         (OsString::from("EXA_API_KEY"), exa.into()),
         (OsString::from("SEARXNG_URL"), searxng.clone().into()),
@@ -104,9 +190,40 @@ fn research_environment(data_directory: &Path) -> Result<Vec<(OsString, OsString
         ),
     ];
     if let Some(browserbase) = browserbase_api_key().map_err(|error| error.to_string())? {
+        if browserbase.len() < 8 {
+            return Err(
+                "The stored Browserbase key is too short to use or redact safely; replace or remove it in Connections (Ctrl+,)"
+                    .into(),
+            );
+        }
+        secrets.push(browserbase.clone());
         environment.push((OsString::from("BROWSERBASE_API_KEY"), browserbase.into()));
     }
-    Ok(environment)
+    Ok(ResolvedEnvironment::new(environment, secrets))
+}
+
+fn prepare_research(
+    data_directory: &Path,
+    profile: &hermes_profile::InstalledProfile,
+) -> Result<PreparedResearch, String> {
+    let compatibility = check_hermes_compatibility(
+        &profile.root,
+        hermes_profile::PROFILE_ID,
+        profile.policy_version,
+    )
+    .map_err(|error| format!("Hermes compatibility is unproved: {error}"))?;
+    check_tool_capability("browse", &["--version"])
+        .map_err(|error| format!("Browse capability is unavailable: {error}"))?;
+    check_tool_capability("curl", &["--version"])
+        .map_err(|error| format!("SearXNG transport is unavailable: {error}"))?;
+    let environment = research_environment(data_directory)?;
+    Ok(PreparedResearch {
+        environment,
+        evidence: format!(
+            "{}; Browse and curl version commands passed; Exa was resolved from the Not News vault; SearXNG JSON capability passed. Provider authentication, Browse browser launch, and useful live results remain task evidence.",
+            compatibility.evidence
+        ),
+    })
 }
 
 fn validate_searxng_endpoint(searxng: &str) -> Result<(), String> {
@@ -192,6 +309,8 @@ enum SettingsFlow {
         groq: CredentialMenuState,
         searxng: EndpointState,
         hermes_available: bool,
+        browse_available: bool,
+        curl_available: bool,
         selected: usize,
     },
     Credential {
@@ -199,6 +318,9 @@ enum SettingsFlow {
         input: Zeroizing<String>,
     },
     SearxngEndpoint {
+        input: String,
+    },
+    EraseConfirmation {
         input: String,
     },
 }
@@ -235,6 +357,9 @@ enum VaultTaskResult {
     Removed {
         kind: CredentialKind,
         result: Result<(), String>,
+    },
+    EraseCredentials {
+        failures: Vec<String>,
     },
 }
 
@@ -274,9 +399,13 @@ impl CredentialKind {
 #[derive(Clone, Copy)]
 enum SettingsChoice {
     Hermes,
+    Browse,
+    Curl,
     Searxng,
     Credential(CredentialKind),
     RemoveCredential(CredentialKind),
+    RemoveSearxng,
+    EraseAll,
 }
 
 impl VoiceState {
@@ -321,6 +450,7 @@ struct CanvasApplication {
     physical_height: f64,
     scale_factor: f64,
     pointer_owner: PointerOwner,
+    application_lease: Option<ApplicationLease>,
     data_directory: PathBuf,
     research_directory: PathBuf,
     voice_directory: PathBuf,
@@ -331,9 +461,11 @@ struct CanvasApplication {
     curation: Option<CurationFlow>,
     curation_preedit: String,
     hermes_profile: Option<hermes_profile::InstalledProfile>,
+    hermes_root: Option<PathBuf>,
     settings: Option<SettingsFlow>,
     settings_preedit: Zeroizing<String>,
     vault_task: Option<Receiver<VaultTaskResult>>,
+    research_preflight: Option<ResearchPreflight>,
     research: Option<ActiveResearch>,
     research_messages: Vec<String>,
     generated_research_events: HashSet<not_news_domain::EventId>,
@@ -359,6 +491,14 @@ impl CanvasApplication {
         data_directory: Option<&Path>,
         hermes_root: Option<&Path>,
     ) -> Self {
+        let application_lease = match data_directory.map(ApplicationLease::acquire).transpose() {
+            Ok(lease) => lease,
+            Err(error) => {
+                return Self::unavailable(format!(
+                    "Application state could not be leased safely; writes are disabled: {error}"
+                ));
+            }
+        };
         match DurableGraphStore::open(database) {
             Ok(store) => {
                 let recovery = store.recover_interrupted_research();
@@ -400,12 +540,18 @@ impl CanvasApplication {
                 }
                 if status.is_none() && graph.events.is_empty() {
                     status = Some(
-                        "Canvas ready. Ctrl+K researches; right-click a finding curates; dropping a legacy graph.sqlite imports it."
+                        "Canvas ready offline. Ctrl+, opens Connections; Ctrl+K researches; right-click curates; dropping a legacy graph.sqlite imports it."
                             .into(),
                     );
                 }
-                let mut application =
-                    Self::with_state(Some(store), graph, status, data_directory, hermes_root);
+                let mut application = Self::with_state(
+                    Some(store),
+                    graph,
+                    status,
+                    data_directory,
+                    hermes_root,
+                    application_lease,
+                );
                 application.research_messages = recovered_activity;
                 application
             }
@@ -417,7 +563,14 @@ impl CanvasApplication {
     }
 
     fn unavailable(status: String) -> Self {
-        Self::with_state(None, GraphSnapshot::default(), Some(status), None, None)
+        Self::with_state(
+            None,
+            GraphSnapshot::default(),
+            Some(status),
+            None,
+            None,
+            None,
+        )
     }
 
     fn with_state(
@@ -426,6 +579,7 @@ impl CanvasApplication {
         status: Option<String>,
         data_directory: Option<&Path>,
         hermes_root: Option<&Path>,
+        application_lease: Option<ApplicationLease>,
     ) -> Self {
         let interaction = CanvasInteraction::new(resolved_positions(&graph));
         let profile_install = data_directory.zip(hermes_root).map(|(directory, root)| {
@@ -447,7 +601,7 @@ impl CanvasApplication {
             store,
             graph,
             interaction,
-            status: status.or(profile_error).or_else(|| {
+            status: profile_error.or(status).or_else(|| {
                 retired_setting.and_then(Result::err).map(|error| {
                     format!("Retired research-backend setting could not be removed: {error}")
                 })
@@ -463,6 +617,7 @@ impl CanvasApplication {
             physical_height: 800.0,
             scale_factor: 1.0,
             pointer_owner: PointerOwner::None,
+            application_lease,
             data_directory: data_directory.to_path_buf(),
             research_directory: data_directory.join("research-scratch"),
             voice_directory,
@@ -473,9 +628,11 @@ impl CanvasApplication {
             curation: None,
             curation_preedit: String::new(),
             hermes_profile,
+            hermes_root: hermes_root.map(Path::to_path_buf),
             settings: None,
             settings_preedit: Zeroizing::new(String::new()),
             vault_task: None,
+            research_preflight: None,
             research: None,
             research_messages: Vec::new(),
             generated_research_events: HashSet::new(),
@@ -516,6 +673,8 @@ impl CanvasApplication {
             groq,
             searxng,
             hermes_available,
+            browse_available,
+            curl_available,
             ..
         }) = self.settings.as_ref()
         else {
@@ -527,9 +686,9 @@ impl CanvasApplication {
                 if self.hermes_profile.is_none() {
                     "HERMES PROFILE  ·  INSTALLATION FAILED".into()
                 } else if *hermes_available {
-                    "HERMES INFERENCE  ·  OPEN SETTINGS".into()
+                    "HERMES  ·  EXECUTABLE PRESENT  ·  ACP CHECK ON RESEARCH".into()
                 } else {
-                    "HERMES INFERENCE  ·  INSTALL HERMES".into()
+                    "HERMES  ·  MISSING  ·  OPEN INSTALL GUIDE".into()
                 },
             ),
             (
@@ -547,6 +706,22 @@ impl CanvasApplication {
             (
                 SettingsChoice::Credential(CredentialKind::Browserbase),
                 format!("BROWSERBASE CLOUD  ·  {}", browserbase.label()),
+            ),
+            (
+                SettingsChoice::Browse,
+                if *browse_available {
+                    "BROWSE  ·  EXECUTABLE PRESENT  ·  BROWSER UNVERIFIED".into()
+                } else {
+                    "BROWSE  ·  MISSING  ·  OPEN INSTALL GUIDE".into()
+                },
+            ),
+            (
+                SettingsChoice::Curl,
+                if *curl_available {
+                    "CURL  ·  EXECUTABLE PRESENT  ·  VERSION CHECK ON RESEARCH".into()
+                } else {
+                    "CURL  ·  MISSING  ·  OPEN INSTALL GUIDE".into()
+                },
             ),
         ];
         if matches!(exa, CredentialMenuState::Ready(CredentialState::Vault)) {
@@ -570,6 +745,16 @@ impl CanvasApplication {
                 "REMOVE BROWSERBASE VAULT KEY".into(),
             ));
         }
+        if matches!(searxng, EndpointState::Saved) {
+            choices.push((
+                SettingsChoice::RemoveSearxng,
+                "REMOVE SEARXNG APP SETTING".into(),
+            ));
+        }
+        choices.push((
+            SettingsChoice::EraseAll,
+            "COMPLETE ERASE  ·  GRAPH, SETTINGS, VAULT, OWNED PROFILE".into(),
+        ));
         choices
     }
 
@@ -586,6 +771,8 @@ impl CanvasApplication {
             groq: CredentialMenuState::Resolving,
             searxng: searxng_endpoint_state(&self.data_directory),
             hermes_available: hermes_is_available(),
+            browse_available: browse_is_available(),
+            curl_available: curl_is_available(),
             selected: 0,
         });
         self.settings_preedit.zeroize();
@@ -597,9 +784,12 @@ impl CanvasApplication {
     fn begin_settings_refresh(&mut self) {
         let selected = match self.settings.as_ref() {
             Some(SettingsFlow::Menu { selected, .. }) => *selected,
-            Some(SettingsFlow::Credential { .. } | SettingsFlow::SearxngEndpoint { .. }) | None => {
-                0
-            }
+            Some(
+                SettingsFlow::Credential { .. }
+                | SettingsFlow::SearxngEndpoint { .. }
+                | SettingsFlow::EraseConfirmation { .. },
+            )
+            | None => 0,
         };
         self.settings = Some(SettingsFlow::Menu {
             browserbase: CredentialMenuState::Resolving,
@@ -607,6 +797,8 @@ impl CanvasApplication {
             groq: CredentialMenuState::Resolving,
             searxng: searxng_endpoint_state(&self.data_directory),
             hermes_available: hermes_is_available(),
+            browse_available: browse_is_available(),
+            curl_available: curl_is_available(),
             selected,
         });
         let last = self.settings_choices().len().saturating_sub(1);
@@ -691,7 +883,10 @@ impl CanvasApplication {
                         "{} API key stored in the operating-system credential vault.",
                         kind.label()
                     ),
-                    Err(error) => format!("{} key was not stored: {error}", kind.label()),
+                    Err(error) => format!(
+                        "{} key storage could not be confirmed: {error}",
+                        kind.label()
+                    ),
                 });
                 if matches!(self.settings, Some(SettingsFlow::Menu { .. })) {
                     self.begin_settings_refresh();
@@ -701,10 +896,24 @@ impl CanvasApplication {
                 self.status = Some(match result {
                     Ok(()) => format!("{} key removed from the OS vault.", kind.label()),
                     Err(error) => {
-                        format!("{} vault key was not removed: {error}", kind.label())
+                        format!(
+                            "{} vault-key removal could not be confirmed: {error}",
+                            kind.label()
+                        )
                     }
                 });
                 if matches!(self.settings, Some(SettingsFlow::Menu { .. })) {
+                    self.begin_settings_refresh();
+                }
+            }
+            VaultTaskResult::EraseCredentials { failures } => {
+                if failures.is_empty() {
+                    self.finish_complete_erase();
+                } else {
+                    self.status = Some(format!(
+                        "Complete erase stopped before filesystem deletion because vault removal was incomplete or unconfirmed: {}. Earlier vault deletions may already have completed.",
+                        failures.join("; ")
+                    ));
                     self.begin_settings_refresh();
                 }
             }
@@ -715,7 +924,9 @@ impl CanvasApplication {
     fn settings_selection(&self) -> Option<usize> {
         match self.settings.as_ref()? {
             SettingsFlow::Menu { selected, .. } => Some(*selected),
-            SettingsFlow::Credential { .. } | SettingsFlow::SearxngEndpoint { .. } => None,
+            SettingsFlow::Credential { .. }
+            | SettingsFlow::SearxngEndpoint { .. }
+            | SettingsFlow::EraseConfirmation { .. } => None,
         }
     }
 
@@ -775,15 +986,40 @@ impl CanvasApplication {
                 };
                 Some(self.activate_settings_row(row))
             }
-            SettingsFlow::Credential { .. } | SettingsFlow::SearxngEndpoint { .. } => Some(true),
+            SettingsFlow::Credential { .. }
+            | SettingsFlow::SearxngEndpoint { .. }
+            | SettingsFlow::EraseConfirmation { .. } => Some(true),
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn activate_settings_row(&mut self, row: usize) -> bool {
         let Some((choice, _)) = self.settings_choices().get(row).cloned() else {
             return false;
         };
         match choice {
+            SettingsChoice::Browse => {
+                if browse_is_available() {
+                    self.status = Some(
+                        "Browse executable is present. Research rechecks `browse --version`; browser launch, required skills, and local or Browserbase execution remain unverified until use."
+                            .into(),
+                    );
+                } else {
+                    self.open_recovery_guide("Browse", BROWSE_INSTALL_URL);
+                }
+                self.begin_settings_refresh();
+            }
+            SettingsChoice::Curl => {
+                if curl_is_available() {
+                    self.status = Some(
+                        "curl executable is present. Research rechecks `curl --version`; the configured SearXNG JSON endpoint is validated separately."
+                            .into(),
+                    );
+                } else {
+                    self.open_recovery_guide("curl", CURL_INSTALL_URL);
+                }
+                self.begin_settings_refresh();
+            }
             SettingsChoice::Searxng => {
                 let input = searxng_url(&self.data_directory)
                     .ok()
@@ -811,7 +1047,7 @@ impl CanvasApplication {
                     match open_hermes_dashboard(&profile.root, hermes_profile::PROFILE_ID) {
                         Ok(()) => {
                             self.status = Some(
-                                "Hermes owns provider, model, OAuth, and API-key configuration in the opened dashboard."
+                                "Hermes dashboard launch requested; continued operation is unconfirmed. If no browser opens, run `hermes -p not-news dashboard`. Hermes alone owns provider and model configuration."
                                     .into(),
                             );
                         }
@@ -822,10 +1058,9 @@ impl CanvasApplication {
                 } else if self.hermes_profile.is_some() {
                     match open_external_url(HERMES_INSTALL_URL) {
                         Ok(()) => {
-                            self.status = Some(
-                                "Opened the Hermes installation guide; return here after Hermes is on PATH."
-                                    .into(),
-                            );
+                            self.status = Some(format!(
+                                "Hermes guide launch requested but not confirmed. If no browser opens, copy {HERMES_INSTALL_URL}"
+                            ));
                         }
                         Err(error) => {
                             self.status =
@@ -859,8 +1094,43 @@ impl CanvasApplication {
                     VaultTaskResult::Removed { kind, result }
                 });
             }
+            SettingsChoice::RemoveSearxng => {
+                self.status = Some(match delete_searxng_url(&self.data_directory) {
+                    Ok(()) => "SearXNG application setting removed.".into(),
+                    Err(error) => {
+                        format!("SearXNG-setting removal could not be confirmed: {error}")
+                    }
+                });
+                self.begin_settings_refresh();
+            }
+            SettingsChoice::EraseAll => {
+                if self.research.is_some()
+                    || self.research_preflight.is_some()
+                    || !self.voice.is_idle()
+                    || self.vault_task.is_some()
+                {
+                    self.status = Some(
+                        "Complete erase requires idle research, voice, and credential workers. Cancel them, then retry."
+                            .into(),
+                    );
+                } else {
+                    self.settings = Some(SettingsFlow::EraseConfirmation {
+                        input: String::new(),
+                    });
+                    self.settings_preedit.zeroize();
+                }
+            }
         }
         true
+    }
+
+    fn open_recovery_guide(&mut self, label: &str, url: &str) {
+        self.status = Some(match open_external_url(url) {
+            Ok(()) => format!(
+                "{label} guide launch requested but not confirmed. If no browser opens, copy {url}"
+            ),
+            Err(error) => format!("{label} guide did not open: {error}. Copy {url}"),
+        });
     }
 
     fn commit_searxng_endpoint(&mut self) -> bool {
@@ -903,6 +1173,8 @@ impl CanvasApplication {
             groq: CredentialMenuState::Resolving,
             searxng: searxng_endpoint_state(&self.data_directory),
             hermes_available: hermes_is_available(),
+            browse_available: browse_is_available(),
+            curl_available: curl_is_available(),
             selected: 1,
         });
         if let Some(state) = self.credential_menu_mut(kind) {
@@ -921,6 +1193,107 @@ impl CanvasApplication {
         true
     }
 
+    fn commit_complete_erase(&mut self) -> bool {
+        let Some(SettingsFlow::EraseConfirmation { input }) = self.settings.as_ref() else {
+            return false;
+        };
+        if input.trim() != "ERASE" {
+            self.status = Some(
+                "Complete erase not started: type ERASE exactly, or press Escape to keep all state."
+                    .into(),
+            );
+            return true;
+        }
+        let Some(lease) = self.application_lease.as_mut() else {
+            self.status = Some(
+                "Complete erase is unavailable because application-state ownership was not established."
+                    .into(),
+            );
+            return true;
+        };
+        if let Err(error) = lease.require_exclusive() {
+            self.status = Some(format!(
+                "Complete erase did not start: {error}. Close every other Not News instance and retry."
+            ));
+            return true;
+        }
+        self.settings = Some(SettingsFlow::EraseConfirmation {
+            input: "ERASE".into(),
+        });
+        self.settings_preedit.zeroize();
+        self.status = Some(
+            "Complete erase is removing the three Not News vault accounts; filesystem state remains until those outcomes are confirmed."
+                .into(),
+        );
+        self.start_vault_task(|| {
+            let mut failures = Vec::new();
+            for (label, result) in [
+                ("Exa", delete_exa_api_key()),
+                ("Browserbase", delete_browserbase_api_key()),
+                ("Groq", delete_groq_api_key()),
+            ] {
+                if let Err(error) = result {
+                    failures.push(format!("{label}: {error}"));
+                }
+            }
+            VaultTaskResult::EraseCredentials { failures }
+        });
+        true
+    }
+
+    fn finish_complete_erase(&mut self) {
+        let result = (|| -> Result<(), String> {
+            let root = self
+                .hermes_root
+                .as_deref()
+                .ok_or_else(|| "Hermes-root ownership was not established".to_owned())?;
+            hermes_profile::erase_owned(root)
+                .map_err(|error| format!("owned Hermes profile: {error}"))?;
+
+            self.speech.cancel_session();
+            let store = self
+                .store
+                .take()
+                .ok_or_else(|| "graph store is unavailable".to_owned())?;
+            let database = store.path().to_path_buf();
+            drop(store);
+            if self.data_directory.exists() {
+                fs::remove_dir_all(&self.data_directory)
+                    .map_err(|error| format!("application data: {error}"))?;
+            }
+            if !database.starts_with(&self.data_directory) {
+                remove_external_graph_family(&database)
+                    .map_err(|error| format!("external graph family: {error}"))?;
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                if let Some(lease) = self.application_lease.as_mut() {
+                    lease.remove_after_exit();
+                }
+                self.graph = GraphSnapshot::default();
+                self.settings = None;
+                self.status = Some(
+                    "Complete erase finished: graph, app settings and scratch state, Not News vault accounts, and the exactly owned Hermes profile were removed. Exiting now."
+                        .into(),
+                );
+                self.exit_after_present = true;
+            }
+            Err(error) => {
+                if let Some(lease) = self.application_lease.as_ref() {
+                    let _ = lease.restore_shared();
+                }
+                self.status = Some(format!(
+                    "Complete erase stopped after vault deletion; local deletion is partial or unconfirmed: {error}. No unrelated Hermes profile was selected for deletion."
+                ));
+                self.begin_settings_refresh();
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn settings_keyboard_input(
         &mut self,
         event: &not_news_platform::winit::event::KeyEvent,
@@ -928,11 +1301,12 @@ impl CanvasApplication {
         let menu = matches!(self.settings, Some(SettingsFlow::Menu { .. }));
         let key_input = matches!(self.settings, Some(SettingsFlow::Credential { .. }));
         let endpoint_input = matches!(self.settings, Some(SettingsFlow::SearxngEndpoint { .. }));
-        if !menu && !key_input && !endpoint_input {
+        let erase_input = matches!(self.settings, Some(SettingsFlow::EraseConfirmation { .. }));
+        if !menu && !key_input && !endpoint_input && !erase_input {
             return None;
         }
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            if key_input || endpoint_input {
+            if key_input || endpoint_input || erase_input {
                 self.begin_settings_refresh();
             } else {
                 self.settings = None;
@@ -966,20 +1340,25 @@ impl CanvasApplication {
         {
             return Some(self.activate_settings_row(row));
         }
-        if !key_input && !endpoint_input {
+        if !key_input && !endpoint_input && !erase_input {
             return Some(false);
         }
         if matches!(event.logical_key, Key::Named(NamedKey::Enter)) {
             return Some(if key_input {
                 self.commit_credential()
-            } else {
+            } else if endpoint_input {
                 self.commit_searxng_endpoint()
+            } else {
+                self.commit_complete_erase()
             });
         }
         if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) {
             match self.settings.as_mut() {
                 Some(SettingsFlow::Credential { input, .. }) => remove_last_grapheme(input),
-                Some(SettingsFlow::SearxngEndpoint { input }) => remove_last_grapheme(input),
+                Some(
+                    SettingsFlow::SearxngEndpoint { input }
+                    | SettingsFlow::EraseConfirmation { input },
+                ) => remove_last_grapheme(input),
                 _ => {}
             }
             return Some(true);
@@ -1006,7 +1385,10 @@ impl CanvasApplication {
         {
             match self.settings.as_mut() {
                 Some(SettingsFlow::Credential { input, .. }) => input.zeroize(),
-                Some(SettingsFlow::SearxngEndpoint { input }) => input.clear(),
+                Some(
+                    SettingsFlow::SearxngEndpoint { input }
+                    | SettingsFlow::EraseConfirmation { input },
+                ) => input.clear(),
                 _ => {}
             }
             self.settings_preedit.zeroize();
@@ -1025,7 +1407,9 @@ impl CanvasApplication {
     fn append_settings_text(&mut self, text: &str) {
         match self.settings.as_mut() {
             Some(SettingsFlow::Credential { input, .. }) => append_bounded_secret(input, text),
-            Some(SettingsFlow::SearxngEndpoint { input }) => append_bounded_text(input, text),
+            Some(
+                SettingsFlow::SearxngEndpoint { input } | SettingsFlow::EraseConfirmation { input },
+            ) => append_bounded_text(input, text),
             _ => {}
         }
     }
@@ -1453,7 +1837,10 @@ impl CanvasApplication {
                     self.status = Some(format!("Source could not be opened: {error}"));
                     return true;
                 }
-                false
+                self.status = Some(format!(
+                    "Source launch requested but not confirmed. If no browser opens, copy {url}"
+                ));
+                true
             }
         }
     }
@@ -1595,6 +1982,7 @@ impl CanvasApplication {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn keyboard_input(
         &mut self,
         event: &not_news_platform::winit::event::KeyEvent,
@@ -1655,6 +2043,13 @@ impl CanvasApplication {
             return false;
         }
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) && self.cancel_voice() {
+            return true;
+        }
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+            && self.research_preflight.take().is_some()
+        {
+            self.status =
+                Some("Research readiness cancelled; no research session was created.".into());
             return true;
         }
         if matches!(event.logical_key, Key::Named(NamedKey::Escape))
@@ -1725,7 +2120,11 @@ impl CanvasApplication {
     fn ime_input(&mut self, ime: &Ime) -> bool {
         if matches!(
             self.settings,
-            Some(SettingsFlow::Credential { .. } | SettingsFlow::SearxngEndpoint { .. })
+            Some(
+                SettingsFlow::Credential { .. }
+                    | SettingsFlow::SearxngEndpoint { .. }
+                    | SettingsFlow::EraseConfirmation { .. }
+            )
         ) {
             match ime {
                 Ime::Preedit(text, _) => {
@@ -1813,7 +2212,7 @@ impl CanvasApplication {
     }
 
     fn clear_canvas(&mut self) -> bool {
-        if self.research.is_some() || !self.voice.is_idle() {
+        if self.research.is_some() || self.research_preflight.is_some() || !self.voice.is_idle() {
             self.status = Some(
                 "Canvas cannot be cleared while recording, transcribing, or researching; press Escape to cancel first."
                     .into(),
@@ -1857,7 +2256,7 @@ impl CanvasApplication {
     }
 
     fn import_legacy(&mut self, source: &Path) -> bool {
-        if self.research.is_some() || !self.voice.is_idle() {
+        if self.research.is_some() || self.research_preflight.is_some() || !self.voice.is_idle() {
             self.status = Some(
                 "Legacy import is unavailable while recording, transcribing, or researching."
                     .into(),
@@ -1906,7 +2305,7 @@ impl CanvasApplication {
     }
 
     fn toggle_voice(&mut self) -> bool {
-        if self.research.is_some() {
+        if self.research.is_some() || self.research_preflight.is_some() {
             self.status = Some("Research is already running; press Escape to cancel it.".into());
             return true;
         }
@@ -2017,14 +2416,87 @@ impl CanvasApplication {
             self.status = Some("Research question cannot be empty.".into());
             return true;
         }
-        if self.research.is_some() {
-            self.status = Some("Research is already running; press Escape to cancel it.".into());
+        if self.research.is_some() || self.research_preflight.is_some() {
+            self.status = Some(
+                "Research readiness or execution is already active; press Escape to cancel it."
+                    .into(),
+            );
             return true;
         }
         if self.store.is_none() {
             self.status = Some("Research is unavailable because the graph did not open.".into());
             return true;
         }
+        let Some(profile) = self.hermes_profile.as_ref() else {
+            self.status = Some(
+                "Research unavailable: the Not News Hermes profile is unavailable; open Connections for the startup diagnostic."
+                    .into(),
+            );
+            return true;
+        };
+        let profile = hermes_profile::InstalledProfile {
+            root: profile.root.clone(),
+            home: profile.home.clone(),
+            policy_version: profile.policy_version,
+        };
+        let data_directory = self.data_directory.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        if let Err(error) = std::thread::Builder::new()
+            .name("research-readiness".into())
+            .spawn(move || {
+                let _ = sender.send(prepare_research(&data_directory, &profile));
+            })
+        {
+            self.status = Some(format!(
+                "Research readiness worker could not start: {error}"
+            ));
+            return true;
+        }
+        self.research_preflight = Some(ResearchPreflight {
+            question: question.to_owned(),
+            receiver,
+        });
+        self.status = Some(
+            "Checking Hermes ACP/profile compatibility, Browse, curl, the Not News vault, and SearXNG before creating a research session…"
+                .into(),
+        );
+        true
+    }
+
+    fn drain_research_preflight(&mut self) -> bool {
+        let Some(preflight) = self.research_preflight.as_ref() else {
+            return false;
+        };
+        let result = match preflight.receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => {
+                self.research_preflight = None;
+                self.status = Some("Research readiness worker stopped without evidence.".into());
+                return true;
+            }
+        };
+        let question = self
+            .research_preflight
+            .take()
+            .expect("preflight existence checked")
+            .question;
+        match result {
+            Ok(prepared) => self.begin_research(&question, prepared),
+            Err(error) => {
+                self.status = Some(format!(
+                    "Research did not start; the offline canvas remains available. {error}"
+                ));
+            }
+        }
+        true
+    }
+
+    fn begin_research(&mut self, question: &str, prepared: PreparedResearch) {
+        let PreparedResearch {
+            environment,
+            evidence,
+        } = prepared;
         let session_id = self.next_operation_id("research");
         if let Err(error) = self
             .store
@@ -2033,11 +2505,10 @@ impl CanvasApplication {
             .start_research_session(&session_id, question)
         {
             self.status = Some(format!("Research session could not start: {error}"));
-            return true;
+            return;
         }
         let prompt = build_research_prompt(question, &self.graph);
         let scratch_directory = self.research_directory.join(&session_id);
-        let data_directory = self.data_directory.clone();
         let Some(profile) = self.hermes_profile.as_ref() else {
             let error = "the application-owned Hermes profile is unavailable";
             let _ = self
@@ -2046,7 +2517,7 @@ impl CanvasApplication {
                 .expect("store existence checked")
                 .finish_research_session(&session_id, 0, ResearchSessionStatus::Error, error);
             self.status = Some(format!("Research unavailable: {error}."));
-            return true;
+            return;
         };
         let launch = match ResearchLaunch::for_hermes_profile(
             &prompt,
@@ -2054,9 +2525,7 @@ impl CanvasApplication {
             &profile.root,
             hermes_profile::PROFILE_ID,
         ) {
-            Ok(launch) => {
-                launch.with_environment_loader(move || research_environment(&data_directory))
-            }
+            Ok(launch) => launch.with_resolved_environment(environment),
             Err(error) => {
                 let _ = self
                     .store
@@ -2069,7 +2538,7 @@ impl CanvasApplication {
                         &error.to_string(),
                     );
                 self.status = Some(format!("Research backend unavailable: {error}"));
-                return true;
+                return;
             }
         };
         match launch.spawn() {
@@ -2087,7 +2556,14 @@ impl CanvasApplication {
                 self.generated_research_events.clear();
                 self.auto_follow_research = true;
                 self.set_activity_open(true, Instant::now());
-                self.status = Some("Starting research…".into());
+                self.status = Some(
+                    "Readiness passed at the declared layers; starting research. Hermes provider authentication and live discovery remain task evidence."
+                        .into(),
+                );
+                self.record_research_message(
+                    ResearchOutputKind::Message,
+                    &format!("Preflight evidence: {evidence}"),
+                );
             }
             Err(error) => {
                 let _ = self
@@ -2103,7 +2579,6 @@ impl CanvasApplication {
                 self.status = Some(format!("Research supervisor could not start: {error}"));
             }
         }
-        true
     }
 
     fn drain_research(&mut self) -> bool {
@@ -2455,7 +2930,9 @@ impl CanvasApplication {
     }
 
     fn activity_visible(&self) -> bool {
-        self.research.is_some() || !self.research_messages.is_empty()
+        self.research.is_some()
+            || self.research_preflight.is_some()
+            || !self.research_messages.is_empty()
     }
 
     fn activity_progress(&mut self, now: Instant) -> f64 {
@@ -2677,7 +3154,7 @@ impl CanvasApplication {
     }
 
     fn record_orb_state(&self) -> RecordOrbState {
-        if self.research.is_some() || !self.voice.is_idle() {
+        if self.research.is_some() || self.research_preflight.is_some() || !self.voice.is_idle() {
             RecordOrbState::Busy
         } else {
             RecordOrbState::Idle
@@ -2702,6 +3179,17 @@ impl CanvasApplication {
                 width,
                 height,
                 scale_factor,
+                input,
+                &self.settings_preedit,
+            );
+        } else if let Some(SettingsFlow::EraseConfirmation { input }) = self.settings.as_ref() {
+            paint_curation_prompt(
+                canvas,
+                width,
+                height,
+                scale_factor,
+                "COMPLETE ERASE",
+                "TYPE ERASE  ·  ENTER DELETE OWNED STATE  ·  ESC KEEP EVERYTHING",
                 input,
                 &self.settings_preedit,
             );
@@ -2768,7 +3256,7 @@ impl CanvasApplication {
                 height,
                 scale_factor,
                 status,
-                self.research.is_some(),
+                self.research.is_some() || self.research_preflight.is_some(),
             );
         }
         if self.activity_visible() {
@@ -2778,7 +3266,7 @@ impl CanvasApplication {
                 height,
                 scale_factor,
                 &self.research_messages,
-                self.research.is_some(),
+                self.research.is_some() || self.research_preflight.is_some(),
                 scale_scalar(activity_progress),
             );
         }
@@ -2969,6 +3457,7 @@ impl PlatformApplication for CanvasApplication {
         self.resolve_record_hold(frame.now);
         self.drain_voice();
         self.drain_speech();
+        self.drain_research_preflight();
         self.drain_research();
         self.drain_vault_task();
         let activity_progress = self.activity_progress(frame.now);
@@ -2989,6 +3478,10 @@ impl PlatformApplication for CanvasApplication {
             .research
             .as_ref()
             .map(|_| frame.now + Duration::from_millis(33));
+        let preflight_deadline = self
+            .research_preflight
+            .as_ref()
+            .map(|_| frame.now + Duration::from_millis(100));
         let voice_deadline = (!self.voice.is_idle()).then(|| frame.now + Duration::from_millis(33));
         let speech_deadline = self
             .speech
@@ -3004,6 +3497,7 @@ impl PlatformApplication for CanvasApplication {
         interaction_deadline
             .into_iter()
             .chain(research_deadline)
+            .chain(preflight_deadline)
             .chain(voice_deadline)
             .chain(speech_deadline)
             .chain(self.record_hold_deadline)
@@ -3017,7 +3511,11 @@ impl PlatformApplication for CanvasApplication {
         self.research_input.is_some()
             || matches!(
                 self.settings,
-                Some(SettingsFlow::Credential { .. } | SettingsFlow::SearxngEndpoint { .. })
+                Some(
+                    SettingsFlow::Credential { .. }
+                        | SettingsFlow::SearxngEndpoint { .. }
+                        | SettingsFlow::EraseConfirmation { .. }
+                )
             )
             || matches!(
                 self.curation,
@@ -3051,6 +3549,37 @@ impl PlatformApplication for PerformanceApplication {
             FrameSchedule::RedrawAt(frame.now)
         }
     }
+}
+
+fn remove_external_graph_family(database: &Path) -> io::Result<()> {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut path = database.as_os_str().to_owned();
+        path.push(suffix);
+        match fs::remove_file(PathBuf::from(path)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let Some(parent) = database.parent() else {
+        return Ok(());
+    };
+    let Some(stem) = database.file_stem().and_then(|stem| stem.to_str()) else {
+        return Ok(());
+    };
+    let prefix = format!("{stem}.pre-rust-v");
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if entry.file_type()?.is_file()
+            && name.starts_with(&prefix)
+            && (name.ends_with(".sqlite") || name.ends_with(".sqlite.tmp"))
+        {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -3201,16 +3730,19 @@ fn run_capability_check(root: &Path) -> Result<(), Box<dyn Error>> {
         "commit": option_env!("NOT_NEWS_BUILD_COMMIT").unwrap_or("development"),
         "research": {
             "runtime": "hermes",
-            "runtime_ready": hermes,
-            "hermes": if hermes { "available" } else { "missing" },
+            "executable": if hermes { "present" } else { "missing" },
+            "compatibility": "deferred-to-exact-pre-research-acp-check",
+            "provider": "owned-by-hermes-unverified",
             "profile": profile.home,
-            "profile_policy": "installed",
+            "profile_policy": "installed-v2",
             "remediation": "Install Hermes, then open Connections to configure any provider Hermes supports."
         },
         "discovery": {
             "exa_configuration": "deferred-os-vault-probe",
             "searxng_endpoint": if searxng.is_some() { "configured" } else { "missing" },
-            "browse_cli": if browse_is_available() { "available" } else { "missing" },
+            "browse_executable": if browse_is_available() { "present" } else { "missing" },
+            "browse_end_to_end": "unverified",
+            "curl_executable": if curl_is_available() { "present" } else { "missing" },
             "browserbase_configuration": "optional-deferred-os-vault-probe",
             "os_vault_probe": "deferred-to-connections-to-avoid-an-unattended-unlock-prompt",
             "remediation": "Open Connections (Ctrl+,) to store an Exa key and SearXNG endpoint; install Browse CLI for local browser retrieval."
@@ -3669,6 +4201,8 @@ mod app_tests {
             groq: CredentialMenuState::Ready(CredentialState::Missing),
             searxng: EndpointState::Missing,
             hermes_available: true,
+            browse_available: true,
+            curl_available: true,
             selected: 0,
         });
         let labels = application
@@ -3676,11 +4210,14 @@ mod app_tests {
             .into_iter()
             .map(|(_, label)| label)
             .collect::<Vec<_>>();
-        assert!(labels[0].starts_with("HERMES INFERENCE"));
+        assert!(labels[0].starts_with("HERMES  ·  EXECUTABLE PRESENT"));
         assert!(labels[1].starts_with("EXA DISCOVERY"));
         assert!(labels[2].starts_with("SEARXNG FRONTIER"));
         assert!(labels[3].starts_with("GROQ VOICE"));
         assert!(labels[4].starts_with("BROWSERBASE CLOUD"));
+        assert!(labels[5].starts_with("BROWSE  ·  EXECUTABLE PRESENT"));
+        assert!(labels[6].starts_with("CURL  ·  EXECUTABLE PRESENT"));
+        assert!(labels.last().unwrap().starts_with("COMPLETE ERASE"));
         assert!(labels.iter().all(|label| !label.contains("BACKEND")
             && !label.contains("OPENCODE")
             && !label.contains("CLOSE")));
@@ -3702,6 +4239,8 @@ mod app_tests {
             groq: CredentialMenuState::Saving,
             searxng: EndpointState::Missing,
             hermes_available: true,
+            browse_available: true,
+            curl_available: true,
             selected: 1,
         });
         let labels = application
@@ -3735,6 +4274,58 @@ mod app_tests {
             application.status.as_deref(),
             Some("Groq API key stored in the operating-system credential vault.")
         );
+    }
+
+    #[test]
+    fn complete_erase_requires_single_instance_and_preserves_unrelated_hermes_state() {
+        let directory = TempDir::new().unwrap();
+        let data = directory.path().join("app-data");
+        let external = directory.path().join("external");
+        let database = external.join("graph.sqlite");
+        let hermes = directory.path().join("hermes");
+        fs::create_dir_all(&external).unwrap();
+        fs::create_dir_all(hermes.join("profiles/default")).unwrap();
+        fs::write(hermes.join("profiles/default/sentinel"), "keep").unwrap();
+
+        let mut application =
+            CanvasApplication::load_with_directories(&database, Some(&data), Some(&hermes));
+        fs::write(
+            external.join("graph.pre-rust-v4-1-1.sqlite"),
+            "owned migration backup",
+        )
+        .unwrap();
+        let second = ApplicationLease::acquire(&data).unwrap();
+        assert!(
+            application
+                .application_lease
+                .as_mut()
+                .unwrap()
+                .require_exclusive()
+                .is_err()
+        );
+        drop(second);
+        application
+            .application_lease
+            .as_mut()
+            .unwrap()
+            .require_exclusive()
+            .unwrap();
+        let lease_path = application.application_lease.as_ref().unwrap().path.clone();
+
+        application.finish_complete_erase();
+
+        assert!(application.exit_after_present);
+        assert!(!data.exists());
+        assert!(!database.exists());
+        assert!(!external.join("graph.pre-rust-v4-1-1.sqlite").exists());
+        assert!(!hermes.join("profiles/not-news").exists());
+        assert_eq!(
+            fs::read_to_string(hermes.join("profiles/default/sentinel")).unwrap(),
+            "keep"
+        );
+        assert!(lease_path.exists());
+        drop(application);
+        assert!(!lease_path.exists());
     }
 
     #[test]
@@ -3833,7 +4424,7 @@ mod app_tests {
                 },
             );
         }
-        let application = CanvasApplication::with_state(None, graph, None, None, None);
+        let application = CanvasApplication::with_state(None, graph, None, None, None, None);
         let subject = CanvasSubject {
             event: hub,
             artifact_index: None,
@@ -4130,6 +4721,7 @@ printf '%s\n' 'AI_NEWS_EVENT: {"type":"session.done","data":{"message":"Complete
         application.hermes_profile = Some(hermes_profile::InstalledProfile {
             home: PathBuf::from(&root).join("profiles/not-news"),
             root: PathBuf::from(root),
+            policy_version: hermes_profile::POLICY_VERSION,
         });
         application.speech = SpeechWorker::disabled();
 

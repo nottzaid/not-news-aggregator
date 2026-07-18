@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
-    fs,
+    fs::{self, OpenOptions},
+    io,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -583,6 +584,7 @@ impl DurableGraphStore {
 }
 
 pub(crate) fn open_connection(path: &Path) -> Result<Connection, StoreError> {
+    create_private_file_if_missing(path)?;
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -591,6 +593,21 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection, StoreError> {
     )?;
     connection.busy_timeout(Duration::from_secs(2))?;
     Ok(connection)
+}
+
+fn create_private_file_if_missing(path: &Path) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(file) => file.sync_all(),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn migrate(connection: &mut Connection, path: &Path) -> Result<Option<PathBuf>, StoreError> {
@@ -798,6 +815,7 @@ fn ensure_verified_backup(source_path: &Path, backup: &Path) -> Result<(), Store
     if temporary.exists() {
         fs::remove_file(&temporary)?;
     }
+    create_private_file_if_missing(&temporary)?;
     let source = Connection::open_with_flags(source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     source.backup(rusqlite::MAIN_DB, &temporary, None)?;
     verify_backup(&temporary)?;
@@ -1774,6 +1792,14 @@ mod tests {
             SCHEMA_VERSION
         );
         assert!(table_exists(&connection, "mutation_log").unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]

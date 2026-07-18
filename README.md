@@ -12,8 +12,8 @@ mutation. Hermes is the sole research runtime, but never the canvas runtime: a
 saved graph remains open and editable without Hermes, network access, or an
 inference provider.
 
-Download the current unsigned Windows/Linux build from
-[Not News 0.2.1](https://github.com/muradkant/not-news-aggregator/releases/tag/rust-v0.2.1).
+Download the current unsigned Windows/Linux prerelease from
+[Not News 0.3.0](https://github.com/muradkant/not-news-aggregator/releases/tag/rust-v0.3.0).
 
 ## Operate the canvas
 
@@ -43,51 +43,59 @@ not-news-app --database /path/to/new.sqlite --import-legacy /path/to/old.sqlite
 
 ## Configure research
 
-The release does not install Hermes, Browse, SearXNG, or a model provider. A
-saved canvas needs none of them. The implemented launch gate for new research
-requires:
+The release does not install Hermes, Browse, SearXNG, `curl`, or a model
+provider. A saved canvas needs none of them. New research requires:
 
-- [Hermes](https://hermes-agent.nousresearch.com) on `PATH`, with a provider and
-  model configured through Hermes;
+- [Hermes](https://hermes-agent.nousresearch.com/docs/) on `PATH`, with a
+  provider and model configured through Hermes;
+- [Browse](https://browse.sh/) and `curl` on `PATH`;
 - an Exa key entered through Connections and stored under Not News's own account
   in Windows Credential Manager or Linux Secret Service;
-- a SearXNG base URL entered through Connections and stored in plaintext
-  application settings.
+- a SearXNG base URL entered through Connections and stored in private-mode
+  plaintext application settings.
 
-The tracked research policy additionally requires Browse CLI for dynamic or
-extraction-resistant pages and invokes `curl` for SearXNG queries. The launch
-gate enforces neither executable, and this release installs neither Browse,
-Browse skills, nor `curl`.
+Before creating a durable research session, the app runs `hermes -p not-news
+acp --check`, `browse --version`, `curl --version`, bounded vault resolution,
+and a bounded SearXNG JSON search-contract request. This proves executable,
+profile routing, ACP installation, configuration, and endpoint-shape layers;
+Hermes provider authentication, Exa authorization/quota, useful results,
+Browse skills/browser launch, Browserbase, and streamed task behavior remain
+use-time evidence. Browse is required apparatus but invoked only when browser
+retrieval is needed. Linux Hermes 0.18.2 is one observed compatible point, not a
+version corridor; native Windows Hermes research remains unproved.
 
-Browserbase is an optional Browse execution surface. Groq is optional and serves
-question transcription, not Hermes inference. Re-entering an Exa, Browserbase,
-or Groq key replaces that Not News vault entry; the corresponding removal row
-deletes it. Not News neither discovers nor copies credentials from other apps.
-On Linux the release does not install a Secret Service provider: KWallet or
-GNOME Keyring must already expose one, and first access may prompt for setup or
-unlock. SearXNG has no equivalent removal row; a later valid URL overwrites it.
+Browserbase is Browse's optional cloud surface. Groq is optional question
+transcription, not Hermes inference. Re-entering an Exa, Browserbase, or Groq
+key replaces that Not News vault entry; removal rows delete those entries and
+the SearXNG setting. Not News neither discovers nor copies those inputs from the
+ambient environment or other apps. On Linux the release does not install a
+Secret Service provider: KWallet or GNOME Keyring must already expose one, and
+first access may prompt for setup or unlock. Vault work has a five-second
+application deadline; timeout means the result is unconfirmed because the OS
+operation may finish later. No plaintext credential fallback exists.
 
 Spoken research notes are separate from Groq transcription. They use Kokoro
 configuration inherited by the Rust application and a discovered local WAV
 player; neither is configurable in Connections, bundled, or probed end-to-end
 before the first note.
 
-First launch creates missing files for Hermes profile `not-news` beside, without
-reading or selecting, `default`. It does so even when Hermes is absent. Existing
-profile policy is not generally upgraded: files already present remain intact,
-although the owned `config.yaml` terminal passthrough list gains required Not
-News variable names. Connections opens Hermes's dashboard with `not-news`
-selected; the app does not install Hermes or configure its provider.
+First launch transactionally creates a marker-owned Hermes profile `not-news`
+beside, without reading or selecting, `default`; Hermes may be absent. Locked,
+same-directory staging prevents simultaneous launches from exposing a partial
+profile. Existing owned files remain intact; policy v2 is recorded separately
+and enforces profile-local terminal home at runtime. An unmarked `not-news`
+collision is rejected. Connections requests Hermes's dashboard with the named
+profile; delegated browser opening remains unconfirmed and a command fallback
+is shown. The app neither installs Hermes nor configures inference.
 
-Research inherits process plumbing such as `PATH`, locale, TLS, and proxy
-variables, then receives only the Exa, SearXNG, and optional Browserbase values
-resolved by Not News. Redirected home directories prevent accidental reuse of
-ordinary user configuration; they are not an operating-system sandbox. Hermes
-runs with its ACP tool authority, including terminal and filesystem tools, while
-a prompt asks it to remain inside the session scratch directory. Those injected
-keys are visible to Hermes and its tools; the prompt forbids disclosure, but the
-present output filter does not guarantee redaction of vault-loaded values. Read
-[HERMES.md](HERMES.md) before treating that request as a security boundary.
+Research inherits bounded process plumbing such as `PATH`, locale, TLS, and
+proxy variables, then receives only the Exa, SearXNG, and optional Browserbase
+values resolved through Connections. Home/config/data/cache roots are redirected
+below the profile to prevent accidental ordinary-home credential reuse. This is
+configuration provenance, not an OS sandbox: trusted Hermes tools retain user
+authority and see injected values. Exact, percent-, base64-, and hex-encoded
+echoes are redacted before app-controlled display and SQLite persistence;
+transformed exfiltration remains possible. Read [HERMES.md](HERMES.md).
 
 ## Install a release
 
@@ -96,9 +104,11 @@ Each release contains:
 - Linux: desktop-integrated `.deb`, relocatable AppImage, and `tar.xz`;
 - Windows: current-user NSIS installer and relocatable `.zip`.
 
-No payload requires Rust, Flutter, Python, Clang, or a source checkout. Release
-attachments include SHA-256 sums, source/build identity, dependency and license
-inventories, and renderer results. CI executes each portable form, exercises
+No payload requires Rust, Flutter, Python, Clang, or a source checkout. Each
+installed and portable form contains `OPERATING.md`, `README.md`, and
+`HERMES.md`; AppImages downloaded through a browser may require `chmod +x`.
+Release attachments include SHA-256 sums, source/build identity, dependency and
+license inventories, and renderer results. CI executes each portable form, exercises
 window presentation plus a disposable SQLite import/mutation/reopen sequence,
 and checks package installation, reinstallation, removal, and survival of a
 per-user marker. Those checks do not authenticate Hermes, query Exa or SearXNG,
@@ -107,6 +117,13 @@ the Linux window evidence runs under X11/Xvfb. The authenticated
 Hermes-to-canvas and live-vault tests remain opt-in. Unsigned previews may
 trigger Windows reputation warnings; a self-signed certificate would not
 satisfy the stable-release signing gate.
+
+Ordinary uninstall preserves graph, settings, vault entries, and owned Hermes
+history. Connections exposes a separately confirmed complete erase: after all
+other instances close and the user types `ERASE`, it confirms deletion of all
+Not News vault accounts, then removes application state, known graph migration
+backups, and only an exactly marker-owned Hermes profile. Vault and filesystem
+stores cannot form one transaction, so partial/unconfirmed failure is reported.
 
 ## Build and verify
 

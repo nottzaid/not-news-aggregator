@@ -1,5 +1,6 @@
 //! Bounded external-agent integration.
 
+mod compatibility;
 mod prompt;
 mod runner;
 
@@ -8,11 +9,15 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+pub use compatibility::{
+    HermesCompatibility, HermesCompatibilityError, ToolCapabilityError, check_hermes_compatibility,
+    check_tool_capability,
+};
 pub use prompt::build_research_prompt;
 pub use runner::{
     HermesDashboardError, OutputProtocol, ProcessLimits, ResearchBackend, ResearchHandle,
-    ResearchLaunch, ResearchProcessEvent, ResearchTermination, browse_is_available,
-    hermes_is_available, open_hermes_dashboard,
+    ResearchLaunch, ResearchProcessEvent, ResearchTermination, ResolvedEnvironment,
+    browse_is_available, curl_is_available, hermes_is_available, open_hermes_dashboard,
 };
 
 pub const EVENT_PREFIX: &str = "AI_NEWS_EVENT:";

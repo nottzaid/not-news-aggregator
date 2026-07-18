@@ -1,6 +1,6 @@
 [package]
 name = "not-news-platform"
-version = "0.2.1"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 
@@ -16,6 +16,7 @@ winit.workspace = true
 
 [dev-dependencies]
 not-news-renderer = { path = "../renderer" }
+tempfile.workspace = true
 
 [lints.rust]
 unsafe_code = "warn"

@@ -16,6 +16,8 @@ use std::{
 use command_group::{CommandGroup, GroupChild};
 use serde_json::json;
 
+use crate::{create_private_dir_all, write_private_file};
+
 const DEFAULT_KOKORO_ENDPOINT: &str = "http://127.0.0.1:8890";
 const MAX_SYNTHESIZED_BYTES: u64 = 32 * 1_024 * 1_024;
 const QUEUE_CAPACITY: usize = 2;
@@ -371,7 +373,7 @@ fn run_request(
     if !config.note_max_age.is_zero() && request.queued_at.elapsed() > config.note_max_age {
         return SpeechEvent::Stale;
     }
-    if let Err(error) = fs::create_dir_all(&config.scratch_directory) {
+    if let Err(error) = create_private_dir_all(&config.scratch_directory) {
         return SpeechEvent::Failed(format!("voice scratch directory is unavailable: {error}"));
     }
     let audio_path = config.scratch_directory.join(format!(
@@ -506,7 +508,7 @@ async fn synthesize(
             "Kokoro returned an invalid WAV response".into(),
         ));
     }
-    fs::write(output, bytes).map_err(|error| {
+    write_private_file(output, &bytes).map_err(|error| {
         SynthesisError::Failed(format!("Kokoro audio could not be staged: {error}"))
     })
 }

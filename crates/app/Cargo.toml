@@ -1,11 +1,12 @@
 [package]
 name = "not-news-app"
-version = "0.2.1"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
 arboard.workspace = true
+fs2.workspace = true
 keyring.workspace = true
 not-news-agent = { path = "../agent" }
 not-news-audio = { path = "../audio" }

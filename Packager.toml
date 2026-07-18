@@ -1,6 +1,6 @@
 name = "not-news-app"
 productName = "Not News"
-version = "0.2.1"
+version = "0.3.0"
 identifier = "io.github.muradkant.not-news"
 description = "A durable native research canvas for findings, sources, and explicit relationships."
 longDescription = "Not News turns questions into a spatially unbounded, durable graph of findings, exact sources, and explicit relationships. Moving knowledge never invents meaning; research, curation, undo, migration, and recovery remain transactional."
@@ -17,6 +17,9 @@ icons = [
   "assets/icon/not-news.ico",
 ]
 resources = [
+  { src = "README.md", target = "README.md" },
+  { src = "HERMES.md", target = "HERMES.md" },
+  { src = "OPERATING.md", target = "OPERATING.md" },
   { src = "assets/fonts/manrope/OFL.txt", target = "licenses/Manrope-OFL.txt" },
   { src = "assets/fonts/jetbrainsmono/OFL.txt", target = "licenses/JetBrains-Mono-OFL.txt" },
 ]
@@ -33,12 +36,17 @@ packageName = "not-news"
 section = "science"
 priority = "optional"
 depends = [
+  "libc6",
+  "libgcc-s1",
+  "libstdc++6",
   "libasound2",
   "libfontconfig1",
   "libfreetype6",
   "libgl1",
   "libx11-6",
   "libxkbcommon0",
+  "libxkbcommon-x11-0",
+  "libwayland-client0",
 ]
 
 [appimage]

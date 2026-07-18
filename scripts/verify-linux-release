@@ -65,6 +65,9 @@ cmp assets/fonts/manrope/OFL.txt \
   "$scratch/appimage-payload/squashfs-root/usr/lib/not-news-app/licenses/Manrope-OFL.txt"
 cmp assets/fonts/jetbrainsmono/OFL.txt \
   "$scratch/appimage-payload/squashfs-root/usr/lib/not-news-app/licenses/JetBrains-Mono-OFL.txt"
+for guide in README.md HERMES.md OPERATING.md; do
+  cmp "$guide" "$scratch/appimage-payload/squashfs-root/usr/lib/not-news-app/$guide"
+done
 appimage_auto=$(APPIMAGE_EXTRACT_AND_RUN=1 present \
   "$scratch/relocated-not-news.AppImage" \
   --release-self-check "$scratch/appimage-check")
@@ -85,12 +88,14 @@ appimage_capabilities=$(EXA_API_KEY=must-be-ignored \
 printf '%s\n' "$appimage_capabilities"
 jq -e --arg commit "${expected_commit:0:12}" \
    '.capability_check == "pass" and .commit == $commit and
-   .research.runtime == "hermes" and .research.profile_policy == "installed" and
-   (.research.runtime_ready | type == "boolean") and
+   .research.runtime == "hermes" and .research.profile_policy == "installed-v2" and
+   (.research.executable == "present" or .research.executable == "missing") and
+   .research.compatibility == "deferred-to-exact-pre-research-acp-check" and
    (.research | has("selected") | not) and (.research | has("opencode") | not) and
    .discovery.exa_configuration == "deferred-os-vault-probe" and
    .discovery.searxng_endpoint == "missing" and
-   (.discovery.browse_cli | type == "string") and
+   (.discovery.browse_executable == "present" or .discovery.browse_executable == "missing") and
+   (.discovery.curl_executable == "present" or .discovery.curl_executable == "missing") and
    .discovery.browserbase_configuration == "optional-deferred-os-vault-probe" and
    .transcription.configuration == "deferred-os-vault-probe" and
    (.transcription.os_vault_probe | type == "string") and
@@ -114,6 +119,9 @@ cmp assets/fonts/manrope/OFL.txt \
   "$scratch/deb/usr/lib/not-news-app/licenses/Manrope-OFL.txt"
 cmp assets/fonts/jetbrainsmono/OFL.txt \
   "$scratch/deb/usr/lib/not-news-app/licenses/JetBrains-Mono-OFL.txt"
+for guide in README.md HERMES.md OPERATING.md; do
+  cmp "$guide" "$scratch/deb/usr/lib/not-news-app/$guide"
+done
 deb_auto=$(present \
   "$scratch/deb/usr/bin/not-news-app" \
   --release-self-check "$scratch/deb-check")
@@ -128,6 +136,9 @@ cmp assets/fonts/manrope/OFL.txt \
   "$scratch/archive/not-news_${version}_linux-x86_64/licenses/Manrope-OFL.txt"
 cmp assets/fonts/jetbrainsmono/OFL.txt \
   "$scratch/archive/not-news_${version}_linux-x86_64/licenses/JetBrains-Mono-OFL.txt"
+for guide in README.md HERMES.md OPERATING.md; do
+  cmp "$guide" "$scratch/archive/not-news_${version}_linux-x86_64/$guide"
+done
 archive_auto=$(present "$portable" --release-self-check "$scratch/archive-check")
 printf '%s\n' "$archive_auto"
 assert_self_check "$archive_auto" auto

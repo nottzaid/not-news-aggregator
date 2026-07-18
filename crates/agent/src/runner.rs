@@ -14,9 +14,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{Engine as _, engine::general_purpose};
 use command_group::{CommandGroup, GroupChild};
 use serde_json::{Value, json};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::{AgentEvent, AgentProtocolError, parse_output_line};
 
@@ -60,13 +62,98 @@ pub struct ResearchLaunch {
     environment: Vec<(OsString, OsString)>,
     inherit_environment: bool,
     environment_loader: Option<EnvironmentLoader>,
+    secret_filter: SecretFilter,
     protocol: OutputProtocol,
     acp_prompt: Option<String>,
     limits: ProcessLimits,
 }
 
-type EnvironmentLoader =
-    Box<dyn FnOnce() -> Result<Vec<(OsString, OsString)>, String> + Send + 'static>;
+type EnvironmentLoader = Box<dyn FnOnce() -> Result<ResolvedEnvironment, String> + Send + 'static>;
+
+pub struct ResolvedEnvironment {
+    variables: Vec<(OsString, OsString)>,
+    secrets: Vec<String>,
+}
+
+impl ResolvedEnvironment {
+    pub fn new(
+        variables: Vec<(OsString, OsString)>,
+        secrets: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            variables,
+            secrets: secrets.into_iter().collect(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SecretFilter {
+    patterns: Zeroizing<Vec<String>>,
+}
+
+impl SecretFilter {
+    fn extend(&mut self, secrets: impl IntoIterator<Item = String>) {
+        for secret in secrets {
+            if secret.len() < 8 {
+                continue;
+            }
+            let bytes = secret.as_bytes();
+            let encoded = [
+                general_purpose::STANDARD.encode(bytes),
+                general_purpose::STANDARD_NO_PAD.encode(bytes),
+                general_purpose::URL_SAFE.encode(bytes),
+                general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+                percent_encode(bytes),
+                hex_encode(bytes, false),
+                hex_encode(bytes, true),
+            ];
+            self.patterns.extend(encoded);
+            self.patterns.push(secret);
+        }
+        self.patterns
+            .sort_by_key(|value| std::cmp::Reverse(value.len()));
+        self.patterns.dedup();
+    }
+
+    fn sanitize(&self, text: &str) -> String {
+        self.patterns
+            .iter()
+            .fold(text.to_owned(), |output, pattern| {
+                output.replace(pattern, "<redacted>")
+            })
+    }
+
+    fn sanitize_bounded(&self, text: &str, max_chars: usize) -> String {
+        redact_ambient(&self.sanitize(text), max_chars)
+    }
+}
+
+fn percent_encode(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 3);
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            output.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(output, "%{byte:02X}");
+        }
+    }
+    output
+}
+
+fn hex_encode(bytes: &[u8], uppercase: bool) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        if uppercase {
+            let _ = write!(output, "{byte:02X}");
+        } else {
+            let _ = write!(output, "{byte:02x}");
+        }
+    }
+    output
+}
 
 #[derive(Debug, Error)]
 pub enum ResearchLaunchError {
@@ -98,6 +185,10 @@ pub fn hermes_is_available() -> bool {
 
 pub fn browse_is_available() -> bool {
     find_on_path("browse").is_some()
+}
+
+pub fn curl_is_available() -> bool {
+    find_on_path("curl").is_some()
 }
 
 /// Starts Hermes's own provider/model/credential dashboard. Not News never
@@ -158,7 +249,7 @@ impl ResearchLaunch {
         }
         let program = find_on_path("hermes").ok_or(ResearchLaunchError::MissingHermes)?;
         let scratch_directory = scratch_directory.into();
-        fs::create_dir_all(&scratch_directory).map_err(ResearchLaunchError::Scratch)?;
+        create_private_dir_all(&scratch_directory).map_err(ResearchLaunchError::Scratch)?;
         let hermes_root = hermes_root.into();
         let isolated_home = hermes_root.join("profiles").join(profile_id).join("home");
         prepare_isolated_home(&isolated_home).map_err(ResearchLaunchError::IsolatedHome)?;
@@ -188,6 +279,7 @@ impl ResearchLaunch {
             environment: Vec::new(),
             inherit_environment: true,
             environment_loader: None,
+            secret_filter: SecretFilter::default(),
             protocol,
             acp_prompt: None,
             limits,
@@ -204,11 +296,25 @@ impl ResearchLaunch {
     ) -> Self {
         let max_turns = env::var_os("HERMES_MAX_TURNS").unwrap_or_else(|| "12".into());
         let mut environment = isolated_runtime_environment(isolated_home);
+        let mut secret_filter = SecretFilter::default();
+        secret_filter.extend(
+            environment
+                .iter()
+                .filter(|(name, _)| {
+                    name.to_str()
+                        .is_some_and(|name| name.to_ascii_uppercase().contains("PROXY"))
+                })
+                .map(|(_, value)| value.to_string_lossy().into_owned()),
+        );
         environment.extend([
             (OsString::from("HERMES_HOME"), hermes_root.into_os_string()),
             (OsString::from("HERMES_MAX_ITERATIONS"), max_turns),
             (OsString::from("HERMES_YOLO_MODE"), "1".into()),
             (OsString::from("HERMES_ACCEPT_HOOKS"), "1".into()),
+            // Current Hermes otherwise restores the account HOME for host
+            // terminal and execute_code subprocesses. Not News inputs must
+            // originate in Connections, so its child tools stay profile-local.
+            (OsString::from("TERMINAL_HOME_MODE"), "profile".into()),
         ]);
         Self {
             backend: ResearchBackend::Hermes,
@@ -218,6 +324,7 @@ impl ResearchLaunch {
             environment,
             inherit_environment: false,
             environment_loader: None,
+            secret_filter,
             protocol: OutputProtocol::HermesAcp,
             acp_prompt: Some(prompt.to_owned()),
             limits: ProcessLimits {
@@ -236,9 +343,16 @@ impl ResearchLaunch {
     #[must_use]
     pub fn with_environment_loader(
         mut self,
-        loader: impl FnOnce() -> Result<Vec<(OsString, OsString)>, String> + Send + 'static,
+        loader: impl FnOnce() -> Result<ResolvedEnvironment, String> + Send + 'static,
     ) -> Self {
         self.environment_loader = Some(Box::new(loader));
+        self
+    }
+
+    #[must_use]
+    pub fn with_resolved_environment(mut self, environment: ResolvedEnvironment) -> Self {
+        self.secret_filter.extend(environment.secrets);
+        self.environment.extend(environment.variables);
         self
     }
 
@@ -259,7 +373,7 @@ impl ResearchLaunch {
                 let mut launch = self;
                 if let Some(loader) = launch.environment_loader.take() {
                     match loader() {
-                        Ok(environment) => launch.environment.extend(environment),
+                        Ok(environment) => launch = launch.with_resolved_environment(environment),
                         Err(error) => {
                             let _ = sender.send(ResearchProcessEvent::Finished(
                                 ResearchTermination::IoFailure(format!(
@@ -279,20 +393,43 @@ impl ResearchLaunch {
     }
 }
 
-fn prepare_isolated_home(home: &Path) -> io::Result<()> {
-    fs::create_dir_all(home)?;
+pub(crate) fn prepare_isolated_home(home: &Path) -> io::Result<()> {
+    create_private_dir_all(home)?;
     #[cfg(target_os = "linux")]
     for directory in ["config", "data", "state", "cache"] {
-        fs::create_dir_all(home.join(".xdg").join(directory))?;
+        create_private_dir_all(&home.join(".xdg").join(directory))?;
     }
     #[cfg(target_os = "windows")]
     for directory in ["AppData/Roaming", "AppData/Local", "Temp"] {
-        fs::create_dir_all(home.join(directory))?;
+        create_private_dir_all(&home.join(directory))?;
     }
     Ok(())
 }
 
-fn isolated_runtime_environment(home: &Path) -> Vec<(OsString, OsString)> {
+fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        create_private_dir_all(parent)?;
+    }
+    match fs::create_dir(path) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn isolated_runtime_environment(home: &Path) -> Vec<(OsString, OsString)> {
     let mut environment = env::vars_os()
         .filter(|(name, _)| inherited_runtime_variable(name))
         .collect::<Vec<_>>();
@@ -499,13 +636,14 @@ impl ProtocolState {
         &mut self,
         line: &str,
         sender: &Sender<ResearchProcessEvent>,
+        filter: &SecretFilter,
     ) -> Result<(), String> {
         match self {
             Self::Lines => {
-                dispatch_agent_text(line, sender);
+                dispatch_agent_text(line, sender, filter);
                 Ok(())
             }
-            Self::Acp(state) => state.dispatch(line, sender),
+            Self::Acp(state) => state.dispatch(line, sender, filter),
         }
     }
 
@@ -535,11 +673,12 @@ impl AcpProtocol {
         &mut self,
         line: &str,
         sender: &Sender<ResearchProcessEvent>,
+        filter: &SecretFilter,
     ) -> Result<(), String> {
         let message: Value = serde_json::from_str(line)
             .map_err(|error| format!("Hermes ACP emitted invalid JSON: {error}"))?;
         if let Some(method) = message.get("method").and_then(Value::as_str) {
-            return self.dispatch_method(method, &message, sender);
+            return self.dispatch_method(method, &message, sender, filter);
         }
         let Some(id) = message.get("id").and_then(Value::as_u64) else {
             return Ok(());
@@ -551,7 +690,7 @@ impl AcpProtocol {
                 .unwrap_or("unknown JSON-RPC error");
             return Err(format!(
                 "Hermes ACP request {id} failed: {}",
-                redact(detail, 500)
+                filter.sanitize_bounded(detail, 500)
             ));
         }
         match id {
@@ -581,7 +720,7 @@ impl AcpProtocol {
                 }))
             }
             3 => {
-                self.flush_message(sender);
+                self.flush_message(sender, filter);
                 self.completed = true;
                 Ok(())
             }
@@ -594,9 +733,10 @@ impl AcpProtocol {
         method: &str,
         message: &Value,
         sender: &Sender<ResearchProcessEvent>,
+        filter: &SecretFilter,
     ) -> Result<(), String> {
         match method {
-            "session/update" => self.dispatch_update(message, sender),
+            "session/update" => self.dispatch_update(message, sender, filter),
             "session/request_permission" => {
                 if let Some(id) = message.get("id") {
                     self.send(&json!({
@@ -615,6 +755,7 @@ impl AcpProtocol {
         &mut self,
         message: &Value,
         sender: &Sender<ResearchProcessEvent>,
+        filter: &SecretFilter,
     ) -> Result<(), String> {
         let Some(update) = message.pointer("/params/update") else {
             return Ok(());
@@ -622,7 +763,7 @@ impl AcpProtocol {
         match update.get("sessionUpdate").and_then(Value::as_str) {
             Some("agent_message_chunk") => {
                 if let Some(text) = update.pointer("/content/text").and_then(Value::as_str) {
-                    self.push_message(text, sender)?;
+                    self.push_message(text, sender, filter)?;
                 }
             }
             Some("tool_call") => {
@@ -630,7 +771,11 @@ impl AcpProtocol {
                     .get("title")
                     .and_then(Value::as_str)
                     .unwrap_or("using a research tool");
-                dispatch_agent_text(&format!("Hermes · {}", redact(title, 240)), sender);
+                dispatch_agent_text(
+                    &format!("Hermes · {}", filter.sanitize_bounded(title, 240)),
+                    sender,
+                    filter,
+                );
             }
             Some("plan") => {
                 if let Some(content) = update
@@ -644,7 +789,11 @@ impl AcpProtocol {
                     .and_then(|entry| entry.get("content"))
                     .and_then(Value::as_str)
                 {
-                    dispatch_agent_text(&format!("Hermes plan · {}", redact(content, 240)), sender);
+                    dispatch_agent_text(
+                        &format!("Hermes plan · {}", filter.sanitize_bounded(content, 240)),
+                        sender,
+                        filter,
+                    );
                 }
             }
             _ => {}
@@ -656,6 +805,7 @@ impl AcpProtocol {
         &mut self,
         text: &str,
         sender: &Sender<ResearchProcessEvent>,
+        filter: &SecretFilter,
     ) -> Result<(), String> {
         self.message_buffer.push_str(text);
         if self.message_buffer.len() > self.max_line_bytes {
@@ -667,17 +817,17 @@ impl AcpProtocol {
             line.truncate(newline);
             let line = line.trim_end_matches('\r').trim();
             if !line.is_empty() {
-                dispatch_agent_text(line, sender);
+                dispatch_agent_text(line, sender, filter);
             }
         }
         Ok(())
     }
 
-    fn flush_message(&mut self, sender: &Sender<ResearchProcessEvent>) {
+    fn flush_message(&mut self, sender: &Sender<ResearchProcessEvent>, filter: &SecretFilter) {
         let line = std::mem::take(&mut self.message_buffer);
         let line = line.trim();
         if !line.is_empty() {
-            dispatch_agent_text(line, sender);
+            dispatch_agent_text(line, sender, filter);
         }
     }
 }
@@ -703,6 +853,7 @@ impl Drop for ChildGuard {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn supervise(
     launch: &ResearchLaunch,
     cancelled: &AtomicBool,
@@ -743,9 +894,14 @@ fn supervise(
                     terminate_with(&mut child, sender, ResearchTermination::OutputLimit);
                     return;
                 }
-                if let Err(error) =
-                    dispatch_line(stream, &bytes, &mut protocol, sender, &mut diagnostics)
-                {
+                if let Err(error) = dispatch_line(
+                    stream,
+                    &bytes,
+                    &mut protocol,
+                    sender,
+                    &mut diagnostics,
+                    &launch.secret_filter,
+                ) {
                     terminate_with(&mut child, sender, ResearchTermination::IoFailure(error));
                     return;
                 }
@@ -779,6 +935,7 @@ fn supervise(
                     &mut diagnostics,
                     &mut line_count,
                     launch.limits.max_lines,
+                    &launch.secret_filter,
                 );
                 let termination = drain_failure.unwrap_or_else(|| {
                     if protocol.is_acp() && !protocol.completed() {
@@ -989,6 +1146,7 @@ fn dispatch_line(
     protocol: &mut ProtocolState,
     sender: &Sender<ResearchProcessEvent>,
     diagnostics: &mut u8,
+    filter: &SecretFilter,
 ) -> Result<(), String> {
     let line = String::from_utf8_lossy(bytes);
     let line = clean_terminal_line(&line);
@@ -1002,16 +1160,19 @@ fn dispatch_line(
                 || line.to_ascii_lowercase().contains("traceback");
             if report && *diagnostics < 4 {
                 *diagnostics += 1;
-                let _ = sender.send(ResearchProcessEvent::Diagnostic(redact(&line, 500)));
+                let _ = sender.send(ResearchProcessEvent::Diagnostic(
+                    filter.sanitize_bounded(&line, 500),
+                ));
             }
             Ok(())
         }
-        StreamKind::Stdout => protocol.dispatch_stdout(&line, sender),
+        StreamKind::Stdout => protocol.dispatch_stdout(&line, sender, filter),
     }
 }
 
-fn dispatch_agent_text(line: &str, sender: &Sender<ResearchProcessEvent>) {
-    match parse_output_line(line) {
+fn dispatch_agent_text(line: &str, sender: &Sender<ResearchProcessEvent>, filter: &SecretFilter) {
+    let line = filter.sanitize(line);
+    match parse_output_line(&line) {
         Ok(output) => {
             let _ = sender.send(ResearchProcessEvent::Output(output));
         }
@@ -1032,6 +1193,7 @@ fn drain_after_exit(
     diagnostics: &mut u8,
     line_count: &mut u64,
     max_lines: u64,
+    filter: &SecretFilter,
 ) -> Option<ResearchTermination> {
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
@@ -1045,7 +1207,9 @@ fn drain_after_exit(
                 if truncated || *line_count > max_lines {
                     return Some(ResearchTermination::OutputLimit);
                 }
-                if let Err(error) = dispatch_line(stream, &bytes, protocol, sender, diagnostics) {
+                if let Err(error) =
+                    dispatch_line(stream, &bytes, protocol, sender, diagnostics, filter)
+                {
                     return Some(ResearchTermination::IoFailure(error));
                 }
             }
@@ -1080,7 +1244,7 @@ fn clean_terminal_line(line: &str) -> String {
     clean.trim().to_owned()
 }
 
-fn redact(text: &str, max_chars: usize) -> String {
+fn redact_ambient(text: &str, max_chars: usize) -> String {
     let mut redacted = text.to_owned();
     for (key, value) in env::vars() {
         let upper = key.to_ascii_uppercase();
@@ -1100,9 +1264,9 @@ fn redact(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn find_on_path(executable: &str) -> Option<PathBuf> {
+pub(crate) fn find_on_path(executable: &str) -> Option<PathBuf> {
     let path = Path::new(executable);
-    if path.components().count() > 1 && path.is_file() {
+    if path.components().count() > 1 && is_executable_candidate(path) {
         return Some(path.to_owned());
     }
     let paths = env::var_os("PATH")?;
@@ -1111,11 +1275,32 @@ fn find_on_path(executable: &str) -> Option<PathBuf> {
         let candidates = windows_candidates(&directory, executable);
         #[cfg(not(target_os = "windows"))]
         let candidates = vec![directory.join(executable)];
-        if let Some(candidate) = candidates.into_iter().find(|candidate| candidate.is_file()) {
+        if let Some(candidate) = candidates
+            .into_iter()
+            .find(|candidate| is_executable_candidate(candidate))
+        {
             return Some(candidate);
         }
     }
     None
+}
+
+fn is_executable_candidate(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(windows)]
+    {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -1189,6 +1374,8 @@ mod tests {
         let (write_sender, write_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         let mut protocol = ProtocolState::new(&launch, Some(write_sender)).unwrap();
+        let mut filter = SecretFilter::default();
+        filter.extend(["vault-secret-123456".to_owned()]);
 
         let AcpWrite::Line(initialize) = write_receiver.recv().unwrap();
         assert_eq!(
@@ -1196,7 +1383,11 @@ mod tests {
             "initialize"
         );
         protocol
-            .dispatch_stdout(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#, &event_sender)
+            .dispatch_stdout(
+                r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+                &event_sender,
+                &filter,
+            )
             .unwrap();
         let AcpWrite::Line(new_session) = write_receiver.recv().unwrap();
         assert_eq!(
@@ -1207,6 +1398,7 @@ mod tests {
             .dispatch_stdout(
                 r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session-a"}}"#,
                 &event_sender,
+                &filter,
             )
             .unwrap();
         let AcpWrite::Line(prompt) = write_receiver.recv().unwrap();
@@ -1218,6 +1410,7 @@ mod tests {
             .dispatch_stdout(
                 r#"{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"private reasoning"}}}}"#,
                 &event_sender,
+                &filter,
             )
             .unwrap();
         assert!(event_receiver.try_recv().is_err());
@@ -1225,6 +1418,7 @@ mod tests {
             .dispatch_stdout(
                 r#"{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call","title":"web search: primary sources"}}}"#,
                 &event_sender,
+                &filter,
             )
             .unwrap();
         assert!(matches!(
@@ -1234,8 +1428,8 @@ mod tests {
         ));
 
         for chunk in [
-            "AI_NEWS_EVENT: {\"type\":\"session.message\",\"data\":{\"message\":\"Found primary evidence.\"}}\nAI_NEWS_",
-            "EVENT: {\"type\":\"session.done\",\"data\":{\"message\":\"Complete.\"}}",
+            "AI_NEWS_EVENT: {\"type\":\"session.message\",\"data\":{\"message\":\"vault-secret-",
+            "123456\"}}\nAI_NEWS_EVENT: {\"type\":\"session.done\",\"data\":{\"message\":\"Complete.\"}}",
         ] {
             let update = json!({
                 "jsonrpc": "2.0",
@@ -1248,18 +1442,19 @@ mod tests {
                 }
             });
             protocol
-                .dispatch_stdout(&update.to_string(), &event_sender)
+                .dispatch_stdout(&update.to_string(), &event_sender, &filter)
                 .unwrap();
         }
         assert!(matches!(
             event_receiver.recv().unwrap(),
             ResearchProcessEvent::Output(AgentEvent::SessionMessage(message))
-                if message == "Found primary evidence."
+                if message == "<redacted>"
         ));
         protocol
             .dispatch_stdout(
                 r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#,
                 &event_sender,
+                &filter,
             )
             .unwrap();
         assert!(protocol.completed());
@@ -1349,10 +1544,13 @@ mod tests {
             directory.path(),
         )
         .with_environment_loader(|| {
-            Ok(vec![(
-                OsString::from("NOT_NEWS_TEST_CREDENTIAL"),
-                OsString::from("opaque-value"),
-            )])
+            Ok(ResolvedEnvironment::new(
+                vec![(
+                    OsString::from("NOT_NEWS_TEST_CREDENTIAL"),
+                    OsString::from("opaque-value"),
+                )],
+                ["opaque-value".to_owned()],
+            ))
         });
 
         assert_eq!(

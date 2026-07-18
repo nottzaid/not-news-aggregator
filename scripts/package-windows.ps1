@@ -70,6 +70,8 @@ New-Item (Join-Path $portable "licenses") -ItemType Directory -Force | Out-Null
 Copy-Item -Path @(
     "target/release/not-news-app.exe",
     "README.md",
+    "HERMES.md",
+    "OPERATING.md",
     "dist/BUILDINFO-windows-x86_64.json",
     "dist/DEPENDENCIES-windows-x86_64.json"
 ) -Destination $portable

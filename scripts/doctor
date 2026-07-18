@@ -28,7 +28,7 @@ else
 fi
 
 if command -v hermes >/dev/null 2>&1; then
-  printf 'ready     Hermes available; configure its provider through Connections\n'
+  printf 'present   Hermes executable; ACP/provider readiness is checked separately\n'
 else
   printf 'missing   Hermes (required for new research; saved Canvas remains available)\n' >&2
 fi
@@ -36,9 +36,15 @@ fi
 printf 'runtime   Exa vault key and SearXNG endpoint are configured through Connections\n'
 
 if command -v browse >/dev/null 2>&1; then
-  printf 'ready     Browse local automation/skills available\n'
+  printf 'present   Browse executable; skills/browser execution remain unverified\n'
 else
   printf 'missing   Browse CLI (required for dynamic-page research)\n' >&2
+fi
+
+if command -v curl >/dev/null 2>&1; then
+  printf 'present   curl executable; SearXNG transport is checked before research\n'
+else
+  printf 'missing   curl (required for the SearXNG research path)\n' >&2
 fi
 
 printf 'optional  Groq transcription key is configured through Connections\n'

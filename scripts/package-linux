@@ -53,6 +53,8 @@ mkdir -p "$portable/not-news_${version}_linux-x86_64/licenses"
 cp \
   target/release/not-news-app \
   README.md \
+  HERMES.md \
+  OPERATING.md \
   dist/BUILDINFO-linux-x86_64.json \
   dist/DEPENDENCIES-linux-x86_64.json \
   "$portable/not-news_${version}_linux-x86_64/"

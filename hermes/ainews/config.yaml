@@ -10,6 +10,7 @@ skills:
   external_dirs: []
 
 terminal:
+  home_mode: profile
   env_passthrough:
     - EXA_API_KEY
     - SEARXNG_URL

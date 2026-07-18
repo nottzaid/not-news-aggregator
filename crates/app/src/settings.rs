@@ -1,5 +1,13 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    path::Path,
+    sync::mpsc,
+    thread,
+    time::Duration,
+};
 
+use fs2::FileExt as _;
 use keyring::{Entry, Error as KeyringError};
 use thiserror::Error;
 
@@ -7,11 +15,20 @@ const CREDENTIAL_SERVICE: &str = "not-news-canvas";
 const GROQ_ACCOUNT: &str = "groq-api-key";
 const EXA_ACCOUNT: &str = "exa-api-key";
 const BROWSERBASE_ACCOUNT: &str = "browserbase-api-key";
+const SETTINGS_FILE: &str = "settings.json";
+const SETTINGS_LOCK: &str = ".settings.lock";
+const SETTINGS_PENDING: &str = ".settings.pending";
+const SETTINGS_PREVIOUS: &str = ".settings.previous";
+const VAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Removes the retired 0.1.1 backend selector only when the file has exactly
 /// that known schema. Unknown future or user-authored settings remain intact.
 pub fn retire_backend_selector(data_directory: &Path) -> io::Result<bool> {
-    let path = data_directory.join("settings.json");
+    fs::create_dir_all(data_directory)?;
+    let lock = settings_lock(data_directory)?;
+    lock.lock_exclusive()?;
+    recover_settings(data_directory)?;
+    let path = data_directory.join(SETTINGS_FILE);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -35,8 +52,12 @@ pub fn retire_backend_selector(data_directory: &Path) -> io::Result<bool> {
 pub enum SettingsError {
     #[error("the operating-system credential vault is unavailable: {0}")]
     Vault(#[source] KeyringError),
+    #[error("the operating-system credential vault did not respond within five seconds")]
+    VaultTimeout,
     #[error("the {0} API key is empty")]
     EmptyApiKey(&'static str),
+    #[error("the {0} API key is shorter than eight bytes")]
+    ShortApiKey(&'static str),
     #[error("the SearXNG endpoint must be an http:// or https:// URL without whitespace")]
     InvalidSearxngUrl,
     #[error("application settings could not be read or written: {0}")]
@@ -118,19 +139,26 @@ pub fn searxng_url(data_directory: &Path) -> Result<Option<String>, SettingsErro
 pub fn save_searxng_url(data_directory: &Path, url: &str) -> Result<(), SettingsError> {
     let url = normalize_searxng_url(url)?;
     fs::create_dir_all(data_directory)?;
-    let path = data_directory.join("settings.json");
+    let lock = settings_lock(data_directory)?;
+    lock.lock_exclusive()?;
+    recover_settings(data_directory)?;
+    let path = data_directory.join(SETTINGS_FILE);
     let mut settings = match fs::read(&path) {
         Ok(bytes) => serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => serde_json::Map::new(),
         Err(error) => return Err(error.into()),
     };
     settings.insert("searxng_url".into(), serde_json::Value::String(url));
-    fs::write(path, serde_json::to_vec_pretty(&settings)?)?;
+    replace_settings(data_directory, &serde_json::to_vec_pretty(&settings)?)?;
     Ok(())
 }
 
 fn saved_searxng_url(data_directory: &Path) -> Result<Option<String>, SettingsError> {
-    let path = data_directory.join("settings.json");
+    fs::create_dir_all(data_directory)?;
+    let lock = settings_lock(data_directory)?;
+    lock.lock_exclusive()?;
+    recover_settings(data_directory)?;
+    let path = data_directory.join(SETTINGS_FILE);
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -144,6 +172,111 @@ fn saved_searxng_url(data_directory: &Path) -> Result<Option<String>, SettingsEr
         .transpose()
 }
 
+pub fn delete_searxng_url(data_directory: &Path) -> Result<(), SettingsError> {
+    fs::create_dir_all(data_directory)?;
+    let lock = settings_lock(data_directory)?;
+    lock.lock_exclusive()?;
+    recover_settings(data_directory)?;
+    let path = data_directory.join(SETTINGS_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut settings =
+        serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)?;
+    settings.remove("searxng_url");
+    if settings.is_empty() {
+        fs::remove_file(path)?;
+    } else {
+        replace_settings(data_directory, &serde_json::to_vec_pretty(&settings)?)?;
+    }
+    Ok(())
+}
+
+fn settings_lock(data_directory: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(data_directory.join(SETTINGS_LOCK))
+}
+
+fn recover_settings(data_directory: &Path) -> io::Result<()> {
+    let settings = data_directory.join(SETTINGS_FILE);
+    let pending = data_directory.join(SETTINGS_PENDING);
+    let previous = data_directory.join(SETTINGS_PREVIOUS);
+    if !settings.exists() {
+        if pending.is_file() {
+            fs::rename(&pending, &settings)?;
+        } else if previous.is_file() {
+            fs::rename(&previous, &settings)?;
+        }
+    }
+    for stale in [pending, previous] {
+        match fs::remove_file(stale) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn replace_settings(data_directory: &Path, bytes: &[u8]) -> io::Result<()> {
+    let settings = data_directory.join(SETTINGS_FILE);
+    let pending = data_directory.join(SETTINGS_PENDING);
+    let previous = data_directory.join(SETTINGS_PREVIOUS);
+    match fs::remove_file(&pending) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&pending)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    if settings.exists() {
+        match fs::remove_file(&previous) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        fs::rename(&settings, &previous)?;
+    }
+    if let Err(error) = fs::rename(&pending, &settings) {
+        if previous.exists() && !settings.exists() {
+            let _ = fs::rename(&previous, &settings);
+        }
+        return Err(error);
+    }
+    match fs::remove_file(previous) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    sync_directory(data_directory)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 fn normalize_searxng_url(url: &str) -> Result<String, SettingsError> {
     let url = url.trim().trim_end_matches('/');
     if url.is_empty()
@@ -155,8 +288,8 @@ fn normalize_searxng_url(url: &str) -> Result<String, SettingsError> {
     Ok(url.to_owned())
 }
 
-fn read_credential(account: &str) -> Result<Option<String>, SettingsError> {
-    match credential_entry(account).and_then(|entry| entry.get_password()) {
+fn read_credential(account: &'static str) -> Result<Option<String>, SettingsError> {
+    match vault_operation(move || credential_entry(account)?.get_password())? {
         Ok(secret) if !secret.trim().is_empty() => Ok(Some(secret)),
         Ok(_) | Err(KeyringError::NoEntry) => Ok(None),
         Err(error) => Err(SettingsError::Vault(error)),
@@ -179,8 +312,12 @@ fn save_api_key(account: &str, label: &'static str, secret: &str) -> Result<(), 
     if secret.trim().is_empty() {
         return Err(SettingsError::EmptyApiKey(label));
     }
-    credential_entry(account)
-        .and_then(|entry| entry.set_password(secret.trim()))
+    if secret.trim().len() < 8 {
+        return Err(SettingsError::ShortApiKey(label));
+    }
+    let account = account.to_owned();
+    let secret = secret.trim().to_owned();
+    vault_operation(move || credential_entry(&account)?.set_password(&secret))?
         .map_err(SettingsError::Vault)
 }
 
@@ -197,17 +334,39 @@ pub fn delete_browserbase_api_key() -> Result<(), SettingsError> {
 }
 
 fn delete_credential(account: &str) -> Result<(), SettingsError> {
-    match credential_entry(account).and_then(|entry| entry.delete_credential()) {
+    let account = account.to_owned();
+    match vault_operation(move || credential_entry(&account)?.delete_credential())? {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
         Err(error) => Err(SettingsError::Vault(error)),
     }
 }
 
 fn credential_state(account: &str) -> CredentialState {
-    match credential_entry(account).and_then(|entry| entry.get_password()) {
-        Ok(secret) if !secret.trim().is_empty() => CredentialState::Vault,
-        Ok(_) | Err(KeyringError::NoEntry) => CredentialState::Missing,
+    let account = account.to_owned();
+    match vault_operation(move || credential_entry(&account)?.get_password()) {
         Err(error) => CredentialState::Unavailable(error.to_string()),
+        Ok(Ok(secret)) if !secret.trim().is_empty() => CredentialState::Vault,
+        Ok(Ok(_) | Err(KeyringError::NoEntry)) => CredentialState::Missing,
+        Ok(Err(error)) => CredentialState::Unavailable(error.to_string()),
+    }
+}
+
+fn vault_operation<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, KeyringError> + Send + 'static,
+) -> Result<Result<T, KeyringError>, SettingsError> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("credential-vault-operation".into())
+        .spawn(move || {
+            let _ = sender.send(operation());
+        })?;
+    match receiver.recv_timeout(VAULT_TIMEOUT) {
+        Ok(result) => Ok(result),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(SettingsError::VaultTimeout),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(SettingsError::Io(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "credential-vault worker stopped without a result",
+        ))),
     }
 }
 
@@ -254,9 +413,6 @@ fn prepare_linux_secret_service() {
     );
 }
 
-#[cfg(target_os = "windows")]
-fn prepare_linux_secret_service() {}
-
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
@@ -290,15 +446,43 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(value["future"], true);
+        delete_searxng_url(directory.path()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.path().join(SETTINGS_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(value, serde_json::json!({"future": true}));
         assert!(matches!(
             normalize_searxng_url("file:///private"),
             Err(SettingsError::InvalidSearxngUrl)
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn settings_replacement_is_private_and_recovers_an_interrupted_commit() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = TempDir::new().unwrap();
+        save_searxng_url(directory.path(), "https://search.example").unwrap();
+        let path = directory.path().join(SETTINGS_FILE);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::rename(&path, directory.path().join(SETTINGS_PREVIOUS)).unwrap();
+        assert_eq!(
+            saved_searxng_url(directory.path()).unwrap().as_deref(),
+            Some("https://search.example")
+        );
+        assert!(path.is_file());
+        assert!(!directory.path().join(SETTINGS_PREVIOUS).exists());
+    }
+
     #[test]
     #[ignore = "writes and removes a disposable entry in the live OS credential vault"]
     fn live_os_vault_round_trip_does_not_touch_the_user_key() {
+        #[cfg(target_os = "linux")]
         prepare_linux_secret_service();
         let account = format!("process-{}", std::process::id());
         let entry = vault_entry_for("not-news-canvas-self-test", &account).unwrap();

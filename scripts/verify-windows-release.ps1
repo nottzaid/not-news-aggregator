@@ -46,6 +46,9 @@ Expand-Archive $zip (Join-Path $scratch "portable")
 $portable = Join-Path $scratch "portable/not-news_${version}_windows-x86_64/not-news-app.exe"
 if ((Get-FileHash "assets/fonts/manrope/OFL.txt").Hash -ne (Get-FileHash (Join-Path (Split-Path $portable) "licenses/Manrope-OFL.txt")).Hash) { throw "portable archive changed the Manrope license" }
 if ((Get-FileHash "assets/fonts/jetbrainsmono/OFL.txt").Hash -ne (Get-FileHash (Join-Path (Split-Path $portable) "licenses/JetBrains-Mono-OFL.txt")).Hash) { throw "portable archive changed the JetBrains Mono license" }
+foreach ($guide in @("README.md", "HERMES.md", "OPERATING.md")) {
+    if ((Get-FileHash $guide).Hash -ne (Get-FileHash (Join-Path (Split-Path $portable) $guide)).Hash) { throw "portable archive changed or omitted $guide" }
+}
 $portableAuto = Invoke-ReleaseSelfCheck $portable (Join-Path $scratch "portable-check") "auto"
 $ignoredConfiguration = @("EXA_API_KEY", "GROQ_API_KEY", "BROWSERBASE_API_KEY", "SEARXNG_URL")
 $previousConfiguration = @{}
@@ -66,11 +69,13 @@ $portableCapabilities = $capabilityOutput | ConvertFrom-Json
 if ($portableCapabilities.capability_check -ne "pass") { throw "portable capability diagnosis did not pass" }
 if ($portableCapabilities.commit -ne $buildInfo.commit.Substring(0, 12)) { throw "portable capability diagnosis reported the wrong commit" }
 if ($portableCapabilities.research.runtime -ne "hermes") { throw "Hermes is not the sole research runtime" }
-if ($portableCapabilities.research.profile_policy -ne "installed") { throw "Hermes profile policy was not installed" }
-if ($null -eq $portableCapabilities.research.runtime_ready) { throw "research runtime readiness is absent" }
+if ($portableCapabilities.research.profile_policy -ne "installed-v2") { throw "Hermes profile policy v2 was not installed" }
+if ($portableCapabilities.research.executable -notin @("present", "missing")) { throw "Hermes executable diagnosis is absent" }
+if ($portableCapabilities.research.compatibility -ne "deferred-to-exact-pre-research-acp-check") { throw "Hermes compatibility scope is misstated" }
 if ($portableCapabilities.discovery.exa_configuration -ne "deferred-os-vault-probe") { throw "Exa environment leaked into configuration" }
 if ($portableCapabilities.discovery.searxng_endpoint -ne "missing") { throw "SearXNG environment leaked into configuration" }
-if ($null -eq $portableCapabilities.discovery.browse_cli) { throw "Browse capability diagnosis is absent" }
+if ($portableCapabilities.discovery.browse_executable -notin @("present", "missing")) { throw "Browse executable diagnosis is absent" }
+if ($portableCapabilities.discovery.curl_executable -notin @("present", "missing")) { throw "curl executable diagnosis is absent" }
 if ($portableCapabilities.discovery.browserbase_configuration -ne "optional-deferred-os-vault-probe") { throw "Browserbase environment leaked into configuration" }
 if ($portableCapabilities.transcription.configuration -ne "deferred-os-vault-probe") { throw "Groq environment leaked into configuration" }
 if ($portableCapabilities.research.PSObject.Properties.Name -contains "selected") { throw "retired backend selector survived" }
@@ -110,6 +115,9 @@ $installed = Join-Path $env:LOCALAPPDATA "Not News/not-news-app.exe"
 if (-not (Test-Path $installed)) { throw "NSIS did not install the executable" }
 if (-not (Test-Path (Join-Path $env:LOCALAPPDATA "Not News/licenses/Manrope-OFL.txt"))) { throw "NSIS omitted the Manrope license" }
 if (-not (Test-Path (Join-Path $env:LOCALAPPDATA "Not News/licenses/JetBrains-Mono-OFL.txt"))) { throw "NSIS omitted the JetBrains Mono license" }
+foreach ($guide in @("README.md", "HERMES.md", "OPERATING.md")) {
+    if ((Get-FileHash $guide).Hash -ne (Get-FileHash (Join-Path $env:LOCALAPPDATA "Not News/$guide")).Hash) { throw "NSIS changed or omitted $guide" }
+}
 if ((Get-FileHash $installed).Hash -ne $sourceHash) { throw "NSIS changed the release executable" }
 $installedAuto = Invoke-ReleaseSelfCheck $installed (Join-Path $scratch "installed-check") "auto"
 

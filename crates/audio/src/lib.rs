@@ -5,8 +5,9 @@ mod speech;
 pub use speech::{SpeechCapability, SpeechEvent, SpeechSubmit, SpeechWorker};
 
 use std::{
-    env, fs,
-    io::{self, Read},
+    env,
+    fs::{self, OpenOptions},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -113,7 +114,7 @@ impl Recorder {
     pub fn start(path: impl AsRef<Path>) -> Result<Self, AudioError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(AudioError::CreateRecording)?;
+            create_private_dir_all(parent).map_err(AudioError::CreateRecording)?;
         }
         let host = cpal::default_host();
         let device = host
@@ -419,8 +420,49 @@ fn create_wav_writer(
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    hound::WavWriter::create(path, specification)
+    let file = create_private_file(path).map_err(AudioError::CreateRecording)?;
+    hound::WavWriter::new(io::BufWriter::new(file), specification)
         .map_err(|error| AudioError::CreateRecording(io::Error::other(error)))
+}
+
+pub(crate) fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        create_private_dir_all(parent)?;
+    }
+    match fs::create_dir(path) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn create_private_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = create_private_file(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 fn write_consumer(

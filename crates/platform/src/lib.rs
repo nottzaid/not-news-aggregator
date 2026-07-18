@@ -56,8 +56,31 @@ pub fn application_data_directory(application_id: &str) -> Result<PathBuf, io::E
             )
         })?
         .join(application_id);
-    fs::create_dir_all(&directory)?;
+    create_private_dir_all(&directory)?;
     Ok(directory)
+}
+
+fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        create_private_dir_all(parent)?;
+    }
+    match fs::create_dir(path) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Returns Hermes's platform-native per-user root without inspecting any
@@ -145,21 +168,22 @@ fn linux_data_directory(
         })
 }
 
-/// Opens a URL through the desktop's registered external handler without
-/// blocking the render thread or invoking a shell.
+/// Requests a URL through the desktop's registered external handler without
+/// invoking a shell. Successful process creation does not prove that a browser
+/// opened; callers must describe the result as an unconfirmed request.
 ///
 /// # Errors
 ///
-/// Rejects non-HTTP(S) sources and returns an error when the reaper thread
-/// cannot be created; handler launch failures are reported asynchronously.
+/// Rejects non-HTTP(S) sources and reports handler spawn or reaper failures.
 pub fn open_external_url(url: &str) -> Result<(), io::Error> {
     let mut command = external_url_command(url)?;
+    let mut child = command.spawn()?;
     thread::Builder::new()
         .name("external-url".into())
-        .spawn(move || match command.status() {
+        .spawn(move || match child.wait() {
             Ok(status) if status.success() => {}
             Ok(status) => eprintln!("external URL handler exited with {status}"),
-            Err(error) => eprintln!("external URL handler could not start: {error}"),
+            Err(error) => eprintln!("external URL handler could not be reaped: {error}"),
         })?;
     Ok(())
 }
@@ -251,6 +275,21 @@ mod tests {
             PathBuf::from("/home/researcher/.local/share/not-news-canvas")
         );
         assert!(linux_data_directory("not-news-canvas", None, None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_application_data_directory_is_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("nested/not-news-canvas");
+        create_private_dir_all(&directory).unwrap();
+
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 
     #[cfg(target_os = "linux")]
