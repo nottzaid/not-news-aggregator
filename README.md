@@ -1,7 +1,7 @@
 # Not News
 
 Not News turns a question into a durable, spatially unbounded graph of findings,
-exact sources, and explicit relationships. Dragging changes placement, never
+source artifacts, and explicit relationships. Dragging changes placement, never
 meaning; relating, detaching, and promoting sources are deliberate commands in
 the same restart-safe undo history as movement.
 
@@ -43,27 +43,51 @@ not-news-app --database /path/to/new.sqlite --import-legacy /path/to/old.sqlite
 
 ## Configure research
 
-First launch installs the bundled research policy as Hermes profile `not-news`,
-beside an untouched `default`; the user launches no helper and chooses no
-profile. Connections opens Hermes with `not-news` selected. Hermes alone owns
-its providers, models, API keys, OAuth, sessions, memory, and logs.
+The release does not install Hermes, Browse, SearXNG, or a model provider. A
+saved canvas needs none of them. The implemented launch gate for new research
+requires:
 
-Not News owns the research topology it can validate:
+- [Hermes](https://hermes-agent.nousresearch.com) on `PATH`, with a provider and
+  model configured through Hermes;
+- an Exa key entered through Connections and stored under Not News's own account
+  in Windows Credential Manager or Linux Secret Service;
+- a SearXNG base URL entered through Connections and stored in plaintext
+  application settings.
 
-- Exa semantic discovery requires a key stored in Windows Credential Manager or
-  Linux Secret Service.
-- SearXNG breadth discovery requires a reachable JSON endpoint stored as
-  non-secret application configuration.
-- Browse.sh supplies browser automation and catalog skills; local use is
-  keyless, while an optional Browserbase key enables its hosted capabilities.
-- Groq speech-to-text is optional and uses the same OS vault.
+The tracked research policy additionally requires Browse CLI for dynamic or
+extraction-resistant pages and invokes `curl` for SearXNG queries. The launch
+gate enforces neither executable, and this release installs neither Browse,
+Browse skills, nor `curl`.
 
-The Connections surface is the sole source for those values. Shell credentials
-and endpoints cannot silently override it. Each research child starts with a
-profile-owned home and a scrubbed environment containing only minimal process
-plumbing and explicitly resolved Not News inputs. Missing Exa or SearXNG blocks
-new external research with a precise diagnosis; missing optional capabilities
-does not endanger saved work. [HERMES.md](HERMES.md) specifies the boundary.
+Browserbase is an optional Browse execution surface. Groq is optional and serves
+question transcription, not Hermes inference. Re-entering an Exa, Browserbase,
+or Groq key replaces that Not News vault entry; the corresponding removal row
+deletes it. Not News neither discovers nor copies credentials from other apps.
+On Linux the release does not install a Secret Service provider: KWallet or
+GNOME Keyring must already expose one, and first access may prompt for setup or
+unlock. SearXNG has no equivalent removal row; a later valid URL overwrites it.
+
+Spoken research notes are separate from Groq transcription. They use Kokoro
+configuration inherited by the Rust application and a discovered local WAV
+player; neither is configurable in Connections, bundled, or probed end-to-end
+before the first note.
+
+First launch creates missing files for Hermes profile `not-news` beside, without
+reading or selecting, `default`. It does so even when Hermes is absent. Existing
+profile policy is not generally upgraded: files already present remain intact,
+although the owned `config.yaml` terminal passthrough list gains required Not
+News variable names. Connections opens Hermes's dashboard with `not-news`
+selected; the app does not install Hermes or configure its provider.
+
+Research inherits process plumbing such as `PATH`, locale, TLS, and proxy
+variables, then receives only the Exa, SearXNG, and optional Browserbase values
+resolved by Not News. Redirected home directories prevent accidental reuse of
+ordinary user configuration; they are not an operating-system sandbox. Hermes
+runs with its ACP tool authority, including terminal and filesystem tools, while
+a prompt asks it to remain inside the session scratch directory. Those injected
+keys are visible to Hermes and its tools; the prompt forbids disclosure, but the
+present output filter does not guarantee redaction of vault-loaded values. Read
+[HERMES.md](HERMES.md) before treating that request as a security boundary.
 
 ## Install a release
 
@@ -72,13 +96,17 @@ Each release contains:
 - Linux: desktop-integrated `.deb`, relocatable AppImage, and `tar.xz`;
 - Windows: current-user NSIS installer and relocatable `.zip`.
 
-No payload requires Rust, Flutter, Python, Clang, or a source checkout. Each
-also carries SHA-256 sums, exact source/build identity, dependency and license
-inventory, and executed renderer evidence. Native workflows run every portable
-form, install and reinstall each native package, exercise a real window and
-durable mutation, then prove uninstallation preserves per-user research.
-Unsigned previews may trigger Windows reputation warnings; a self-signed
-certificate would not satisfy the stable-release signing gate.
+No payload requires Rust, Flutter, Python, Clang, or a source checkout. Release
+attachments include SHA-256 sums, source/build identity, dependency and license
+inventories, and renderer results. CI executes each portable form, exercises
+window presentation plus a disposable SQLite import/mutation/reopen sequence,
+and checks package installation, reinstallation, removal, and survival of a
+per-user marker. Those checks do not authenticate Hermes, query Exa or SearXNG,
+exercise Browse, unlock an OS vault, hear audio, or validate Linux under Wayland;
+the Linux window evidence runs under X11/Xvfb. The authenticated
+Hermes-to-canvas and live-vault tests remain opt-in. Unsigned previews may
+trigger Windows reputation warnings; a self-signed certificate would not
+satisfy the stable-release signing gate.
 
 ## Build and verify
 
@@ -103,14 +131,15 @@ NOT_NEWS_FORCE_SOFTWARE=1 cargo run -p not-news-platform --example hidden_smoke
 Kokoro output; it does not source Not News credentials or start an obsolete
 backend. `scripts/searxng` manages a local development SearXNG instance.
 
-The evidence suite combines domain properties, real SQLite rollback and process
-death boundaries, bounded HTTP and subprocess tests, persisted UI-to-database
+The evidence suite combines domain properties, SQLite rollback and process-death
+boundaries, bounded HTTP and subprocess fixtures, persisted UI-to-database
 traces, GPU/raster presentation, package lifecycle checks, and decoded-pixel
 comparison against immutable Flutter specimens. The 71-event performance probe
-warms the exact input-to-swap path, measures 600 frames with refresh waiting
-removed, rejects p99 above 16.667 ms, and verifies that its imported source
-remained byte-identical. Ordinary presentation retains its clocks, easing, and
-vertical synchronization.
+warms the instrumented input-to-swap path, measures 600 frames with refresh
+waiting removed, rejects p99 above 16.667 ms, and verifies that its imported
+source remained byte-identical. It is a controlled renderer/input benchmark,
+not evidence of network, provider, discovery, or hardware-audio latency.
+Ordinary presentation retains its clocks, easing, and vertical synchronization.
 
 The final Flutter/FastAPI state survives on `experimental-optimization` and its
 historical tag. Rust releases contain neither runtime.
