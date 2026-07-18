@@ -122,6 +122,8 @@ filesystem deletion cannot be atomic; partial or unconfirmed failure is stated.
 Groq transcribes questions and never supplies inference. Sparse synthesized
 research notes use the separate environment-configured Kokoro endpoint and a
 discovered WAV player. Neither is bundled or proved reachable/audible before
-use. Only an explicit `voice.note` from Hermes enters this path; progress,
-findings, and completion messages remain silent, and the prompt does not require
-a note. Failure degrades voice, not research or saved work.
+use. Only an explicit `voice.note` from Hermes enters this path. The prompt
+requires one note for the milestone Hermes judges most consequential and permits
+one earlier note for a distinct major milestone; progress, findings, and
+completion messages remain silent. Failure degrades voice, not research or saved
+work.

@@ -84,9 +84,10 @@ operation may finish later. No plaintext credential fallback exists.
 Spoken research notes are separate from Groq transcription. They use Kokoro
 configuration inherited by the Rust application and a discovered local WAV
 player; neither is configurable in Connections, bundled, or probed end-to-end
-before the first note. Only an explicit `voice.note` emitted by Hermes is sent
-to Kokoro; ordinary progress, findings, and completion messages are not spoken,
-and the provider-neutral prompt permits rather than guarantees such notes.
+before the first note. The provider-neutral prompt requires one `voice.note`
+for the milestone Hermes judges most consequential and permits one earlier note
+for a distinct major milestone; ordinary progress, findings, and completion
+messages are not spoken.
 
 First launch transactionally creates a marker-owned Hermes profile `not-news`
 beside, without reading or selecting, `default`; Hermes may be absent. Locked,

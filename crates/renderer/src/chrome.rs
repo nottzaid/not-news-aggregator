@@ -879,7 +879,7 @@ pub fn paint_credential_prompt(
         physical_height,
         scale_factor,
         title,
-        "ENTER STORE IN OS VAULT  ·  ESC BACK  ·  CTRL+V PASTE",
+        "→/ENTER STORE IN OS VAULT  ·  ←/ESC BACK  ·  CTRL+V PASTE",
         input,
         preedit,
         4_096,
@@ -902,7 +902,7 @@ pub fn paint_connection_prompt(
         physical_height,
         scale_factor,
         "SEARXNG FRONTIER",
-        "ENTER SAVE ENDPOINT  ·  ESC BACK  ·  CTRL+V PASTE",
+        "→/ENTER SAVE ENDPOINT  ·  ←/ESC BACK  ·  CTRL+V PASTE",
         input,
         preedit,
         2_048,
@@ -2570,7 +2570,7 @@ mod tests {
             assert!(
                 resources
                     .prompt_instruction(
-                        "ENTER STORE IN OS VAULT  ·  ESC BACK  ·  CTRL+V PASTE",
+                        "→/ENTER STORE IN OS VAULT  ·  ←/ESC BACK  ·  CTRL+V PASTE",
                         648.0,
                     )
                     .height()

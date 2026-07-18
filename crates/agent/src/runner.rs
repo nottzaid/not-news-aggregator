@@ -1649,6 +1649,7 @@ mod tests {
         let handle = launch.spawn().unwrap();
         let deadline = Instant::now() + Duration::from_mins(2);
         let mut saw_event = false;
+        let mut saw_voice_note = false;
         let mut saw_done = false;
         let mut termination = None;
         let mut observed = Vec::new();
@@ -1662,6 +1663,10 @@ mod tests {
                     observed.push(format!("done:{message}"));
                     saw_done = true;
                 }
+                Ok(ResearchProcessEvent::Output(AgentEvent::VoiceNote(message))) => {
+                    observed.push(format!("voice:{message}"));
+                    saw_voice_note = true;
+                }
                 Ok(ResearchProcessEvent::Finished(reason)) => {
                     observed.push(format!("finished:{reason:?}"));
                     termination = Some(reason);
@@ -1672,7 +1677,10 @@ mod tests {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
-        assert!(saw_event && saw_done, "observed {observed:?}");
+        assert!(
+            saw_event && saw_voice_note && saw_done,
+            "observed {observed:?}"
+        );
         assert_eq!(
             termination,
             Some(ResearchTermination::Completed),

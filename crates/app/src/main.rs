@@ -335,6 +335,21 @@ enum SettingsPage {
     Searxng,
 }
 
+impl SettingsPage {
+    fn parent(self) -> Option<Self> {
+        match self {
+            Self::Root => None,
+            Self::Credential(_) | Self::Searxng => Some(Self::Root),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SettingsNavigation {
+    Backward,
+    Forward,
+}
+
 #[derive(Clone)]
 enum CredentialMenuState {
     Resolving,
@@ -433,7 +448,6 @@ enum SettingsChoice {
     EditCredential(CredentialKind),
     RemoveCredential(CredentialKind),
     RemoveSearxng,
-    Back,
     EraseAll,
 }
 
@@ -796,7 +810,6 @@ impl CanvasApplication {
                         ),
                     ));
                 }
-                choices.push((SettingsChoice::Back, "← BACK TO CONNECTIONS".into()));
                 choices
             }
             SettingsPage::Searxng => {
@@ -818,7 +831,6 @@ impl CanvasApplication {
                         "REMOVE ENDPOINT  ·  RESEARCH DISCOVERY BECOMES INCOMPLETE".into(),
                     ));
                 }
-                choices.push((SettingsChoice::Back, "← BACK TO CONNECTIONS".into()));
                 choices
             }
         }
@@ -999,6 +1011,57 @@ impl CanvasApplication {
             | SettingsFlow::SearxngEndpoint { .. }
             | SettingsFlow::EraseConfirmation { .. } => None,
         }
+    }
+
+    fn navigate_settings(&mut self, direction: SettingsNavigation) -> bool {
+        match direction {
+            SettingsNavigation::Forward => match self.settings.as_ref() {
+                Some(SettingsFlow::Menu { selected, .. }) => self.activate_settings_row(*selected),
+                Some(SettingsFlow::Credential { .. }) => self.commit_credential(),
+                Some(SettingsFlow::SearxngEndpoint { .. }) => self.commit_searxng_endpoint(),
+                Some(SettingsFlow::EraseConfirmation { .. }) => self.commit_complete_erase(),
+                None => false,
+            },
+            SettingsNavigation::Backward => self.retreat_settings(),
+        }
+    }
+
+    fn retreat_settings(&mut self) -> bool {
+        let Some(flow) = self.settings.as_ref() else {
+            return false;
+        };
+        let parent = match flow {
+            SettingsFlow::Menu { page, .. } => page.parent(),
+            SettingsFlow::Credential { kind, .. } => Some(SettingsPage::Credential(*kind)),
+            SettingsFlow::SearxngEndpoint { .. } => Some(SettingsPage::Searxng),
+            SettingsFlow::EraseConfirmation { .. } => Some(SettingsPage::Root),
+        };
+        let Some(parent) = parent else {
+            self.settings = None;
+            self.settings_preedit.zeroize();
+            return true;
+        };
+        if let Some(SettingsFlow::Menu { page, selected, .. }) = self.settings.as_mut() {
+            *page = parent;
+            *selected = 0;
+            self.settings_scroll = 0.0;
+        } else {
+            self.settings = Some(SettingsFlow::Menu {
+                browserbase: CredentialMenuState::Resolving,
+                exa: CredentialMenuState::Resolving,
+                groq: CredentialMenuState::Resolving,
+                searxng: searxng_endpoint_state(&self.data_directory),
+                hermes_available: hermes_is_available(),
+                browse_available: browse_is_available(),
+                curl_available: curl_is_available(),
+                page: parent,
+                selected: 0,
+            });
+            self.settings_scroll = 0.0;
+            self.settings_preedit.zeroize();
+            self.start_credential_state_resolution();
+        }
+        true
     }
 
     fn move_settings_selection(&mut self, direction: isize) -> bool {
@@ -1218,13 +1281,6 @@ impl CanvasApplication {
                 });
                 self.begin_settings_refresh();
             }
-            SettingsChoice::Back => {
-                if let Some(SettingsFlow::Menu { page, selected, .. }) = self.settings.as_mut() {
-                    *page = SettingsPage::Root;
-                    *selected = 0;
-                }
-                self.settings_scroll = 0.0;
-            }
             SettingsChoice::EraseAll => {
                 if self.research.is_some()
                     || self.research_preflight.is_some()
@@ -1429,27 +1485,16 @@ impl CanvasApplication {
             return None;
         }
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            if key_input || endpoint_input || erase_input {
-                self.begin_settings_refresh();
-            } else if matches!(
-                self.settings,
-                Some(SettingsFlow::Menu {
-                    page: SettingsPage::Credential(_) | SettingsPage::Searxng,
-                    ..
-                })
-            ) {
-                if let Some(SettingsFlow::Menu { page, selected, .. }) = self.settings.as_mut() {
-                    *page = SettingsPage::Root;
-                    *selected = 0;
-                }
-                self.settings_scroll = 0.0;
-            } else {
-                self.settings = None;
-                self.settings_preedit.zeroize();
-            }
-            return Some(true);
+            return Some(self.navigate_settings(SettingsNavigation::Backward));
         }
         let command = self.modifiers.control_key() || self.modifiers.super_key();
+        let unmodified = !command && !self.modifiers.alt_key();
+        if unmodified && matches!(event.logical_key, Key::Named(NamedKey::ArrowLeft)) {
+            return Some(self.navigate_settings(SettingsNavigation::Backward));
+        }
+        if unmodified && matches!(event.logical_key, Key::Named(NamedKey::ArrowRight)) {
+            return Some(self.navigate_settings(SettingsNavigation::Forward));
+        }
         if menu
             && !command
             && !self.modifiers.alt_key()
@@ -1465,7 +1510,7 @@ impl CanvasApplication {
             return Some(self.move_settings_selection(-1));
         }
         if menu && matches!(event.logical_key, Key::Named(NamedKey::Enter)) {
-            return Some(self.activate_settings_row(self.settings_selection().unwrap_or(0)));
+            return Some(self.navigate_settings(SettingsNavigation::Forward));
         }
         if menu
             && !command
@@ -1479,13 +1524,7 @@ impl CanvasApplication {
             return Some(false);
         }
         if matches!(event.logical_key, Key::Named(NamedKey::Enter)) {
-            return Some(if key_input {
-                self.commit_credential()
-            } else if endpoint_input {
-                self.commit_searxng_endpoint()
-            } else {
-                self.commit_complete_erase()
-            });
+            return Some(self.navigate_settings(SettingsNavigation::Forward));
         }
         if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) {
             match self.settings.as_mut() {
@@ -3600,7 +3639,7 @@ impl CanvasApplication {
                 height,
                 scale_factor,
                 "COMPLETE ERASE",
-                "TYPE ERASE  ·  ENTER DELETE OWNED STATE  ·  ESC KEEP EVERYTHING",
+                "TYPE ERASE  ·  →/ENTER DELETE  ·  ←/ESC KEEP EVERYTHING",
                 input,
                 &self.settings_preedit,
             );
@@ -3790,11 +3829,11 @@ impl CanvasApplication {
             Some(SettingsFlow::Menu {
                 page: SettingsPage::Credential(kind),
                 ..
-            }) => format!("CONNECTIONS  ·  {}", kind.title()),
+            }) => format!("←  CONNECTIONS  ·  {}", kind.title()),
             Some(SettingsFlow::Menu {
                 page: SettingsPage::Searxng,
                 ..
-            }) => "CONNECTIONS  ·  SEARXNG FRONTIER".into(),
+            }) => "←  CONNECTIONS  ·  SEARXNG FRONTIER".into(),
             _ => "CONNECTIONS  ·  CTRL+,".into(),
         };
         paint_curation_menu(
@@ -4673,7 +4712,7 @@ mod app_tests {
         assert_eq!(application.settings_selection(), Some(0));
         assert!(application.select_settings_row(1));
         assert_eq!(application.settings_selection(), Some(1));
-        assert!(application.activate_settings_row(1));
+        assert!(application.navigate_settings(SettingsNavigation::Forward));
         let detail = application
             .settings_choices()
             .into_iter()
@@ -4682,7 +4721,17 @@ mod app_tests {
         assert!(detail[0].starts_with("REPLACE KEY  ·  OS VAULT"));
         assert!(detail[1].contains("REMOVE EXA KEY"));
         assert!(detail[1].contains("RESEARCH DISCOVERY BECOMES INCOMPLETE"));
-        assert_eq!(detail[2], "← BACK TO CONNECTIONS");
+        assert_eq!(detail.len(), 2);
+        assert!(application.navigate_settings(SettingsNavigation::Backward));
+        assert!(matches!(
+            application.settings,
+            Some(SettingsFlow::Menu {
+                page: SettingsPage::Root,
+                ..
+            })
+        ));
+        assert!(application.navigate_settings(SettingsNavigation::Backward));
+        assert!(application.settings.is_none());
     }
 
     #[test]

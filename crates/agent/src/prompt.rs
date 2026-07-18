@@ -57,7 +57,11 @@ already emitted. Prefer integer ARGB colors. A URL may occur only once across al
 new event and artifact URLs. If one source supports several subfindings, combine
 them or find distinct primary URLs. Connect every semantically related new event;
 emit an isolated singleton only when it is truly unrelated and explain why in a
-session.message. You may emit sparse voice.note orientation under 110 characters.
+session.message. Before session.done, emit exactly one spoken orientation for the
+milestone you judge most consequential:
+AI_NEWS_EVENT: {{"type":"voice.note","data":{{"message":"..."}}}}
+You may emit one earlier voice.note for a distinct major milestone. Each message
+must be self-contained, under 110 characters, and omit URLs and routine progress.
 Finish with AI_NEWS_EVENT: {{"type":"session.done","data":{{"message":"..."}}}}.
 
 {SOURCE_POLICY}
@@ -108,6 +112,8 @@ mod tests {
         assert!(prompt.contains("event-a"));
         assert!(prompt.contains("https://example.test/a"));
         assert!(prompt.contains("What changed?"));
+        assert!(prompt.contains("emit exactly one spoken orientation"));
+        assert!(prompt.contains(r#""type":"voice.note""#));
         assert!(!prompt.contains("private long-form workspace note"));
     }
 

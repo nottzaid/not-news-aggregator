@@ -81,5 +81,6 @@ Groq transcribes questions and is configured in Connections; it never supplies
 Hermes inference. Synthesized research notes use the separate environment-driven
 Kokoro endpoint and a discovered local WAV player. Neither is bundled or proved
 reachable/audible before use. Playback occurs only when Hermes emits an explicit
-`voice.note`; ordinary research output is silent, and a note is not guaranteed.
-Their absence degrades voice only, not research or saved graphs.
+`voice.note`; the research contract requires one Hermes-selected consequential
+milestone and permits one earlier distinct milestone. Ordinary research output
+is silent. Voice failure does not affect research or saved graphs.
