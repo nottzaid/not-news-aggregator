@@ -2992,13 +2992,17 @@ impl CanvasApplication {
     }
 
     fn cursor_moved(&mut self, point: Point, now: Instant) -> bool {
+        let previous_curation_row = self.curation_menu_at_cursor();
         self.cursor = Some(point);
         if self.record_hold_deadline.is_some()
             && self.chrome_at_cursor() != Some(ChromeControl::Record)
         {
             self.record_hold_deadline = None;
         }
-        if self.settings.is_some() {
+        if matches!(self.curation, Some(CurationFlow::Menu { .. })) {
+            let selection_changed = previous_curation_row != self.curation_menu_at_cursor();
+            self.interaction.cursor_left(now) || selection_changed
+        } else if self.settings.is_some() {
             let selection_changed = self
                 .settings_menu_at_cursor()
                 .is_some_and(|row| self.select_settings_row(row));
@@ -4392,6 +4396,91 @@ mod app_tests {
         );
         assert!(application.undo());
         assert_eq!(application.graph.events.len(), 2);
+    }
+
+    #[test]
+    fn every_curation_hover_row_change_requests_a_repaint() {
+        let subject = EventId("subject".into());
+        let peer = EventId("peer".into());
+        let event = |id: EventId, artifacts| not_news_domain::ResearchEvent {
+            id,
+            title: "Finding".into(),
+            date: "Jul 18, 2026".into(),
+            color: 0xff4c_9be8,
+            summary: "Finding".into(),
+            source_label: "Primary".into(),
+            artifacts,
+            url: None,
+        };
+        let mut graph = GraphSnapshot::default();
+        graph.events.insert(
+            subject.clone(),
+            event(
+                subject.clone(),
+                vec![not_news_domain::SourceArtifact {
+                    text: "Source artifact".into(),
+                    source: "Primary".into(),
+                    url: "https://example.test/source".into(),
+                }],
+            ),
+        );
+        graph
+            .events
+            .insert(peer.clone(), event(peer.clone(), Vec::new()));
+        graph.placements.insert(
+            subject.clone(),
+            not_news_domain::Placement {
+                point: Point { x: 900.0, y: 700.0 },
+                pinned: true,
+            },
+        );
+        graph.placements.insert(
+            peer.clone(),
+            not_news_domain::Placement {
+                point: Point {
+                    x: 1_100.0,
+                    y: 700.0,
+                },
+                pinned: true,
+            },
+        );
+        let bridge = BridgeId("subject::peer".into());
+        graph.bridges.insert(
+            bridge.clone(),
+            not_news_domain::EventBridge {
+                id: bridge,
+                from: subject.clone(),
+                to: peer,
+                label: "Supports".into(),
+                provenance: Provenance::User,
+            },
+        );
+        let expected_revision = graph.revision;
+        let mut application = CanvasApplication::with_state(None, graph, None, None, None, None);
+        application.curation = Some(CurationFlow::Menu {
+            anchor: Point { x: 120.0, y: 100.0 },
+            subject: CanvasSubject {
+                event: subject,
+                artifact_index: Some(0),
+            },
+            stage: CurationMenuStage::Actions,
+            page: 0,
+            expected_revision,
+        });
+        let now = Instant::now();
+
+        for (row, y) in [166.0, 214.0, 262.0].into_iter().enumerate() {
+            assert!(
+                application.cursor_moved(Point { x: 140.0, y }, now),
+                "moving to Curate row {row} must invalidate the frame even when the canvas beneath it does not change"
+            );
+            assert_eq!(application.curation_menu_at_cursor(), Some(row));
+        }
+        assert!(application.cursor_moved(Point { x: 20.0, y: 20.0 }, now));
+        assert_eq!(application.curation_menu_at_cursor(), None);
+        assert!(application.cursor_moved(Point { x: 140.0, y: 166.0 }, now));
+        assert_eq!(application.curation_menu_at_cursor(), Some(0));
+        assert!(!application.cursor_moved(Point { x: 141.0, y: 167.0 }, now));
     }
 
     #[test]
