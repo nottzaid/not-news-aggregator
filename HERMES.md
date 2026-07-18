@@ -105,11 +105,17 @@ configuration provenance, not confidentiality or adversarial confinement.
 The research prompt requires SearXNG for frontier expansion, Exa for semantic
 neighbors/extraction, and Browse for dynamic or resistant pages. Before session
 creation Not News checks `browse --version`, `curl --version`, Exa vault
-presence, and a bounded SearXNG JSON `results`-array contract. Browse is required
-apparatus but need not run when a task needs no browser retrieval. These probes
-do not consume Exa quota and do not prove Exa authorization, nonempty/useful
-SearXNG evidence, installed Browse site skills, browser launch, Browserbase
-authorization, or live results; those failures surface during the task.
+presence, bounded SearXNG identity/enabled-engine shape through `/config`, and
+a queryless JSON-format probe; none of those requests dispatches a search.
+Browse is required apparatus but need not run when a task needs no browser
+retrieval. These probes do not consume Exa quota or external search-engine
+capacity and do not prove Exa authorization, responsive upstream engines,
+nonempty/useful evidence, installed Browse site skills, browser launch,
+Browserbase authorization, or streamed results; those failures surface during
+the task. Search snippets are
+candidate leads only: the per-session prompt forbids emitting a new event or
+artifact URL unless Hermes successfully retrieves its supporting content through
+Exa or Browse and verifies the emitted claim against it.
 
 The question and a bounded saved-graph digest go to Hermes's configured
 provider. Discovery may send queries/pages to Exa, SearXNG, Browse, and optional

@@ -62,13 +62,14 @@ provider. A saved canvas needs none of them. New research requires:
 
 Before creating a durable research session, the app runs `hermes -p not-news
 acp --check`, `browse --version`, `curl --version`, bounded vault resolution,
-and a bounded SearXNG JSON search-contract request. This proves executable,
-profile routing, ACP installation, configuration, and endpoint-shape layers;
-Hermes provider authentication, Exa authorization/quota, useful results,
-Browse skills/browser launch, Browserbase, and streamed task behavior remain
-use-time evidence. Browse is required apparatus but invoked only when browser
-retrieval is needed. Linux Hermes 0.18.2 is one observed compatible point, not a
-version corridor; native Windows Hermes research remains unproved.
+and bounded SearXNG `/config` and queryless JSON-format probes that dispatch
+no search. This proves executable, profile routing, ACP installation,
+configuration, SearXNG identity, enabled-engine, and JSON-format layers;
+Hermes provider authentication, Exa authorization or quota, responsive upstream
+engines, useful results, Browse skills/browser launch, Browserbase, and
+streamed task behavior remain use-time evidence. Browse is required apparatus but invoked only when browser retrieval
+is needed. Linux Hermes 0.18.2 is one observed compatible point, not a version
+corridor; native Windows Hermes research remains unproved.
 
 Browserbase is Browse's optional cloud surface. Groq is optional question
 transcription, not Hermes inference. Each Connections row opens its own

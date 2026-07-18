@@ -8,7 +8,7 @@ use std::{
     error::Error,
     ffi::OsString,
     fs::{self, File, OpenOptions},
-    io,
+    io::{self, Read as _},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
     time::Duration,
@@ -58,6 +58,7 @@ const MAX_PREDICATE_CHARS: usize = 96;
 const MAX_PREDICATE_BYTES: usize = 384;
 const MAX_CREDENTIAL_CHARS: usize = 4_096;
 const MAX_CREDENTIAL_BYTES: usize = 16_384;
+const MAX_SEARXNG_CONFIG_BYTES: u64 = 1_048_576;
 const CURATION_RELATIONSHIPS_PER_PAGE: usize = 7;
 const HERMES_INSTALL_URL: &str = "https://hermes-agent.nousresearch.com";
 const BROWSE_INSTALL_URL: &str = "https://browse.sh";
@@ -222,37 +223,108 @@ fn prepare_research(
     Ok(PreparedResearch {
         environment,
         evidence: format!(
-            "{}; Browse and curl version commands passed; Exa was resolved from the Not News vault; SearXNG JSON capability passed. Provider authentication, Browse browser launch, and useful live results remain task evidence.",
+            "{}; Browse and curl version commands passed; Exa was resolved from the Not News vault; SearXNG identity, an enabled engine, and JSON search capability passed without dispatching a search. Responsive upstream engines, provider authentication, Browse browser launch, and useful live results remain task evidence.",
             compatibility.evidence
         ),
     })
 }
 
 fn validate_searxng_endpoint(searxng: &str) -> Result<(), String> {
-    let response = reqwest::blocking::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .map_err(|error| format!("SearXNG validation client failed: {error}"))?
-        .get(format!("{searxng}/search"))
-        .query(&[("q", "not-news connectivity"), ("format", "json")])
+        .map_err(|error| format!("SearXNG validation client failed: {error}"))?;
+    let configuration = check_searxng_configuration(&client, searxng);
+    let json_capability = check_searxng_json_capability(&client, searxng);
+    match (configuration, json_capability) {
+        // Deployments may hide /config behind a proxy; a queryless JSON probe
+        // that SearXNG answers is sufficient identity and capability evidence.
+        (_, Ok(())) => Ok(()),
+        (Ok(()), Err(json_error)) => Err(json_error),
+        (Err(configuration_error), Err(json_error)) => {
+            Err(format!("{configuration_error}; {json_error}"))
+        }
+    }
+}
+
+/// Proves `SearXNG` identity and an enabled engine through `/config`, which
+/// dispatches no search.
+fn check_searxng_configuration(
+    client: &reqwest::blocking::Client,
+    searxng: &str,
+) -> Result<(), String> {
+    let response = client
+        .get(format!("{searxng}/config"))
         .send()
         .map_err(|error| format!("SearXNG endpoint is unreachable: {error}"))?;
     if !response.status().is_success() {
         return Err(format!(
-            "SearXNG JSON search returned HTTP {}; correct it in Connections (Ctrl+,)",
+            "SearXNG configuration endpoint returned HTTP {}; correct it in Connections (Ctrl+,)",
             response.status()
         ));
     }
-    let response: serde_json::Value = response
-        .json()
-        .map_err(|error| format!("SearXNG endpoint did not return JSON search output: {error}"))?;
-    if !response
-        .get("results")
-        .is_some_and(serde_json::Value::is_array)
-    {
-        return Err("SearXNG JSON search output has no results array".into());
+    let mut body = Vec::new();
+    response
+        .take(MAX_SEARXNG_CONFIG_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| format!("SearXNG configuration response could not be read: {error}"))?;
+    if body.len() as u64 > MAX_SEARXNG_CONFIG_BYTES {
+        return Err("SearXNG configuration response exceeded the 1 MiB readiness limit".into());
+    }
+    let configuration: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|error| format!("SearXNG configuration endpoint did not return JSON: {error}"))?;
+    let identifies_searxng = configuration
+        .get("instance_name")
+        .is_some_and(serde_json::Value::is_string);
+    let has_enabled_engine = configuration
+        .get("engines")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|engines| {
+            engines.iter().any(|engine| {
+                engine
+                    .get("enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                    && engine
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|name| !name.is_empty())
+            })
+        });
+    if !identifies_searxng || !has_enabled_engine {
+        return Err(
+            "SearXNG configuration response did not identify an instance with an enabled engine"
+                .into(),
+        );
     }
     Ok(())
+}
+
+/// Proves the JSON output format is enabled without dispatching a search:
+/// `SearXNG` rejects a disallowed format with 403 before checking for a query,
+/// and answers a queryless allowed-format request with 400 "No query".
+fn check_searxng_json_capability(
+    client: &reqwest::blocking::Client,
+    searxng: &str,
+) -> Result<(), String> {
+    let response = client
+        .get(format!("{searxng}/search"))
+        .query(&[("format", "json")])
+        .send()
+        .map_err(|error| format!("SearXNG search endpoint is unreachable: {error}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Err(
+            "SearXNG JSON search is disabled; add `- json` to `search.formats` in its settings.yml"
+                .into(),
+        );
+    }
+    if status.is_success() || status == reqwest::StatusCode::BAD_REQUEST {
+        return Ok(());
+    }
+    Err(format!(
+        "SearXNG JSON capability probe returned HTTP {status}; correct it in Connections (Ctrl+,)"
+    ))
 }
 
 enum VoiceState {
@@ -4509,28 +4581,134 @@ mod app_tests {
 
     use super::*;
 
-    #[test]
-    fn searxng_gate_requires_the_json_search_contract() {
+    /// Serves one canned exchange per `(request-line prefix, status, body)`
+    /// element in order, recording every request for later inspection.
+    fn mock_searxng(
+        exchanges: Vec<(&'static str, &'static str, &'static str)>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 2_048];
-            let read = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..read]);
-            assert!(request.starts_with("GET /search?"));
-            assert!(request.contains("format=json"));
-            let body = r#"{"results":[],"unresponsive_engines":[]}"#;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
+            let mut requests = Vec::new();
+            for (prefix, status, body) in exchanges {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2_048];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                assert!(
+                    request.starts_with(prefix),
+                    "expected a request starting with {prefix:?}, got {request:?}"
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                requests.push(request);
+            }
+            requests
         });
+        (address, server)
+    }
+
+    const VALID_CONFIG: &str =
+        r#"{"instance_name":"SearXNG","engines":[{"name":"arxiv","enabled":true}]}"#;
+    const NO_QUERY: &str = r#"{"error":"No query"}"#;
+
+    #[test]
+    fn searxng_gate_probes_identity_and_json_capability_without_dispatching_a_search() {
+        let (address, server) = mock_searxng(vec![
+            ("GET /config HTTP/1.1\r\n", "200 OK", VALID_CONFIG),
+            (
+                "GET /search?format=json HTTP/1.1\r\n",
+                "400 Bad Request",
+                NO_QUERY,
+            ),
+        ]);
+
+        validate_searxng_endpoint(&format!("http://{address}")).unwrap();
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests.iter().all(|request| !request.contains("q=")),
+            "no probe may carry a query that dispatches a search: {requests:?}"
+        );
+    }
+
+    /// Regression: an instance whose `/config` looks healthy but whose
+    /// `search.formats` lacks `json` must not pass readiness; preflight used
+    /// to wave it through and every session search then failed at use time.
+    #[test]
+    fn searxng_gate_rejects_a_json_disabled_instance_with_a_settings_directive() {
+        let (address, server) = mock_searxng(vec![
+            ("GET /config HTTP/1.1\r\n", "200 OK", VALID_CONFIG),
+            ("GET /search?format=json HTTP/1.1\r\n", "403 Forbidden", ""),
+        ]);
+
+        let error = validate_searxng_endpoint(&format!("http://{address}")).unwrap_err();
+        assert!(error.contains("SearXNG JSON search is disabled"), "{error}");
+        assert!(error.contains("search.formats"), "{error}");
+        server.join().unwrap();
+    }
+
+    /// Deployments may hide `/config` behind a proxy; the queryless JSON
+    /// probe then carries both identity and capability evidence on its own.
+    #[test]
+    fn searxng_gate_falls_back_to_the_json_probe_when_config_is_hidden() {
+        let (address, server) = mock_searxng(vec![
+            ("GET /config HTTP/1.1\r\n", "404 Not Found", ""),
+            (
+                "GET /search?format=json HTTP/1.1\r\n",
+                "400 Bad Request",
+                NO_QUERY,
+            ),
+        ]);
 
         validate_searxng_endpoint(&format!("http://{address}")).unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn searxng_gate_rejects_generic_json_without_searching_it() {
+        let (address, server) = mock_searxng(vec![
+            ("GET /config HTTP/1.1\r\n", "200 OK", r#"{"results":[]}"#),
+            ("GET /search?format=json HTTP/1.1\r\n", "404 Not Found", ""),
+        ]);
+
+        let error = validate_searxng_endpoint(&format!("http://{address}")).unwrap_err();
+        assert!(
+            error.contains("identify an instance with an enabled engine"),
+            "{error}"
+        );
+        assert!(error.contains("HTTP 404"), "{error}");
+        server.join().unwrap();
+    }
+
+    /// Live end-to-end gates, exercised manually against a real deployment:
+    /// `NOT_NEWS_TEST_SEARXNG_URL=http://127.0.0.1:8889 cargo test -- --ignored`.
+    fn live_searxng_url() -> Option<String> {
+        std::env::var("NOT_NEWS_TEST_SEARXNG_URL").ok()
+    }
+
+    #[test]
+    #[ignore = "requires a live SearXNG with JSON search enabled"]
+    fn searxng_gate_accepts_a_live_json_capable_instance() {
+        let Some(url) = live_searxng_url() else {
+            return;
+        };
+        validate_searxng_endpoint(&url).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a live SearXNG with JSON search disabled"]
+    fn searxng_gate_rejects_a_live_json_disabled_instance() {
+        let Some(url) = live_searxng_url() else {
+            return;
+        };
+        let error = validate_searxng_endpoint(&url).unwrap_err();
+        assert!(error.contains("SearXNG JSON search is disabled"), "{error}");
     }
 
     #[test]

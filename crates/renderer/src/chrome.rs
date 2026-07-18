@@ -2487,7 +2487,7 @@ mod tests {
 
     #[test]
     fn desktop_status_preserves_the_complete_searxng_reachability_diagnostic() {
-        let message = "Research did not start; the offline canvas remains available. SearXNG endpoint is unreachable: error sending request for url (http://127.0.0.1:8889/search?q=not-news%20connectivity&format=json)";
+        let message = "Research did not start; the offline canvas remains available. SearXNG endpoint is unreachable: error sending request for url (http://127.0.0.1:8889/config); SearXNG search endpoint is unreachable: error sending request for url (http://127.0.0.1:8889/search?format=json)";
         let message_width = 420.0 - 82.0;
         STATUS_TEXT.with(|resources| {
             let mut resources = resources.borrow_mut();

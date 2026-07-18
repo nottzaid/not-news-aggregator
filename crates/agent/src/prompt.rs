@@ -14,9 +14,14 @@ with source-qualified queries, broader categories, or a looser time range. Use
 Hermes web_extract for Exa-backed retrieval, then compare SearXNG and Exa candidate
 sets instead of letting either dominate. Browserbase cloud is an optional Browse
 execution surface when configured, never a prerequisite for local Browse/skills.
-Treat search snippets and extraction output as leads, not final evidence. Prefer
-official documentation, releases, papers, filings, standards, repositories, and
-original announcements for final claims. Never expose credentials in output."#;
+Search-result snippets are candidate leads, never final evidence. Every new
+event.url and artifact.url is a final supporting URL: before emitting it,
+successfully retrieve that URL's supporting content in this session with Hermes
+web_extract or Browse, and verify that the retrieved content supports the emitted
+claim. If retrieval fails, do not emit that URL or a claim dependent on it; report
+the limitation in a session.message and continue with sources you did retrieve.
+Prefer official documentation, releases, papers, filings, standards, repositories,
+and original announcements for final claims. Never expose credentials in output."#;
 
 /// Builds the provider-neutral research contract and a bounded identity digest
 /// of the graph that new findings must join.
@@ -114,6 +119,9 @@ mod tests {
         assert!(prompt.contains("What changed?"));
         assert!(prompt.contains("emit exactly one spoken orientation"));
         assert!(prompt.contains(r#""type":"voice.note""#));
+        assert!(prompt.contains("Every new\nevent.url and artifact.url"));
+        assert!(prompt.contains("successfully retrieve that URL's supporting content"));
+        assert!(prompt.contains("If retrieval fails, do not emit that URL"));
         assert!(!prompt.contains("private long-form workspace note"));
     }
 
