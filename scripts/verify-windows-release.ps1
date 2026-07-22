@@ -15,6 +15,10 @@ New-Item $scratch -ItemType Directory | Out-Null
 $relocated = Join-Path $scratch "renamed-not-news.exe"
 Copy-Item $binary $relocated
 if ((Get-FileHash $binary).Hash -ne (Get-FileHash $relocated).Hash) { throw "relocation changed the executable" }
+$licenses = (& $relocated --licenses | Out-String)
+if (-not $licenses.Contains("Manrope") -or -not $licenses.Contains("JetBrains Mono")) {
+    throw "embedded font license notices are unavailable"
+}
 
 function Invoke-SelfCheck([string]$renderer, [string]$name) {
     $previous = $env:NOT_NEWS_FORCE_SOFTWARE

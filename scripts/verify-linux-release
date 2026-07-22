@@ -54,12 +54,38 @@ assert_self_check() {
     <<<"$1" >/dev/null
 }
 
+licenses=$("$scratch/not-news" --licenses)
+grep -Fxq Manrope <<<"$licenses"
+grep -Fxq 'JetBrains Mono' <<<"$licenses"
+
 automatic=$(present "$scratch/not-news" --release-self-check "$scratch/automatic")
 printf '%s\n' "$automatic"
 assert_self_check "$automatic" auto
 software=$(NOT_NEWS_FORCE_SOFTWARE=1 present "$scratch/not-news" --release-self-check "$scratch/software")
 printf '%s\n' "$software"
 assert_self_check "$software" skia-raster
+
+modern_fontconfig="$scratch/modern-fontconfig.conf"
+printf '%s\n' \
+  '<?xml version="1.0"?>' \
+  '<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">' \
+  '<fontconfig>' \
+  '  <match target="pattern">' \
+  '    <test qual="all" name="genericfamily" compare="contains">' \
+  '      <const xsi:nil="true"/>' \
+  '    </test>' \
+  '  </match>' \
+  '</fontconfig>' >"$modern_fontconfig"
+modern=$(export FONTCONFIG_FILE="$modern_fontconfig"; present \
+  "$scratch/not-news" --release-self-check "$scratch/modern" 2>"$scratch/modern.stderr")
+printf '%s\n' "$modern"
+assert_self_check "$modern" auto
+if grep -Eq '^Fontconfig (error|warning):' "$scratch/modern.stderr"; then
+  echo 'the embedded Fontconfig parser rejected current configuration syntax' >&2
+  cat "$scratch/modern.stderr" >&2
+  exit 1
+fi
+
 capabilities=$(
   EXA_API_KEY=must-be-ignored \
   GROQ_API_KEY=must-be-ignored \

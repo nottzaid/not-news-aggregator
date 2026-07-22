@@ -36,10 +36,10 @@ jobs:
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends \
-            autoconf automake build-essential ca-certificates clang curl file git jq libasound2-dev \
+            autoconf automake build-essential ca-certificates clang curl file git gperf jq libasound2-dev \
             libbrotli-dev libbz2-dev libexpat1-dev libfontconfig1-dev libfreetype-dev \
             libgl1-mesa-dri libpng-dev libtool libxcursor1 libxi6 libxkbcommon-x11-0 \
-            pkg-config xz-utils xvfb zlib1g-dev
+            pkg-config python3 xz-utils xvfb zlib1g-dev
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 

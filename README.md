@@ -168,12 +168,15 @@ NOT_NEWS_FORCE_SOFTWARE=1 cargo run -p not-news-platform --example hidden_smoke
 ./scripts/verify-linux-release
 ```
 
-`prepare-linux-release` checks out the pinned upstream ALSA revision beneath
-ignored `target/`, verifies its exact commit, and builds the static archive used
-by the final ELF. The release host must also provide the static development
-archives named by `package-linux`; the Ubuntu 20.04 release job installs and
-tests that environment from scratch. The custom release linker changes only
-those named substantial libraries to static linkage and leaves glibc plus host
+`prepare-linux-release` checks out pinned upstream ALSA and downloads the
+official Fontconfig source release beneath ignored `target/`, verifies the exact
+commit and archive hash, and builds the static archives used by the final ELF.
+Building current Fontconfig on the oldest supported glibc floor lets the
+standalone parser understand both old and new host font configurations. The
+release host must also provide the remaining static development archives named
+by `package-linux`; the Ubuntu 20.04 release job installs and tests that
+environment from scratch. The custom release linker changes only those named
+substantial libraries to static linkage and leaves glibc plus host
 hardware/display loading dynamic.
 
 `scripts/dev` may load ignored `.env` controls for Hermes bounds and optional
