@@ -1,8 +1,6 @@
 # Rust build and delivery output
 /target/
 /dist/
-*.AppImage
-*.AppImage.zsync
 
 # Private configuration and application state
 .env

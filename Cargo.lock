@@ -1997,7 +1997,7 @@ dependencies = [
 
 [[package]]
 name = "not-news-agent"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "command-group",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "not-news-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arboard",
  "fs2",
@@ -2038,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "not-news-audio"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "command-group",
  "cpal",
@@ -2055,7 +2055,7 @@ dependencies = [
 
 [[package]]
 name = "not-news-domain"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "indexmap",
  "proptest",
@@ -2065,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "not-news-platform"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "gl",
  "glutin",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "not-news-renderer"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "indexmap",
  "not-news-domain",
@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "not-news-store"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "indexmap",
  "not-news-domain",

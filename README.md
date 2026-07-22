@@ -13,7 +13,7 @@ saved graph remains open and editable without Hermes, network access, or an
 inference provider.
 
 Download the current unsigned Windows/Linux prerelease from
-[Not News 0.3.0](https://github.com/muradkant/not-news-aggregator/releases/tag/rust-v0.3.0).
+[Not News 0.3.1](https://github.com/muradkant/not-news-aggregator/releases/tag/rust-v0.3.1).
 
 ## Operate the canvas
 
@@ -108,33 +108,45 @@ authority and see injected values. Exact, percent-, base64-, and hex-encoded
 echoes are redacted before app-controlled display and SQLite persistence;
 transformed exfiltration remains possible. Read [HERMES.md](HERMES.md).
 
-## Install a release
+## Run a release
 
-Each release contains:
+Each release uploads exactly two application payloads:
 
-- Linux: desktop-integrated `.deb`, relocatable AppImage, and `tar.xz`;
-- Windows: current-user NSIS installer and relocatable `.zip`.
+- `not-news-linux-x86_64`, one ordinary Linux ELF;
+- `not-news-windows-x86_64.exe`, one ordinary Windows executable.
 
-No payload requires Rust, Flutter, Python, Clang, or a source checkout. Each
-installed and portable form contains `OPERATING.md`, `README.md`, and
-`HERMES.md`; AppImages downloaded through a browser may require `chmod +x`.
-Release attachments include SHA-256 sums, source/build identity, dependency and
-license inventories, and renderer results. CI executes each portable form, exercises
-window presentation plus a disposable SQLite import/mutation/reopen sequence,
-and checks package installation, reinstallation, removal, and survival of a
-per-user marker. Those checks do not authenticate Hermes, query Exa or SearXNG,
-exercise Browse, unlock an OS vault, hear audio, or validate Linux under Wayland;
-the Linux window evidence runs under X11/Xvfb. The authenticated
-Hermes-to-canvas and live-vault tests remain opt-in. Unsigned previews may
-trigger Windows reputation warnings; a self-signed certificate would not
-satisfy the stable-release signing gate.
+They are the programs themselves: there is no package manager, installer,
+archive, extraction step, adjacent runtime directory, or language toolchain. On
+Linux, make the downloaded file executable once with `chmod +x
+not-news-linux-x86_64`, then run it. On Windows, run the `.exe`; unsigned previews
+may trigger a reputation warning.
 
-Ordinary uninstall preserves graph, settings, vault entries, and owned Hermes
-history. Connections exposes a separately confirmed complete erase: after all
-other instances close and the user types `ERASE`, it confirms deletion of all
-Not News vault accounts, then removes application state, known graph migration
-backups, and only an exactly marker-owned Hermes profile. Vault and filesystem
-stores cannot form one transaction, so partial/unconfirmed failure is reported.
+The bundled font notices remain accessible inside either standalone executable
+with `--licenses`.
+
+The Linux build follows the established single-ELF model used by native desktop
+applications: fonts, rendering, database, TLS, audio, and other substantial
+libraries are linked into the ELF, while glibc and runtime-selected host
+display/graphics interfaces remain operating-system boundaries. It targets
+x86-64 glibc 2.31 or newer and supports native Wayland or X11. It never mounts
+or extracts an embedded filesystem.
+
+CI relocates and directly executes each final file. Both the automatic and
+software renderers must present a hidden window and complete a disposable
+SQLite import/mutation/reopen sequence. The Linux release additionally fails
+if ALSA, C++, FreeType, Fontconfig, PNG, Brotli, bzip2, or Expat leaks back into
+its shared-library table, or if its glibc requirement exceeds 2.31. These checks
+do not authenticate Hermes, query Exa or SearXNG, exercise Browse, unlock an OS
+vault, hear audio, or validate Linux under a real Wayland compositor; the Linux
+window evidence runs under X11/Xvfb. The authenticated Hermes-to-canvas and
+live-vault tests remain opt-in.
+
+Deleting the executable does not delete research. Connections exposes a
+separately confirmed complete erase: after all other instances close and the
+user types `ERASE`, it confirms deletion of all Not News vault accounts, then
+removes application state, known graph migration backups, and only an exactly
+marker-owned Hermes profile. Vault and filesystem stores cannot form one
+transaction, so partial/unconfirmed failure is reported.
 
 ## Build and verify
 
@@ -151,9 +163,18 @@ cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p not-news-platform --example hidden_smoke
 NOT_NEWS_FORCE_SOFTWARE=1 cargo run -p not-news-platform --example hidden_smoke
+./scripts/prepare-linux-release
 ./scripts/package-linux
 ./scripts/verify-linux-release
 ```
+
+`prepare-linux-release` checks out the pinned upstream ALSA revision beneath
+ignored `target/`, verifies its exact commit, and builds the static archive used
+by the final ELF. The release host must also provide the static development
+archives named by `package-linux`; the Ubuntu 20.04 release job installs and
+tests that environment from scratch. The custom release linker changes only
+those named substantial libraries to static linkage and leaves glibc plus host
+hardware/display loading dynamic.
 
 `scripts/dev` may load ignored `.env` controls for Hermes bounds and optional
 Kokoro output; it does not source Not News credentials or start an obsolete

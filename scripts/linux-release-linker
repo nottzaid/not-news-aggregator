@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+static_root=${NOT_NEWS_STATIC_ROOT:?NOT_NEWS_STATIC_ROOT must point to the prepared static libraries}
+arguments=("-L$static_root/lib")
+
+for argument in "$@"; do
+  case "$argument" in
+    -lasound|-lstdc++|-lfreetype|-lfontconfig|-lbz2|-lpng16|-lz|-lbrotlidec|-lbrotlicommon|-lexpat|-luuid)
+      arguments+=("-Wl,-Bstatic" "$argument" "-Wl,-Bdynamic")
+      ;;
+    -lgcc_s)
+      arguments+=("-Wl,-Bstatic" "-lgcc_eh" "-Wl,-Bdynamic")
+      ;;
+    *)
+      arguments+=("$argument")
+      ;;
+  esac
+done
+
+exec "${NOT_NEWS_SYSTEM_LINKER:-cc}" "${arguments[@]}"

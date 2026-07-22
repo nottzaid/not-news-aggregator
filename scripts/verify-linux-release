@@ -3,38 +3,38 @@ set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
-version=$(cargo metadata --no-deps --filter-platform x86_64-unknown-linux-gnu --format-version 1 | jq -r '.packages[] | select(.name == "not-news-app") | .version')
-appimage="$root/dist/not-news_${version}_linux-x86_64.AppImage"
-deb="$root/dist/not-news_${version}_linux-x86_64.deb"
-archive="$root/dist/not-news_${version}_linux-x86_64.tar.xz"
-runtime="$root/dist/RUNTIME-linux-x86_64.json"
-expected_commit=$(git rev-parse HEAD)
+binary="$root/dist/not-news-linux-x86_64"
+expected_commit=${GITHUB_SHA:-$(git rev-parse HEAD)}
 
-rm -f "$runtime"
-sed -i '/  RUNTIME-linux-x86_64\.json$/d' "$root/dist/SHA256SUMS-linux-x86_64.txt"
+test -x "$binary"
+test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 1
+file "$binary" | grep -Fq 'ELF 64-bit LSB'
+file "$binary" | grep -Fq 'dynamically linked'
 
-for artifact in \
-  "$appimage" \
-  "$deb" \
-  "$archive" \
-  "$root/dist/BUILDINFO-linux-x86_64.json" \
-  "$root/dist/DEPENDENCIES-linux-x86_64.json" \
-  "$root/dist/SHA256SUMS-linux-x86_64.txt"; do
-  test -f "$artifact" || {
-    echo "missing release artifact: $artifact" >&2
+needed=$(readelf -d "$binary" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
+unexpected=$(grep -Ev '^(libc\.so\.6|libm\.so\.6|libdl\.so\.2|libpthread\.so\.0|librt\.so\.1|ld-linux-x86-64\.so\.2)$' <<<"$needed" || true)
+if test -n "$unexpected"; then
+  printf 'unexpected shared-library dependencies:\n%s\n' "$unexpected" >&2
+  exit 1
+fi
+for forbidden in libasound libstdc++ libgcc_s libfreetype libfontconfig libpng libbrotli libbz2 libexpat; do
+  ! grep -Fq "$forbidden" <<<"$needed" || {
+    echo "$forbidden leaked into the single-ELF runtime boundary" >&2
     exit 1
   }
 done
-(cd dist && sha256sum -c SHA256SUMS-linux-x86_64.txt)
-jq -e --arg commit "$(git rev-parse HEAD)" \
-  '.commit == $commit and .packager == "cargo-packager 0.11.8"' \
-  dist/BUILDINFO-linux-x86_64.json >/dev/null
-jq -e \
-  '.packages | length > 0 and all(.[]; has("name") and has("version") and has("license"))' \
-  dist/DEPENDENCIES-linux-x86_64.json >/dev/null
+
+maximum_glibc=$(objdump -T "$binary" | grep -Eo 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1)
+if test "$(printf '%s\n' GLIBC_2.31 "$maximum_glibc" | sort -Vu | tail -1)" != GLIBC_2.31; then
+  echo "the ELF requires $maximum_glibc; the release ceiling is GLIBC_2.31" >&2
+  exit 1
+fi
 
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
+cp "$binary" "$scratch/not-news"
+chmod 0755 "$scratch/not-news"
+cmp "$binary" "$scratch/not-news"
 
 present() {
   if [[ -n ${WAYLAND_DISPLAY:-} || -n ${DISPLAY:-} ]]; then
@@ -54,105 +54,23 @@ assert_self_check() {
     <<<"$1" >/dev/null
 }
 
-cp "$appimage" "$scratch/relocated-not-news.AppImage"
-chmod +x "$scratch/relocated-not-news.AppImage"
-mkdir "$scratch/appimage-payload"
-(
-  cd "$scratch/appimage-payload"
-  "$scratch/relocated-not-news.AppImage" --appimage-extract >/dev/null
-)
-cmp assets/fonts/manrope/OFL.txt \
-  "$scratch/appimage-payload/squashfs-root/usr/lib/not-news-app/licenses/Manrope-OFL.txt"
-cmp assets/fonts/jetbrainsmono/OFL.txt \
-  "$scratch/appimage-payload/squashfs-root/usr/lib/not-news-app/licenses/JetBrains-Mono-OFL.txt"
-for guide in README.md HERMES.md OPERATING.md; do
-  cmp "$guide" "$scratch/appimage-payload/squashfs-root/usr/lib/not-news-app/$guide"
-done
-appimage_auto=$(APPIMAGE_EXTRACT_AND_RUN=1 present \
-  "$scratch/relocated-not-news.AppImage" \
-  --release-self-check "$scratch/appimage-check")
-printf '%s\n' "$appimage_auto"
-assert_self_check "$appimage_auto" auto
-appimage_software=$(NOT_NEWS_FORCE_SOFTWARE=1 APPIMAGE_EXTRACT_AND_RUN=1 present \
-  "$scratch/relocated-not-news.AppImage" \
-  --release-self-check "$scratch/appimage-software-check")
-printf '%s\n' "$appimage_software"
-assert_self_check "$appimage_software" skia-raster
-appimage_capabilities=$(EXA_API_KEY=must-be-ignored \
+automatic=$(present "$scratch/not-news" --release-self-check "$scratch/automatic")
+printf '%s\n' "$automatic"
+assert_self_check "$automatic" auto
+software=$(NOT_NEWS_FORCE_SOFTWARE=1 present "$scratch/not-news" --release-self-check "$scratch/software")
+printf '%s\n' "$software"
+assert_self_check "$software" skia-raster
+capabilities=$(
+  EXA_API_KEY=must-be-ignored \
   GROQ_API_KEY=must-be-ignored \
   BROWSERBASE_API_KEY=must-be-ignored \
   SEARXNG_URL=https://must-be-ignored.invalid \
-  APPIMAGE_EXTRACT_AND_RUN=1 \
-  "$scratch/relocated-not-news.AppImage" \
-  --capability-check "$scratch/capabilities")
-printf '%s\n' "$appimage_capabilities"
+  "$scratch/not-news" --capability-check "$scratch/capabilities"
+)
+printf '%s\n' "$capabilities"
 jq -e --arg commit "${expected_commit:0:12}" \
-   '.capability_check == "pass" and .commit == $commit and
+  '.capability_check == "pass" and .commit == $commit and
    .research.runtime == "hermes" and .research.profile_policy == "installed-v2" and
-   (.research.executable == "present" or .research.executable == "missing") and
-   .research.compatibility == "deferred-to-exact-pre-research-acp-check" and
-   (.research | has("selected") | not) and (.research | has("opencode") | not) and
-   .discovery.exa_configuration == "deferred-os-vault-probe" and
    .discovery.searxng_endpoint == "missing" and
-   (.discovery.browse_executable == "present" or .discovery.browse_executable == "missing") and
-   (.discovery.curl_executable == "present" or .discovery.curl_executable == "missing") and
-   .discovery.browserbase_configuration == "optional-deferred-os-vault-probe" and
-   .transcription.configuration == "deferred-os-vault-probe" and
-   (.transcription.os_vault_probe | type == "string") and
-   (.microphone.state | type == "string") and
-   (.kokoro.state | type == "string")' \
-  <<<"$appimage_capabilities" >/dev/null
-grep -Fq 'research agent for Not News' "$scratch/capabilities/hermes/profiles/not-news/SOUL.md"
-test -f "$scratch/capabilities/hermes/profiles/not-news/config.yaml"
-test -f "$scratch/capabilities/hermes/profiles/not-news/memories/USER.md"
-
-mkdir "$scratch/deb"
-(
-  cd "$scratch/deb"
-  ar x "$deb"
-  tar -xzf data.tar.gz
-)
-cmp target/release/not-news-app "$scratch/deb/usr/bin/not-news-app"
-grep -Fx 'Name=Not News' "$scratch/deb/usr/share/applications/not-news-app.desktop"
-grep -Fx 'Icon=not-news-app' "$scratch/deb/usr/share/applications/not-news-app.desktop"
-cmp assets/fonts/manrope/OFL.txt \
-  "$scratch/deb/usr/lib/not-news-app/licenses/Manrope-OFL.txt"
-cmp assets/fonts/jetbrainsmono/OFL.txt \
-  "$scratch/deb/usr/lib/not-news-app/licenses/JetBrains-Mono-OFL.txt"
-for guide in README.md HERMES.md OPERATING.md; do
-  cmp "$guide" "$scratch/deb/usr/lib/not-news-app/$guide"
-done
-deb_auto=$(present \
-  "$scratch/deb/usr/bin/not-news-app" \
-  --release-self-check "$scratch/deb-check")
-printf '%s\n' "$deb_auto"
-assert_self_check "$deb_auto" auto
-
-mkdir "$scratch/archive"
-tar -xJf "$archive" -C "$scratch/archive"
-portable="$scratch/archive/not-news_${version}_linux-x86_64/not-news-app"
-cmp target/release/not-news-app "$portable"
-cmp assets/fonts/manrope/OFL.txt \
-  "$scratch/archive/not-news_${version}_linux-x86_64/licenses/Manrope-OFL.txt"
-cmp assets/fonts/jetbrainsmono/OFL.txt \
-  "$scratch/archive/not-news_${version}_linux-x86_64/licenses/JetBrains-Mono-OFL.txt"
-for guide in README.md HERMES.md OPERATING.md; do
-  cmp "$guide" "$scratch/archive/not-news_${version}_linux-x86_64/$guide"
-done
-archive_auto=$(present "$portable" --release-self-check "$scratch/archive-check")
-printf '%s\n' "$archive_auto"
-assert_self_check "$archive_auto" auto
-
-jq -n \
-  --arg commit "$expected_commit" \
-  --argjson appimage_auto "$appimage_auto" \
-  --argjson appimage_software "$appimage_software" \
-  --argjson appimage_capabilities "$appimage_capabilities" \
-  --argjson deb_auto "$deb_auto" \
-  --argjson archive_auto "$archive_auto" \
-  '{schema: 1, commit: $commit, appimage_auto: $appimage_auto, appimage_software: $appimage_software, appimage_capabilities: $appimage_capabilities, deb_auto: $deb_auto, archive_auto: $archive_auto}' \
-  > "$runtime"
-(
-  cd dist
-  sha256sum RUNTIME-linux-x86_64.json >> SHA256SUMS-linux-x86_64.txt
-)
+   .transcription.configuration == "deferred-os-vault-probe"' \
+  <<<"$capabilities" >/dev/null

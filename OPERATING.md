@@ -1,14 +1,16 @@
 # Not News preview operating guide
 
-This guide belongs to the artifact containing it. Not News is an unsigned x86-64
-Windows/Linux preview. Windows SmartScreen may warn; Linux AppImages downloaded
-through a browser may need `chmod +x not-news_*.AppImage`. AppImage extract-run
-is supported with `APPIMAGE_EXTRACT_AND_RUN=1`; the `.deb` supplies a desktop
-entry. Linux package checks cover X11/Xvfb, not Wayland.
+Not News is an unsigned x86-64 Windows/Linux preview. Each release has one
+ordinary Linux ELF and one ordinary Windows executable—no installer, archive,
+or adjacent runtime directory. Windows may show a reputation warning.
+Linux browser downloads may need `chmod +x not-news-linux-x86_64` once. Release
+presentation checks cover X11/Xvfb, not a real Wayland compositor.
 
-The `.deb` declares libc, GCC/C++ runtime, ALSA, Fontconfig, FreeType, OpenGL,
-X11, XKB/XKB-X11, and Wayland client libraries. Portable Linux forms require
-equivalent host runtime libraries; they do not install system packages.
+The Linux ELF absorbs the application, assets, and substantial native
+libraries. It retains glibc 2.31+ and runtime-selected X11/Wayland,
+keyboard-layout, and graphics-driver interfaces as host boundaries. ALSA is
+linked into the executable, though host audio configuration can select external
+plugins. The binary neither mounts nor extracts a bundled filesystem.
 
 The canvas opens, edits, imports, undoes, and reopens saved graphs without
 Hermes, a provider, discovery services, or network access. Press `Ctrl+,` for

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+static_root=${NOT_NEWS_STATIC_ROOT:-$root/target/release-static}
+source_root="$static_root/src/alsa-lib"
+alsa_commit=81d70a27136840fa8fb1bec6eb8e04fc1475a380
+
+if test -f "$static_root/lib/libasound.a"; then
+  exit 0
+fi
+
+mkdir -p "$static_root/src"
+if ! test -d "$source_root/.git"; then
+  git clone --filter=blob:none https://github.com/alsa-project/alsa-lib.git "$source_root"
+fi
+git -C "$source_root" fetch --depth=1 origin "$alsa_commit"
+git -C "$source_root" checkout --detach "$alsa_commit"
+test "$(git -C "$source_root" rev-parse HEAD)" = "$alsa_commit"
+
+(
+  cd "$source_root"
+  autoreconf --force --install
+  ./configure \
+    --prefix="$static_root" \
+    --disable-shared \
+    --enable-static \
+    --disable-python
+  make -j"$(getconf _NPROCESSORS_ONLN)"
+  make install
+)
+test -f "$static_root/lib/libasound.a"

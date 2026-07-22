@@ -63,6 +63,8 @@ const CURATION_RELATIONSHIPS_PER_PAGE: usize = 7;
 const HERMES_INSTALL_URL: &str = "https://hermes-agent.nousresearch.com";
 const BROWSE_INSTALL_URL: &str = "https://browse.sh";
 const CURL_INSTALL_URL: &str = "https://curl.se/download.html";
+const MANROPE_LICENSE: &str = include_str!("../../../assets/fonts/manrope/OFL.txt");
+const JETBRAINS_MONO_LICENSE: &str = include_str!("../../../assets/fonts/jetbrainsmono/OFL.txt");
 use not_news_renderer::{
     ChromeControl, CurationMenu, Motion, RecordOrbState, SceneAnimation, SceneState,
     ViewportTransform, active_metadata_scroll_max, activity_scroll_max,
@@ -4137,6 +4139,12 @@ fn remove_external_graph_family(database: &Path) -> io::Result<()> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = startup_options(std::env::args_os().skip(1))?;
+    if options.show_licenses {
+        println!(
+            "Manrope\n=======\n{MANROPE_LICENSE}\n\nJetBrains Mono\n===============\n{JETBRAINS_MONO_LICENSE}"
+        );
+        return Ok(());
+    }
     if let Some(root) = options.capability_root {
         return run_capability_check(&root);
     }
@@ -4201,6 +4209,7 @@ struct StartupOptions {
     release_smoke: Option<PathBuf>,
     performance_source: Option<PathBuf>,
     capability_root: Option<PathBuf>,
+    show_licenses: bool,
 }
 
 fn startup_options(
@@ -4214,6 +4223,7 @@ fn startup_options(
             release_smoke: None,
             performance_source: None,
             capability_root: None,
+            show_licenses: false,
         });
     }
     let mut database = None;
@@ -4221,9 +4231,15 @@ fn startup_options(
     let mut release_smoke = None;
     let mut performance_source = None;
     let mut capability_root = None;
+    let mut show_licenses = false;
     let mut index = 0;
     while index < arguments.len() {
         let flag = &arguments[index];
+        if flag == "--licenses" && !show_licenses {
+            show_licenses = true;
+            index += 1;
+            continue;
+        }
         let value = arguments.get(index + 1).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -4250,7 +4266,8 @@ fn startup_options(
     }
     let check_count = usize::from(release_smoke.is_some())
         + usize::from(performance_source.is_some())
-        + usize::from(capability_root.is_some());
+        + usize::from(capability_root.is_some())
+        + usize::from(show_licenses);
     if check_count > 1 || check_count == 1 && (database.is_some() || import_legacy.is_some()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -4263,6 +4280,7 @@ fn startup_options(
         release_smoke,
         performance_source,
         capability_root,
+        show_licenses,
     })
 }
 
@@ -5530,6 +5548,17 @@ mod app_tests {
         );
         assert_eq!(options.import_legacy, Some(PathBuf::from("legacy.sqlite")));
         assert!(startup_options([std::ffi::OsString::from("--import-legacy")]).is_err());
+
+        let licenses = startup_options([std::ffi::OsString::from("--licenses")]).unwrap();
+        assert!(licenses.show_licenses);
+        assert!(
+            startup_options([
+                std::ffi::OsString::from("--licenses"),
+                std::ffi::OsString::from("--database"),
+                std::ffi::OsString::from("destination.sqlite"),
+            ])
+            .is_err()
+        );
 
         let performance = startup_options([
             std::ffi::OsString::from("--performance-check"),
