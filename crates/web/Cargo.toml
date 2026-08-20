@@ -1,0 +1,21 @@
+[package]
+name = "not-news-web"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "not_news_web"
+path = "src/main.rs"
+
+[dependencies]
+gl.workspace = true
+not-news-domain = { path = "../domain" }
+not-news-interaction = { path = "../interaction" }
+not-news-renderer = { path = "../renderer" }
+serde_json.workspace = true
+skia-safe.workspace = true
+
+[build-dependencies]
+not-news-store = { path = "../store" }
+serde_json.workspace = true

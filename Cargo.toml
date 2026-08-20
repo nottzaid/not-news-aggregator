@@ -4,9 +4,11 @@ members = [
   "crates/app",
   "crates/audio",
   "crates/domain",
+  "crates/interaction",
   "crates/platform",
   "crates/renderer",
   "crates/store",
+  "crates/web",
 ]
 resolver = "3"
 

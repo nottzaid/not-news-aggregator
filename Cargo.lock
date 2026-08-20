@@ -2022,6 +2022,7 @@ dependencies = [
  "not-news-agent",
  "not-news-audio",
  "not-news-domain",
+ "not-news-interaction",
  "not-news-platform",
  "not-news-renderer",
  "not-news-store",
@@ -2064,6 +2065,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "not-news-interaction"
+version = "0.3.1"
+dependencies = [
+ "indexmap",
+ "not-news-domain",
+ "not-news-renderer",
+]
+
+[[package]]
 name = "not-news-platform"
 version = "0.3.1"
 dependencies = [
@@ -2099,6 +2109,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "not-news-web"
+version = "0.1.0"
+dependencies = [
+ "gl",
+ "not-news-domain",
+ "not-news-interaction",
+ "not-news-renderer",
+ "not-news-store",
+ "serde_json",
+ "skia-safe",
 ]
 
 [[package]]

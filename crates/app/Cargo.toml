@@ -11,6 +11,7 @@ keyring.workspace = true
 not-news-agent = { path = "../agent" }
 not-news-audio = { path = "../audio" }
 not-news-domain = { path = "../domain" }
+not-news-interaction = { path = "../interaction" }
 not-news-platform = { path = "../platform" }
 not-news-renderer = { path = "../renderer" }
 not-news-store = { path = "../store" }

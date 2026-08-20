@@ -1,21 +1,21 @@
 use std::{cell::RefCell, collections::HashMap};
 
 use skia_safe::{
-    BlurStyle, Canvas, Color4f, FontArguments, FontMgr, FontStyle, MaskFilter, Paint, PaintStyle,
-    Path, PathBuilder, RRect, Rect,
-    font_arguments::{VariationPosition, variation_position::Coordinate},
+    font_arguments::{variation_position::Coordinate, VariationPosition},
     font_style::{Slant, Weight, Width},
     textlayout::{
         FontCollection, ParagraphBuilder, ParagraphStyle, TextAlign, TextDirection, TextStyle,
         TypefaceFontProvider,
     },
+    BlurStyle, Canvas, Color4f, FontArguments, FontMgr, FontStyle, MaskFilter, Paint, PaintStyle,
+    Path, PathBuilder, RRect, Rect,
 };
 
 use not_news_domain::{Point as WorldPoint, ResearchEvent};
 
 use crate::palette::{
-    DISPLAY_FONT, HAIRLINE, HAIRLINE_DIM, INK_0, MONO_FONT, PANEL, PANEL_RAISED, SIGNAL,
-    SIGNAL_HOT_DEEP, TEXT, TEXT_DIM, TEXT_FAINT, color, color4f_with_alpha,
+    color, color4f_with_alpha, DISPLAY_FONT, HAIRLINE, HAIRLINE_DIM, INK_0, MONO_FONT, PANEL,
+    PANEL_RAISED, SIGNAL, SIGNAL_HOT_DEEP, TEXT, TEXT_DIM, TEXT_FAINT,
 };
 
 const RECORD_DIAMETER: f32 = 72.0;
@@ -530,11 +530,19 @@ fn activity_panel_width_f32(width: f32) -> f32 {
 }
 
 fn activity_top(width: f32) -> f32 {
-    if width > 960.0 { 72.0 } else { 84.0 }
+    if width > 960.0 {
+        72.0
+    } else {
+        84.0
+    }
 }
 
 fn activity_top_f64(width: f64) -> f64 {
-    if width > 960.0 { 72.0 } else { 84.0 }
+    if width > 960.0 {
+        72.0
+    } else {
+        84.0
+    }
 }
 
 /// Paints Flutter's persistent record orb and zoom/reset/clear control strip.
@@ -2172,7 +2180,7 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use not_news_domain::EventId;
-    use skia_safe::{Data, Image, ImageInfo, image::CachingHint, surfaces};
+    use skia_safe::{image::CachingHint, surfaces, Data, Image, ImageInfo};
 
     use super::*;
 
@@ -2444,11 +2452,9 @@ mod tests {
                 [(0, 38), (39, 78), (79, 120), (121, 159), (160, 183)]
             );
             assert!(lines.iter().all(|line| line.width < 280.0));
-            assert!(
-                lines
-                    .windows(2)
-                    .all(|pair| { ((pair[1].baseline - pair[0].baseline) - 20.0).abs() < 0.001 })
-            );
+            assert!(lines
+                .windows(2)
+                .all(|pair| { ((pair[1].baseline - pair[0].baseline) - 20.0).abs() < 0.001 }));
         });
     }
 
@@ -2478,11 +2484,9 @@ mod tests {
             .filter(|pixel| *pixel != background)
             .count();
         assert!((1_000..60_000).contains(&changed));
-        assert!(
-            pixels[..1280 * 500 * 4]
-                .chunks_exact(4)
-                .all(|pixel| pixel == background)
-        );
+        assert!(pixels[..1280 * 500 * 4]
+            .chunks_exact(4)
+            .all(|pixel| pixel == background));
     }
 
     #[test]
@@ -2516,16 +2520,12 @@ mod tests {
         );
         let pixels = read_image(&surface.image_snapshot());
         let background = &pixels[0..4];
-        assert!(
-            pixels[1_280 * 240 * 4..]
-                .chunks_exact(4)
-                .all(|pixel| pixel == background)
-        );
-        assert!(
-            pixels[1_280 * 28 * 4..1_280 * 146 * 4]
-                .chunks_exact(4)
-                .any(|pixel| pixel != background)
-        );
+        assert!(pixels[1_280 * 240 * 4..]
+            .chunks_exact(4)
+            .all(|pixel| pixel == background));
+        assert!(pixels[1_280 * 28 * 4..1_280 * 146 * 4]
+            .chunks_exact(4)
+            .any(|pixel| pixel != background));
 
         let long = "evidence ".repeat(100);
         let tail = prompt_tail(&long, "候補", "Ask a research question…");
@@ -2550,16 +2550,12 @@ mod tests {
         );
         let pixels = read_image(&surface.image_snapshot());
         let background = &pixels[0..4];
-        assert!(
-            pixels[1_280 * 28 * 4..1_280 * 170 * 4]
-                .chunks_exact(4)
-                .any(|pixel| pixel != background)
-        );
-        assert!(
-            pixels[1_280 * 240 * 4..]
-                .chunks_exact(4)
-                .all(|pixel| pixel == background)
-        );
+        assert!(pixels[1_280 * 28 * 4..1_280 * 170 * 4]
+            .chunks_exact(4)
+            .any(|pixel| pixel != background));
+        assert!(pixels[1_280 * 240 * 4..]
+            .chunks_exact(4)
+            .all(|pixel| pixel == background));
         assert_eq!(
             prompt_tail("", "", "Paste or type the Groq API key…"),
             "Paste or type the Groq API key…"

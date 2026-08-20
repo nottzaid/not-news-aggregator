@@ -1,5 +1,4 @@
 mod hermes_profile;
-mod interaction;
 mod release_check;
 mod settings;
 
@@ -16,7 +15,9 @@ use std::{
 };
 
 use fs2::FileExt;
-use interaction::{CanvasInteraction, CanvasSubject, InteractionEffect, InteractionFrame};
+use not_news_interaction::{
+    CanvasInteraction, CanvasSubject, InteractionEffect, InteractionFrame,
+};
 use not_news_agent::{
     AgentEvent, BridgeUpsert, ResearchHandle, ResearchLaunch, ResearchProcessEvent,
     ResearchTermination, ResolvedEnvironment, browse_is_available, build_research_prompt,

@@ -1,0 +1,15 @@
+[package]
+name = "not-news-interaction"
+version = "0.3.1"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+not-news-domain = { path = "../domain" }
+not-news-renderer = { path = "../renderer" }
+
+[dev-dependencies]
+indexmap.workspace = true
+
+[lints]
+workspace = true
